@@ -58,14 +58,19 @@ echo -n "Creating root partition..."
 sgdisk --new=2:0:+0 --typecode=2:0700 --change-name=2:ROOT "$selected_disk" || error_exit "Failed to create root partition."
 echo " done."
 
+# NVMe device names require a "p" before the partition number
+if [[ $selected_disk == *"nvme"* ]]; then
+    selected_disk=$selected_disk"p"
+fi
+
 # Format EFI partition
 echo -n "Formatting EFI partition..."
-mkfs.vfat -F 32 -n "BOOT" "/dev/${selected_disk}p1" || error_exit "Failed to format EFI partition."
+mkfs.vfat -F 32 -n "BOOT" "${selected_disk}1" || error_exit "Failed to format EFI partition."
 echo " done."
 
 # Format root partition
 echo -n "Formatting root partition..."
-mkfs.ext4 -L "ROOT" "/dev/${selected_disk}p2" || error_exit "Failed to format root partition."
+mkfs.ext4 -L "ROOT" "${selected_disk}2" || error_exit "Failed to format root partition."
 echo " done."
 
 echo -e "\nDisk setup completed successfully!"

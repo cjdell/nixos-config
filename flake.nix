@@ -26,5 +26,22 @@
           nixos-hardware.nixosModules.dell-precision-5520
         ];
       };
+    nixosConfigurations.haswellatx-nixos =
+      let
+        system = "x86_64-linux";
+      in
+      nixpkgs.lib.nixosSystem {
+        inherit system;
+        pkgs = import nixpkgs { inherit system; config = { allowUnfree = true; }; };
+        modules = [
+          ./common/desktop.nix
+          ./common/nfs.nix
+          ./common/system.nix
+          ./users/cjdell.nix
+          ./machines/haswellatx
+          ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
+          
+        ];
+      };
   };
 }
