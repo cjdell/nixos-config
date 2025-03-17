@@ -1,7 +1,3 @@
-# Edit this configuration file to define what should be installed on
-# your system.  Help is available in the configuration.nix(5) man page
-# and in the NixOS manual (accessible by running ‘nixos-help’).
-
 { config, pkgs, ... }:
 
 {
@@ -67,44 +63,28 @@
   # List packages installed in system profile. To search, run:
   # $ nix search wget
   environment.systemPackages = with pkgs; [
-    dmidecode
-    git
-    nmap
-    inetutils
-    nixpkgs-fmt
-    wget
-    tmux
-    screen
-    efibootmgr
-    unzip
-    direnv
-    x264
-    pciutils
-    usbutils
-    lsof
-    speedtest-rs
-    intel-gpu-tools
-    amdgpu_top
-    tio
-    dig
+    # GUI Things
     vscode
     bottles
     lutris
-    vulkan-tools
     wineWowPackages.waylandFull
     appimage-run
-    lm_sensors
     geekbench
     google-chrome
     kdePackages.kate
+
+    # GPU Related Stuff
+    lact
     furmark
-    glxinfo
   ];
 
   # List services that you want to enable:
 
   # Enable the OpenSSH daemon.
   services.openssh.enable = true;
+  # services.openssh.extraConfig = ''
+  #   AllowTcpForwarding yes
+  # '';
 
   # This value determines the NixOS release from which the default
   # settings for stateful data, like file locations and database versions

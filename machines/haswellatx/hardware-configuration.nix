@@ -12,7 +12,7 @@
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
 
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  # boot.kernelPackages = pkgs.linuxPackages_latest;
 
   boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" "usb_storage" "sd_mod" ];
   boot.initrd.kernelModules = [ "amdgpu" ];
@@ -24,6 +24,8 @@
     "radeon.cik_support=0"
     "amdgpu.cik_support=1"
   ];
+
+  # hardware.amdgpu.opencl.enable = true;
 
   hardware.graphics = 
   let

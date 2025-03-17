@@ -35,6 +35,7 @@
         pkgs = import nixpkgs { inherit system; config = { allowUnfree = true; }; };
         modules = [
           ./common/desktop.nix
+          ./common/folding-at-home.nix
           ./common/nfs.nix
           ./common/sunshine.nix
           ./common/system.nix

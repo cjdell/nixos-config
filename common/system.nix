@@ -21,4 +21,35 @@
 
   # Configure console keymap
   console.keyMap = "uk";
+
+  environment.systemPackages = with pkgs; [
+    dmidecode
+    git
+    nmap
+    inetutils
+    nixpkgs-fmt
+    wget
+    tmux
+    screen
+    efibootmgr
+    unzip
+    direnv
+    x264
+    pciutils
+    usbutils
+    lsof
+    speedtest-rs
+    tio
+    dig
+    lm_sensors
+    stress-ng
+    iotop
+
+    # GPU Related Stuff
+    intel-gpu-tools
+    amdgpu_top
+    glxinfo
+    clinfo
+    vulkan-tools
+  ];
 }
