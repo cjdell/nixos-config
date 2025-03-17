@@ -84,6 +84,7 @@
     lsof
     speedtest-rs
     intel-gpu-tools
+    amdgpu_top
     tio
     dig
     vscode
@@ -96,6 +97,8 @@
     geekbench
     google-chrome
     kdePackages.kate
+    furmark
+    glxinfo
   ];
 
   # List services that you want to enable:

@@ -36,6 +36,7 @@
         modules = [
           ./common/desktop.nix
           ./common/nfs.nix
+          ./common/sunshine.nix
           ./common/system.nix
           ./users/cjdell.nix
           ./machines/haswellatx
