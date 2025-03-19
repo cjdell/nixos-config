@@ -1,8 +1,6 @@
 { config, pkgs, ... }:
 
 {
-  nix.settings.experimental-features = [ "nix-command" "flakes" ];
-
   boot.binfmt.registrations.appimage = {
     wrapInterpreterInShell = false;
     interpreter = "${pkgs.appimage-run}/bin/appimage-run";
@@ -41,12 +39,8 @@
     #jack.enable = true;
   };
 
-  security.sudo.wheelNeedsPassword = false;
-
   # Install firefox.
   programs.firefox.enable = true;
-
-  programs.steam.enable = true;
 
   programs.virt-manager.enable = true;
 
@@ -65,9 +59,6 @@
   environment.systemPackages = with pkgs; [
     # GUI Things
     vscode
-    bottles
-    lutris
-    wineWowPackages.waylandFull
     appimage-run
     geekbench
     google-chrome

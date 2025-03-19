@@ -1,9 +1,5 @@
 # NixOS Config
 
-## Scripts
-
-    scripts/create-partitions.sh
-
 ## Install
 
     git clone https://github.com/cjdell/nixos-config.git

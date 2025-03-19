@@ -1,6 +1,10 @@
 { config, pkgs, ... }:
 
-{ 
+{
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  security.sudo.wheelNeedsPassword = false;
+
   # Set your time zone.
   time.timeZone = "Europe/London";
 
@@ -44,6 +48,7 @@
     lm_sensors
     stress-ng
     iotop
+    p7zip
 
     # GPU Related Stuff
     intel-gpu-tools
