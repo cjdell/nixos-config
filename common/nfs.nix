@@ -1,8 +1,9 @@
 { config, pkgs, ... }:
 
-{ 
-  fileSystems."/ds-public" = 
-    { device = "192.168.49.21:/sas-16tb/ds-public";
+{
+  fileSystems."/ds-public" =
+    {
+      device = "192.168.49.21:/sas-16tb/ds-public";
       fsType = "nfs4"; # Use NFSv4 for better performance
       options = [
         "rw"

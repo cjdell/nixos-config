@@ -52,10 +52,12 @@
 
     # GPU Related Stuff
     intel-gpu-tools
+    radeontop
     amdgpu_top
     glxinfo
     clinfo
     vulkan-tools
+    vdpauinfo
   ];
 
   # This value determines the NixOS release from which the default

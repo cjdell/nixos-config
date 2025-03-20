@@ -51,7 +51,8 @@
           ./machines/haswellatx
           ./users/cjdell/permissions.nix
           ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
-          home-manager.nixosModules.home-manager {
+          home-manager.nixosModules.home-manager
+          {
             home-manager.useGlobalPkgs = true;
             home-manager.useUserPackages = true;
             home-manager.users.cjdell = import ./users/cjdell/home.nix;
@@ -76,7 +77,8 @@
           ./machines/kabylakeitx
           ./users/cjdell/permissions.nix
           ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
-          home-manager.nixosModules.home-manager {
+          home-manager.nixosModules.home-manager
+          {
             home-manager.useGlobalPkgs = true;
             home-manager.useUserPackages = true;
             home-manager.users.cjdell = import ./users/cjdell/home.nix;

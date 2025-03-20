@@ -18,7 +18,7 @@
   #   ${pkgs.wget}/bin/wget -O /home/user/Applications/RetroArch-Linux-x86_64.AppImage  https://github.com/hizzlekizzle/RetroArch-AppImage/releases/download/Linux_LTS_Nightlies/RetroArch-Linux-x86_64-Nightly.AppImage
   #   ${pkgs.wget}/bin/wget -O /home/user/Applications/RetroArch.AppImage.home.7z       https://github.com/hizzlekizzle/RetroArch-AppImage/releases/download/Nightlies/RetroArch-Linux-x86_64-Nightly.AppImage.home.7z
   #   ${pkgs.wget}/bin/wget -O /home/user/Applications/ES-DE.AppImage                   https://gitlab.com/es-de/emulationstation-de/-/package_files/164503027/download
-  
+
   #   mkdir -p /home/user/tmp
   #   mkdir -p /home/user/.config
   #   ${pkgs.p7zip}/bin/7za x -y /home/user/Applications/RetroArch.AppImage.home.7z -o/home/user/tmp

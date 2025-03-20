@@ -5,7 +5,8 @@
 
 {
   imports =
-    [ (modulesPath + "/installer/scan/not-detected.nix")
+    [
+      (modulesPath + "/installer/scan/not-detected.nix")
     ];
 
   # Bootloader.
@@ -29,20 +30,20 @@
   };
 
   fileSystems."/" =
-    { 
+    {
       device = "/dev/disk/by-uuid/3cce36d8-abd8-4b4b-927f-1f06aeae8630";
       fsType = "ext4";
     };
 
   fileSystems."/boot" =
-    { 
+    {
       device = "/dev/disk/by-uuid/B62E-567C";
       fsType = "vfat";
       options = [ "fmask=0077" "dmask=0077" ];
     };
 
   swapDevices =
-    [ 
+    [
       { device = "/dev/disk/by-uuid/6f808fe4-0c13-4cf2-85d1-1d5cec20ca82"; }
     ];
 

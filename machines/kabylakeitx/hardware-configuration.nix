@@ -5,7 +5,8 @@
 
 {
   imports =
-    [ (modulesPath + "/installer/scan/not-detected.nix")
+    [
+      (modulesPath + "/installer/scan/not-detected.nix")
     ];
 
   # Bootloader.
@@ -37,7 +38,7 @@
   # environment.sessionVariables = { LIBVA_DRIVER_NAME = "iHD"; }; # Force intel-media-driver
 
   # Load nvidia driver for Xorg and Wayland
-  services.xserver.videoDrivers = ["nvidia"];
+  services.xserver.videoDrivers = [ "nvidia" ];
 
   hardware.nvidia = {
     # Modesetting is required.
@@ -62,7 +63,7 @@
     open = true;
 
     # Enable the Nvidia settings menu,
-	  # accessible via `nvidia-settings`.
+    # accessible via `nvidia-settings`.
     nvidiaSettings = true;
 
     # Optionally, you may need to select the appropriate driver version for your specific GPU.
@@ -72,21 +73,21 @@
   hardware.nvidia-container-toolkit.enable = true;
 
   fileSystems."/" =
-    { 
+    {
       device = "/dev/disk/by-label/ROOT";
       fsType = "ext4";
     };
 
   fileSystems."/boot" =
-    { 
+    {
       device = "/dev/disk/by-label/BOOT";
       fsType = "vfat";
       options = [ "fmask=0077" "dmask=0077" ];
     };
 
   swapDevices =
-    [ 
-  #    { device = "/dev/disk/by-uuid/6f808fe4-0c13-4cf2-85d1-1d5cec20ca82"; }
+    [
+      #    { device = "/dev/disk/by-uuid/6f808fe4-0c13-4cf2-85d1-1d5cec20ca82"; }
     ];
 
   # Enables DHCP on each ethernet and wireless interface. In case of scripted networking

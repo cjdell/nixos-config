@@ -1,4 +1,4 @@
-#!/run/current-system/sw/bin/bash
+#!/usr/bin/env bash
 
 mount /dev/disk/by-label/ROOT /mnt
 mkdir -p /mnt/boot

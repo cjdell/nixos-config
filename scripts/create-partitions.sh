@@ -1,4 +1,4 @@
-#!/run/current-system/sw/bin/bash
+#!/usr/bin/env bash
 
 # Trap for SIGINT (Ctrl+C)
 trap 'echo -e "\nScript terminated by user." && exit 1' SIGINT
