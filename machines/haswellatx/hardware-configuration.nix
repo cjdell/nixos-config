@@ -11,6 +11,9 @@
   # Bootloader.
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+  # boot.loader.grub.enable = true;
+  # boot.loader.grub.device = "/dev/sda";
+  # boot.loader.grub.useOSProber = true;
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
 
@@ -45,7 +48,7 @@
 
   fileSystems."/" =
     { 
-      device = "/dev/disk/by-label/ROOT";
+      device = "/dev/disk/by-uuid/e5ca02f2-0233-4ce3-bb0e-e8a4b44215b3";
       fsType = "ext4";
     };
 
@@ -58,7 +61,7 @@
 
   swapDevices =
     [ 
-  #    { device = "/dev/disk/by-uuid/6f808fe4-0c13-4cf2-85d1-1d5cec20ca82"; }
+     { device = "/dev/disk/by-uuid/b3fed38e-a463-4142-88e6-b5996c464233"; }
     ];
 
   # Enables DHCP on each ethernet and wireless interface. In case of scripted networking

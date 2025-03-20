@@ -38,13 +38,13 @@
           ./common/desktop.nix
           ./common/folding-at-home.nix
           ./common/nfs.nix
+          ./common/nosleep.nix
           ./common/sunshine.nix
           ./common/system.nix
           ./common/wine.nix
           ./users/cjdell.nix
           ./machines/haswellatx
           ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
-
         ];
       };
     nixosConfigurations.arcadebox-101 =
