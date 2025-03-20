@@ -1,17 +1,22 @@
-# sudo nixos-rebuild boot --impure --flake . --max-jobs 1
+# sudo nixos-rebuild boot   --impure --flake . --max-jobs 1
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-24.11";
-    nixos-hardware.url = "github:cjdell/nixos-hardware/master";
-    # nixos-hardware.url = "git+file:///home/cjdell/Projects/nixos-hardware";
+    nixos-hardware = {
+      # url = "git+file:///home/cjdell/Projects/nixos-hardware";
+      url = "github:cjdell/nixos-hardware/master";
+    };
+    home-manager = {
+      url = "github:nix-community/home-manager/release-24.11";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, nixos-hardware }@attrs: {
+  outputs = { self, nixpkgs, nixos-hardware, home-manager }@attrs: {
     nixosConfigurations.precision-nixos =
       let
         system = "x86_64-linux";
-        # nixos-hardware = (builtins.getFlake "/home/cjdell/Projects/nixos-hardware");
       in
       nixpkgs.lib.nixosSystem {
         inherit system;
@@ -21,7 +26,7 @@
           ./common/nfs.nix
           ./common/system.nix
           ./common/wine.nix
-          ./users/cjdell.nix
+          ./users/cjdell/permissions.nix
           ./machines/precision
           ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
           nixos-hardware.nixosModules.dell-precision-5520
@@ -42,9 +47,15 @@
           ./common/sunshine.nix
           ./common/system.nix
           ./common/wine.nix
-          ./users/cjdell.nix
+          ./users/cjdell/permissions.nix
           ./machines/haswellatx
           ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
+          home-manager.nixosModules.home-manager
+          {
+            home-manager.useGlobalPkgs = true;
+            home-manager.useUserPackages = true;
+            home-manager.users.cjdell = import ./users/cjdell/home.nix;
+          }
         ];
       };
     nixosConfigurations.arcadebox-101 =
@@ -63,7 +74,6 @@
           ./users/user.nix
           ./machines/arcadebox-101
           ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
-
         ];
       };
   };
