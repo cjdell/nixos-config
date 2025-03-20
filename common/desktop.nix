@@ -54,6 +54,8 @@
 
   environment.sessionVariables.NIXOS_OZONE_WL = "1";
 
+  environment.sessionVariables.POWERDEVIL_NO_DDCUTIL = "1";
+
   # List packages installed in system profile. To search, run:
   # $ nix search wget
   environment.systemPackages = with pkgs; [
