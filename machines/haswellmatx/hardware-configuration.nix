@@ -11,7 +11,7 @@
   boot.loader.grub.device = "/dev/sda";
   boot.loader.grub.useOSProber = true;
 
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  # boot.kernelPackages = pkgs.linuxPackages_latest;
 
   boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" "usb_storage" "sd_mod" ];
   boot.initrd.kernelModules = [ "amdgpu" ];
@@ -22,7 +22,13 @@
     "mitigations=off"
   ];
 
-  services.xserver.videoDrivers = [ "amdgpu" ];
+  # hardware.amdgpu.opencl.enable = true;
+
+  # services.xserver.videoDrivers = [ "amdgpu" ];
+
+  environment.variables = {
+    ROC_ENABLE_PRE_VEGA = "1";
+  };
 
   hardware.graphics =
     let
@@ -35,6 +41,8 @@
         pkgs.intel-media-driver # LIBVA_DRIVER_NAME=iHD
         intel-vaapi-driver # LIBVA_DRIVER_NAME=i965 (older but works better for Firefox/Chromium)
         pkgs.libvdpau-va-gl
+        # pkgs.rocmPackages.clr.icd
+        pkgs.mesa.opencl
       ];
     };
 
