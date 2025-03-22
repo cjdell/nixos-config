@@ -65,6 +65,7 @@
     geekbench
     google-chrome
     kdePackages.kate
+    bottles
 
     # GPU Related Stuff
     lact
