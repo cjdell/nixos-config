@@ -12,9 +12,6 @@
   # Bootloader.
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
-  # boot.loader.grub.enable = true;
-  # boot.loader.grub.device = "/dev/sda";
-  # boot.loader.grub.useOSProber = true;
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
 
@@ -29,30 +26,11 @@
     "amdgpu.cik_support=1"
   ];
 
-  hardware.amdgpu.opencl.enable = true;
-
   services.xserver.videoDrivers = [ "amdgpu" ];
 
   hardware.graphics =
     let
       intel-vaapi-driver = pkgs.intel-vaapi-driver.override { enableHybridCodec = true; };
-      # fn = oa: {
-      #   nativeBuildInputs = oa.nativeBuildInputs ++ [ pkgs.glslang ];
-      #   mesonFlags = oa.mesonFlags ++ [ "-Dvulkan-layers=device-select,overlay" ];
-      #   postInstall = oa.postInstall + ''
-      #     mv $out/lib/libVkLayer* $drivers/lib
-
-      #     #Device Select layer
-      #     layer=VkLayer_MESA_device_select
-      #     substituteInPlace $drivers/share/vulkan/implicit_layer.d/''${layer}.json \
-      #       --replace "lib''${layer}" "$drivers/lib/lib''${layer}"
-
-      #     #Overlay layer
-      #     layer=VkLayer_MESA_overlay
-      #     substituteInPlace $drivers/share/vulkan/explicit_layer.d/''${layer}.json \
-      #       --replace "lib''${layer}" "$drivers/lib/lib''${layer}"
-      #   '';
-      # };
     in
     {
       enable = true;
@@ -62,10 +40,8 @@
         intel-vaapi-driver # LIBVA_DRIVER_NAME=i965 (older but works better for Firefox/Chromium)
         pkgs.libvdpau-va-gl
         # pkgs.ocl-icd
-        # pkgs.mesa.opencl
-        # (pkgs.mesa.overrideAttrs fn).drivers
+        pkgs.mesa.opencl
       ];
-      # package32 = (pkgsi686Linux.mesa.overrideAttrs fn).drivers;
     };
 
   # environment.sessionVariables = { LIBVA_DRIVER_NAME = "iHD"; }; # Force intel-media-driver
