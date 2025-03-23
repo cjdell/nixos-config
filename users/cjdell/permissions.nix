@@ -38,7 +38,7 @@
     echo "StartupNotify=true"                 >>  /home/cjdell/.config/autostart/xhost-config.desktop
     echo "Terminal=false"                     >>  /home/cjdell/.config/autostart/xhost-config.desktop
     echo "TerminalOptions="                   >>  /home/cjdell/.config/autostart/xhost-config.desktop
-    echo "Type=Application                    >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Type=Application"                   >>  /home/cjdell/.config/autostart/xhost-config.desktop
     echo "X-KDE-SubstituteUID=false"          >>  /home/cjdell/.config/autostart/xhost-config.desktop
     echo "X-KDE-Username="                    >>  /home/cjdell/.config/autostart/xhost-config.desktop
 
