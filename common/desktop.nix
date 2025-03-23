@@ -67,6 +67,7 @@
     kdePackages.kate
     bottles
     xorg.xhost
+    notify-desktop
 
     # GPU Related Stuff
     lact
