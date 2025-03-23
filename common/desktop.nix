@@ -66,6 +66,7 @@
     google-chrome
     kdePackages.kate
     bottles
+    xorg.xhost
 
     # GPU Related Stuff
     lact

@@ -15,4 +15,34 @@
   services.displayManager.autoLogin.user = "cjdell";
 
   users.groups.libvirtd.members = [ "cjdell" ];
+
+  # Allow launching of remote X11 apps on this display
+  system.activationScripts.xhostConfig = ''
+    mkdir -p /home/cjdell/.config/autostart
+    echo "#!/usr/bin/env bash"                >   /home/cjdell/xhost-config.sh
+    echo "${pkgs.xorg.xhost}/bin/xhost +"     >>  /home/cjdell/xhost-config.sh
+    chmod +x                                      /home/cjdell/xhost-config.sh
+    chown cjdell:users                            /home/cjdell/xhost-config.sh
+
+    echo "[Desktop Entry]"                    >   /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Comment[en_GB]="                    >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Comment="                           >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Exec=/home/cjdell/xhost-config"     >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "GenericName[en_GB]="                >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "GenericName="                       >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "MimeType="                          >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Name[en_GB]=xhost-config"           >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Name=xhost-config"                  >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "NoDisplay=false"                    >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Path="                              >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "StartupNotify=true"                 >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Terminal=false"                     >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "TerminalOptions="                   >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "Type=Application                    >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "X-KDE-SubstituteUID=false"          >>  /home/cjdell/.config/autostart/xhost-config.desktop
+    echo "X-KDE-Username="                    >>  /home/cjdell/.config/autostart/xhost-config.desktop
+
+    chmod 600                                     /home/cjdell/.config/autostart/xhost-config.desktop
+    chown -R cjdell:users                         /home/cjdell/.config/autostart
+  '';
 }
