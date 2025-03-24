@@ -15,6 +15,33 @@
 
   outputs = { self, nixpkgs, nixos-hardware, home-manager }@attrs: {
     nixosConfigurations = {
+      zen3-nixos =
+        let
+          system = "x86_64-linux";
+        in
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          pkgs = import nixpkgs { inherit system; config = { allowUnfree = true; }; };
+          modules = [
+            ./common/desktop.nix
+            ./common/folding-at-home.nix
+            ./common/nfs.nix
+            ./common/nosleep.nix
+            ./common/sunshine.nix
+            ./common/system.nix
+            ./common/wine.nix
+            ./machines/zen3
+            ./users/cjdell/permissions.nix
+            ({ config, pkgs, options, ... }: { nix.registry.nixpkgs.flake = nixpkgs; }) # For "nix shell"
+            home-manager.nixosModules.home-manager
+            {
+              home-manager.useGlobalPkgs = true;
+              home-manager.useUserPackages = true;
+              home-manager.users.cjdell = import ./users/cjdell/home.nix;
+            }
+          ];
+        };
+
       precision-nixos =
         let
           system = "x86_64-linux";

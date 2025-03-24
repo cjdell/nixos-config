@@ -3,6 +3,7 @@
 {
   # Define a user account. Don't forget to set a password with ‘passwd’.
   users.users.cjdell = {
+    uid = 1000;
     isNormalUser = true;
     description = "Chris Dell";
     extraGroups = [ "networkmanager" "wheel" ];
@@ -15,6 +16,11 @@
   services.displayManager.autoLogin.user = "cjdell";
 
   users.groups.libvirtd.members = [ "cjdell" ];
+
+  system.activationScripts.homeDir = ''
+    usermod -u 1000 cjdell
+    chown -R 1000 /home/cjdell
+  '';
 
   # Allow launching of remote X11 apps on this display
   system.activationScripts.xhostConfig = ''
