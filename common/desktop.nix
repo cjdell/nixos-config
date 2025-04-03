@@ -12,7 +12,6 @@
 
   # Enable networking
   networking.networkmanager.enable = true;
-  networking.firewall.enable = false;
 
   # Enable the KDE Plasma Desktop Environment.
   services.displayManager.sddm.enable = true;

@@ -2,14 +2,14 @@
 
 {
   services.boinc.enable = true;
-  services.boinc.extraEnvPackages = with pkgs; [ 
-    libglvnd 
-    brotli 
+  services.boinc.extraEnvPackages = with pkgs; [
+    libglvnd
+    brotli
     ocl-icd
     virtualbox
   ];
 
-  virtualisation.virtualbox.host =  {
+  virtualisation.virtualbox.host = {
     enable = true;
   };
 

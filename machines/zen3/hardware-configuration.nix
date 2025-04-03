@@ -5,7 +5,8 @@
 
 {
   imports =
-    [ (modulesPath + "/installer/scan/not-detected.nix")
+    [
+      (modulesPath + "/installer/scan/not-detected.nix")
     ];
 
   # Bootloader.
@@ -23,7 +24,7 @@
   boot.kernelParams = [
     "mitigations=off"
   ];
-  
+
   hardware.graphics = {
     enable = true;
     enable32Bit = true;
@@ -33,21 +34,24 @@
   };
 
   fileSystems."/" =
-    { device = "/dev/disk/by-uuid/4424123b-847e-4379-b505-520c85e522dd";
+    {
+      device = "/dev/disk/by-uuid/4424123b-847e-4379-b505-520c85e522dd";
       fsType = "ext4";
     };
 
   fileSystems."/boot" =
-    { device = "/dev/disk/by-uuid/F281-1075";
+    {
+      device = "/dev/disk/by-uuid/F281-1075";
       fsType = "vfat";
       options = [ "fmask=0022" "dmask=0022" ];
     };
 
   fileSystems."/home" =
-    { device = "/dev/disk/by-uuid/a4284946-7e9b-4bcf-a94a-fa3e5a19e283";
+    {
+      device = "/dev/disk/by-uuid/a4284946-7e9b-4bcf-a94a-fa3e5a19e283";
       fsType = "ext4";
     };
-    
+
   # fileSystems."/ds-public" = 
   #   { device = "192.168.49.11:/sas-16tb/ds-public";
   #     fsType = "nfs";

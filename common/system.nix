@@ -3,6 +3,8 @@
 {
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+  networking.firewall.enable = false;
+
   security.sudo.wheelNeedsPassword = false;
 
   # Set your time zone.
@@ -49,6 +51,7 @@
     stress-ng
     iotop
     p7zip
+    ethtool
 
     # GPU Related Stuff
     intel-gpu-tools
