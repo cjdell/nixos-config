@@ -18,6 +18,7 @@
         "acdirmax=120" # Increase dir attribute cache time
         "noatime"
         "nodiratime"
+        "x-systemd.after=network-online.target"
       ];
     };
 }
