@@ -57,6 +57,7 @@
     stress-ng
     iotop
     p7zip
+    rar
     ethtool
 
     # GPU Related Stuff

@@ -2,7 +2,8 @@
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-24.11";
+    nixpkgs.url           = "github:nixos/nixpkgs/nixos-24.11";
+    nixpkgs-unstable.url  = "github:nixos/nixpkgs/nixos-unstable";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
@@ -18,11 +19,12 @@
     };
   };
 
-  outputs = { self, nixpkgs, nixos-hardware, home-manager, plasma-manager }@attrs: {
+  outputs = { self, nixpkgs, nixpkgs-unstable, nixos-hardware, home-manager, plasma-manager }@attrs: {
     nixosConfigurations =
       let
-        system = "x86_64-linux";
-        pkgs = import nixpkgs { inherit system; config = { allowUnfree = true; }; };
+        system        = "x86_64-linux";
+        pkgs          = import nixpkgs { inherit system; config = { allowUnfree = true; }; };
+        pkgs-unstable = import nixpkgs-unstable { inherit system; config = { allowUnfree = true; }; };
         home-manager-prefs = {
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
@@ -173,6 +175,7 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
+              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
             ];
           };
 
