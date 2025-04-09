@@ -72,6 +72,10 @@
 
   hardware.nvidia-container-toolkit.enable = true;
 
+  environment.systemPackages = [
+    pkgs.cudatoolkit
+  ];
+
   fileSystems."/" =
     {
       device = "/dev/disk/by-label/ROOT";
