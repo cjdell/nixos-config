@@ -33,5 +33,14 @@
         powerProfile = "performance";
       };
     };
+
+    session = {
+      general = {
+        askForConfirmationOnLogout = false;
+      };
+      sessionRestore = {
+        restoreOpenApplicationsOnLogin = "startWithEmptySession";
+      };
+    };
   };
 }
