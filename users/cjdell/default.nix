@@ -1,6 +1,8 @@
 { config, pkgs, ... }:
 
 {
+  home-manager.users.cjdell = import ./home.nix;
+
   # Define a user account. Don't forget to set a password with ‘passwd’.
   users.users.cjdell = {
     uid = 1000;

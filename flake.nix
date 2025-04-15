@@ -28,7 +28,6 @@
         home-manager-prefs = {
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
-          home-manager.users.cjdell = import ./users/cjdell/home.nix;
           home-manager.sharedModules = [ plasma-manager.homeManagerModules.plasma-manager ];
         };
       in
@@ -45,7 +44,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./machines/zen3
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -60,7 +59,7 @@
               ./common/nfs.nix
               ./common/system.nix
               ./common/wine.nix
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               ./machines/precision
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               nixos-hardware.nixosModules.dell-precision-5520
@@ -79,7 +78,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./machines/haswellatx
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -99,7 +98,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./machines/haswellmatx
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -117,7 +116,7 @@
               ./common/sunshine.nix
               ./common/system.nix
               ./machines/kabylakeitx
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -135,7 +134,7 @@
               ./common/sunshine.nix
               ./common/system.nix
               ./machines/coffeelakelenovo
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -153,7 +152,7 @@
               ./common/sunshine.nix
               ./common/system.nix
               ./machines/ryzen5hp
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -171,7 +170,7 @@
               ./common/sunshine.nix
               ./common/system.nix
               ./machines/rocketlakelenovo
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
@@ -185,12 +184,11 @@
             modules = [
               ./common/desktop.nix
               ./common/folding-at-home.nix
-              # ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
               ./common/system.nix
               ./machines/n100nas
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
