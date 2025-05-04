@@ -40,6 +40,7 @@
               ./common/folding-at-home.nix
               ./common/nfs.nix
               ./common/nosleep.nix
+              ./common/podman.nix
               ./common/sunshine.nix
               ./common/system.nix
               ./common/wine.nix

@@ -23,6 +23,10 @@
 
   boot.kernelParams = [
     "mitigations=off"
+    "amd_iommu=on"
+    "amdgpu.gttsize=57344"
+    "ttm.pages_limit=13668850"
+    "ttm.page_pool_size=13668850"
   ];
 
   hardware.graphics = {

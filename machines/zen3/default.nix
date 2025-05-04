@@ -2,6 +2,7 @@
 
 {
   imports = [
+    ./ai.nix
     ./hardware-configuration.nix
   ];
 
