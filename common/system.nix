@@ -39,7 +39,7 @@
     git
     nmap
     inetutils
-    nixpkgs-fmt
+    nixfmt-rfc-style
     wget
     tmux
     screen

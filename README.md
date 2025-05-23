@@ -6,6 +6,8 @@
 
     cd nixos-config
 
+    sudo -s
+
     scripts/create-partitions.sh
     scripts/mount-partitions.sh
 
