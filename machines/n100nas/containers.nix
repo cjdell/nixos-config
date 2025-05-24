@@ -25,11 +25,11 @@ in
       hostname = "unifi";
       image = "jacobalberty/unifi";
       autoStart = true;
-      # ports = [
+      ports = [
       #   "8081:8081"
-      #   "8443:8443"
-      #   "3478:3478/udp"
-      # ];
+        "8443:8443"
+        "3478:3478/udp"
+      ];
       volumes = [
         "/srv/unifi:/unifi"
       ];
@@ -37,7 +37,7 @@ in
         TZ = "Europe/London";
       };
       extraOptions = [
-        "--network=host"
+        # "--network=host"
         "--privileged"
       ];
     };
