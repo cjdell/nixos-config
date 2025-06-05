@@ -2,14 +2,14 @@
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
-    nixpkgs.url           = "github:nixos/nixpkgs/nixos-24.11";
+    nixpkgs.url           = "github:nixos/nixpkgs/nixos-25.05";
     nixpkgs-unstable.url  = "github:nixos/nixpkgs/nixos-unstable";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
     };
     home-manager = {
-      url = "github:nix-community/home-manager/release-24.11";
+      url = "github:nix-community/home-manager/release-25.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     plasma-manager = {
@@ -144,6 +144,24 @@
             ];
           };
 
+        coffeelakedell-nixos =
+          nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              ./common/folding-at-home.nix
+              ./common/nfs.nix
+              ./common/nosleep.nix
+              ./common/sunshine.nix
+              ./common/system.nix
+              ./machines/coffeelakedell
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+            ];
+          };
+          
         coffeelakelenovo-nixos =
           nixpkgs.lib.nixosSystem {
             inherit system pkgs;
