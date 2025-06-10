@@ -217,6 +217,23 @@
             ];
           };
 
+        rocketlakelatitude-nixos =
+          nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              # ./common/nfs.nix
+              ./common/podman.nix
+              ./common/system.nix
+              ./machines/rocketlakelatitude
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
+            ];
+          };
+
         n100nas =
           nixpkgs.lib.nixosSystem {
             inherit system pkgs;

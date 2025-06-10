@@ -57,6 +57,7 @@
     stress-ng
     iotop
     p7zip
+    _7zz
     rar
     ethtool
 

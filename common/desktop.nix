@@ -27,7 +27,7 @@
   };
 
   # Enable sound with pipewire.
-  hardware.pulseaudio.enable = false;
+  services.pulseaudio.enable = false;
   security.rtkit.enable = true;
   services.pipewire = {
     enable = true;
@@ -72,6 +72,7 @@
     # GPU Related Stuff
     lact
     furmark
+    mesa-demos
   ];
 
   systemd.services.lact = {
