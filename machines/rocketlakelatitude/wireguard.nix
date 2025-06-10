@@ -25,7 +25,7 @@
           # Forward all the traffic via VPN.
           # allowedIPs = [ "0.0.0.0/0" ];
           # Or forward only particular subnets
-          allowedIPs = [ "10.47.0.0/16" "10.3.0.0/16" "192.168.49.0/24" "192.168.35.0/24" ];
+          allowedIPs = [ "10.47.0.0/16" "10.3.0.0/16" "192.168.35.0/24" ];
 
           # Set this to the server IP and port.
           endpoint = "ovh-nix.chrisdell.info:51820"; # ToDo: route to endpoint not automatically configured https://wiki.archlinux.org/index.php/WireGuard#Loop_routing https://discourse.nixos.org/t/solved-minimal-firewall-setup-for-wireguard-client/7577
