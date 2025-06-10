@@ -152,7 +152,7 @@
               ./common/folding-at-home.nix
               ./common/nfs.nix
               ./common/nosleep.nix
-              ./common/sunshine.nix
+              #./common/sunshine.nix
               ./common/system.nix
               ./machines/coffeelakedell
               ./users/cjdell
