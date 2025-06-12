@@ -68,6 +68,7 @@
     xorg.xhost
     notify-desktop
     ddcutil
+    imsprog
 
     # GPU Related Stuff
     lact

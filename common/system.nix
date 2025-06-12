@@ -60,6 +60,8 @@
     _7zz
     rar
     ethtool
+    flashrom
+    ch341eeprom
 
     # GPU Related Stuff
     intel-gpu-tools
