@@ -40,6 +40,8 @@
     nmap
     inetutils
     nixfmt-rfc-style
+    nil
+    nixd
     wget
     tmux
     screen

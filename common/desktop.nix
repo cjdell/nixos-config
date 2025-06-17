@@ -69,6 +69,7 @@
     notify-desktop
     ddcutil
     imsprog
+    zed-editor
 
     # GPU Related Stuff
     lact
