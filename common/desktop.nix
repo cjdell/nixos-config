@@ -70,6 +70,7 @@
     ddcutil
     imsprog
     zed-editor
+    moonlight-qt
 
     # GPU Related Stuff
     lact
