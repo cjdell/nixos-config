@@ -2,8 +2,8 @@
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
-    nixpkgs.url           = "github:nixos/nixpkgs/nixos-25.05";
-    nixpkgs-unstable.url  = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
@@ -19,21 +19,42 @@
     };
   };
 
-  outputs = { self, nixpkgs, nixpkgs-unstable, nixos-hardware, home-manager, plasma-manager }@attrs: {
-    nixosConfigurations =
-      let
-        system        = "x86_64-linux";
-        pkgs          = import nixpkgs { inherit system; config = { allowUnfree = true; }; };
-        pkgs-unstable = import nixpkgs-unstable { inherit system; config = { allowUnfree = true; }; };
-        home-manager-prefs = {
-          home-manager.useGlobalPkgs = true;
-          home-manager.useUserPackages = true;
-          home-manager.sharedModules = [ plasma-manager.homeManagerModules.plasma-manager ];
-        };
-      in
-      {
-        zen3-nixos =
-          nixpkgs.lib.nixosSystem {
+  outputs =
+    {
+      self,
+      nixpkgs,
+      nixpkgs-unstable,
+      nixos-hardware,
+      home-manager,
+      plasma-manager,
+    }@attrs:
+    {
+      nixosConfigurations =
+        let
+          system = "x86_64-linux";
+          pkgs = import nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              packageOverrides = pkgs: {
+                fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
+              };
+            };
+          };
+          pkgs-unstable = import nixpkgs-unstable {
+            inherit system;
+            config = {
+              allowUnfree = true;
+            };
+          };
+          home-manager-prefs = {
+            home-manager.useGlobalPkgs = true;
+            home-manager.useUserPackages = true;
+            home-manager.sharedModules = [ plasma-manager.homeManagerModules.plasma-manager ];
+          };
+        in
+        {
+          zen3-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -52,8 +73,7 @@
             ];
           };
 
-        precision-nixos =
-          nixpkgs.lib.nixosSystem {
+          precision-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -67,8 +87,7 @@
             ];
           };
 
-        haswellatx-nixos =
-          nixpkgs.lib.nixosSystem {
+          haswellatx-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -86,8 +105,7 @@
             ];
           };
 
-        haswelldell-nixos =
-          nixpkgs.lib.nixosSystem {
+          haswelldell-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -105,9 +123,7 @@
             ];
           };
 
-
-        haswellmatx-nixos =
-          nixpkgs.lib.nixosSystem {
+          haswellmatx-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -126,8 +142,7 @@
             ];
           };
 
-        kabylakeitx-nixos =
-          nixpkgs.lib.nixosSystem {
+          kabylakeitx-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -144,8 +159,7 @@
             ];
           };
 
-        coffeelakedell-nixos =
-          nixpkgs.lib.nixosSystem {
+          coffeelakedell-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -161,9 +175,8 @@
               home-manager-prefs
             ];
           };
-          
-        coffeelakelenovo-nixos =
-          nixpkgs.lib.nixosSystem {
+
+          coffeelakelenovo-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -180,8 +193,7 @@
             ];
           };
 
-        ryzen5hp-nixos =
-          nixpkgs.lib.nixosSystem {
+          ryzen5hp-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -198,8 +210,8 @@
             ];
           };
 
-        rocketlakelenovo-nixos =
-          nixpkgs.lib.nixosSystem {
+          rocketlakelenovo-nixos = nixpkgs.lib.nixosSystem {              # { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
+
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -213,15 +225,14 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
-              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
             ];
           };
 
-        rocketlakelatitude-nixos =
-          nixpkgs.lib.nixosSystem {
+          rocketlakelatitude-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
+              ./common/folding-at-home.nix
               # ./common/nfs.nix
               ./common/podman.nix
               ./common/system.nix
@@ -230,12 +241,10 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
-              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
             ];
           };
 
-        n100nas =
-          nixpkgs.lib.nixosSystem {
+          n100nas = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -251,10 +260,15 @@
             ];
           };
 
-        arcadebox-101 =
-          nixpkgs.lib.nixosSystem {
+          arcadebox-101 = nixpkgs.lib.nixosSystem {
             inherit system;
-            pkgs = import nixpkgs { inherit system; config = { allowUnfree = true; permittedInsecurePackages = [ "freeimage-unstable-2021-11-01" ]; }; };
+            pkgs = import nixpkgs {
+              inherit system;
+              config = {
+                allowUnfree = true;
+                permittedInsecurePackages = [ "freeimage-unstable-2021-11-01" ];
+              };
+            };
             modules = [
               ./common/arcade.nix
               ./common/desktop.nix
@@ -266,6 +280,6 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
             ];
           };
-      };
-  };
+        };
+    };
 }
