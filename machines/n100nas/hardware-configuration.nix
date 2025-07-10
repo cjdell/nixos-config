@@ -25,8 +25,9 @@ in
     ];
 
   # Bootloader.
-  boot.loader.systemd-boot.enable = true;
-  boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.grub.enable = true;
+  boot.loader.grub.device = "/dev/disk/by-id/wwn-0x500a0751e1d7a3aa";
+  boot.loader.grub.useOSProber = true;
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
   boot.kernelPackages = latestKernelPackage;
@@ -60,65 +61,15 @@ in
   boot.zfs.extraPools = [ "sas-16tb" ];
 
   boot.extraModprobeConfig = ''
-    options zfs zfs_arc_max=17179869184
+    options zfs zfs_arc_max=8589934592
   '';
 
   networking.hostId = "4f1f3795";
-
-  systemd.services =
-    let
-      nbd-connect = (pkgs.writeShellScriptBin "nbd-connect" ''
-        while ! ${pkgs.iputils}/bin/ping -c 1 -n -w 1 192.168.49.22 &> /dev/null; do
-          echo "Waiting for disk host..."
-          sleep 0.1
-        done
-
-        while ! ${pkgs.netcat}/bin/nc -z 192.168.49.22 10809; do   
-          echo "Waiting for disk devices..."
-          sleep 0.1
-        done
-
-        ${pkgs.nbd}/bin/nbd-client 192.168.49.22 /dev/nbd1 -name disk1 -timeout 5
-        ${pkgs.nbd}/bin/nbd-client 192.168.49.22 /dev/nbd2 -name disk2 -timeout 5
-        ${pkgs.nbd}/bin/nbd-client 192.168.49.22 /dev/nbd3 -name disk3 -timeout 5
-        ${pkgs.nbd}/bin/nbd-client 192.168.49.22 /dev/nbd4 -name disk4 -timeout 5
-        ${pkgs.nbd}/bin/nbd-client 192.168.49.22 /dev/nbd5 -name disk5 -timeout 5
-
-        ${pkgs.zfs}/bin/zpool import -d /dev/nbd1 -d /dev/nbd2 -d /dev/nbd3 -d /dev/nbd4 -d /dev/nbd5 sas-16tb
-      '');
-    in
-    {
-      nbd-connect = {
-        wants = [ "network-online.target" ];
-        after = [ "network-online.target" ];
-
-        wantedBy = [ "zfs-import-sas-16tb.service" "podman-jellyfin.service" ];
-        before = [ "zfs-import-sas-16tb.service" "podman-jellyfin.service" ];
-
-        serviceConfig = {
-          Type = "oneshot";
-          ExecStart = "${nbd-connect}/bin/nbd-connect";
-        };
-      };
-    };
 
   services.zfs.autoScrub = {
     enable = true;
     interval = "weekly";
   };
-
-  # environment.etc = {
-  #   nbdtab = {
-  #     text = ''
-  #       /dev/nbd1 ChrisNAS.grafton.lan disk1
-  #       /dev/nbd2 ChrisNAS.grafton.lan disk2
-  #       /dev/nbd3 ChrisNAS.grafton.lan disk3
-  #       /dev/nbd4 ChrisNAS.grafton.lan disk4
-  #       /dev/nbd5 ChrisNAS.grafton.lan disk5
-  #     '';
-  #     mode = "0440";
-  #   };
-  # };
 
   fileSystems."/" =
     {
@@ -126,24 +77,10 @@ in
       fsType = "ext4";
     };
 
-  fileSystems."/boot" =
-    {
-      device = "/dev/disk/by-label/BOOT";
-      fsType = "vfat";
-      options = [ "fmask=0077" "dmask=0077" ];
-    };
-
   swapDevices =
     [
       #    { device = "/dev/disk/by-uuid/6f808fe4-0c13-4cf2-85d1-1d5cec20ca82"; }
     ];
-
-  # Enables DHCP on each ethernet and wireless interface. In case of scripted networking
-  # (the default) this is the recommended approach. When using systemd-networkd it's
-  # still possible to use this option, but it's recommended to use it in conjunction
-  # with explicit per-interface declarations with `networking.interfaces.<interface>.useDHCP`.
-  # networking.useDHCP = lib.mkDefault true;
-  # networking.interfaces.wlp2s0.useDHCP = lib.mkDefault true;
 
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
   hardware.cpu.intel.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;

@@ -11,6 +11,10 @@
 
   networking.firewall.enable = false;
 
+  services.openssh.enable = true;
+
+  programs.nix-ld.enable = true;
+
   security.sudo.wheelNeedsPassword = false;
 
   # Set your time zone.

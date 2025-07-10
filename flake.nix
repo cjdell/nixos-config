@@ -247,10 +247,7 @@
           n100nas = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
-              ./common/desktop.nix
-              ./common/folding-at-home.nix
               ./common/nosleep.nix
-              ./common/sunshine.nix
               ./common/system.nix
               ./machines/n100nas
               ./users/cjdell

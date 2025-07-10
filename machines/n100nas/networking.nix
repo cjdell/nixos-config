@@ -12,14 +12,14 @@
         netdevConfig = {
           Name = "br0";
           Kind = "bridge";
-          MACAddress = "00:e0:4d:02:cd:56";
+          MACAddress = "3c:a8:2a:a0:1e:4c";
         };
       };
     };
 
     networks = {
       "21-br0-en" = {
-        matchConfig.Name = "en*";
+        matchConfig.Name = "eno*";
         networkConfig.Bridge = "br0";
       };
 

@@ -43,8 +43,6 @@
 
   programs.virt-manager.enable = true;
 
-  programs.nix-ld.enable = true;
-
   programs.gnome-disks.enable = true;
 
   virtualisation.libvirtd.enable = true;
@@ -80,19 +78,11 @@
 
   systemd.services.lact = {
     description = "AMDGPU Control Daemon";
-    after = ["multi-user.target"];
-    wantedBy = ["multi-user.target"];
+    after = [ "multi-user.target" ];
+    wantedBy = [ "multi-user.target" ];
     serviceConfig = {
       ExecStart = "${pkgs.lact}/bin/lact daemon";
     };
     enable = true;
   };
-
-  # List services that you want to enable:
-
-  # Enable the OpenSSH daemon.
-  services.openssh.enable = true;
-  # services.openssh.extraConfig = ''
-  #   AllowTcpForwarding yes
-  # '';
 }
