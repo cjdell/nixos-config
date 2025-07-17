@@ -69,6 +69,7 @@
     flashrom
     ch341eeprom
     smartmontools
+    gptfdisk
 
     # GPU Related Stuff
     intel-gpu-tools

@@ -257,6 +257,22 @@
             ];
           };
 
+          N100-NAS = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              # ./common/folding-at-home.nix
+              ./common/nosleep.nix
+              ./common/sunshine.nix
+              ./common/system.nix
+              ./machines/N100-NAS
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+            ];
+          };
+
           arcadebox-101 = nixpkgs.lib.nixosSystem {
             inherit system;
             pkgs = import nixpkgs {
