@@ -7,6 +7,7 @@
     ./networking.nix
     ./nfs.nix
     ./samba.nix
+    ./scrutiny.nix
     ./wireguard.nix
   ];
 

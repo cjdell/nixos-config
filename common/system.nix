@@ -68,6 +68,7 @@
     ethtool
     flashrom
     ch341eeprom
+    smartmontools
 
     # GPU Related Stuff
     intel-gpu-tools

@@ -27,8 +27,8 @@ in
       autoStart = true;
       ports = [
       #   "8081:8081"
-        "8443:8443"
-        "3478:3478/udp"
+        # "8443:8443"
+        # "3478:3478/udp"
       ];
       volumes = [
         "/srv/unifi:/unifi"
@@ -37,7 +37,7 @@ in
         TZ = "Europe/London";
       };
       extraOptions = [
-        # "--network=host"
+        "--network=host"
         "--privileged"
       ];
     };
@@ -60,7 +60,7 @@ in
         PGID = "100";
       };
       extraOptions = [
-        "--device=/dev/dri/renderD128"
+        # "--device=/dev/dri/renderD128"
         "--group-add=${RENDER_GID}"
       ];
     };
