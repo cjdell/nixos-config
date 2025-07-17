@@ -7,8 +7,8 @@
     settings = {
       global = {
         "workgroup" = "WORKGROUP";
-        "server string" = "N100NAS";
-        "netbios name" = "n100nas";
+        "server string" = "GEN8-NAS";
+        "netbios name" = "GEN8-NAS";
         "security" = "user";
         #"use sendfile" = "yes";
         "min protocol" = "SMB2";

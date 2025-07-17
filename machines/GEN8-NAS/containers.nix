@@ -52,7 +52,7 @@ in
       ];
       volumes = [
         "/srv/jellyfin/config:/config"
-        "/sas-16tb/ds-public/Media:/Media:ro"
+        "/sas-16tb/ds-downloads/Media:/Media:ro"
       ];
       environment = {
         TZ = "Europe/London";

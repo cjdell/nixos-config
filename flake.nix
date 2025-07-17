@@ -244,12 +244,12 @@
             ];
           };
 
-          n100nas = nixpkgs.lib.nixosSystem {
+          GEN8-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/nosleep.nix
               ./common/system.nix
-              ./machines/n100nas
+              ./machines/GEN8-NAS
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager

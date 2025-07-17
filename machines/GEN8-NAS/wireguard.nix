@@ -11,28 +11,28 @@
       # This allows the wireguard server to route your traffic to the internet and hence be like a VPN
       # For this to work you have to set the dnsserver IP of your router (or dnsserver of choice) in your clients
       postSetup = ''
-        ${pkgs.iptables}/bin/iptables -t nat -A POSTROUTING -s 10.47.0.0/16 -o enp3s0 -j MASQUERADE
+        # ${pkgs.iptables}/bin/iptables -t nat -A POSTROUTING -s 10.47.0.0/16 -o enp3s0 -j MASQUERADE
 
-        ${pkgs.iproute2}/bin/ip route add default via 10.47.0.1 dev wg0 table 200
+        # ${pkgs.iproute2}/bin/ip route add default via 10.47.0.1 dev wg0 table 200
 
-        MAC_IP_ADDRESS=192.168.49.149
-        ${pkgs.iproute2}/bin/ip rule add from $MAC_IP_ADDRESS lookup 200
-        ${pkgs.iptables}/bin/iptables -t nat -A POSTROUTING -s $MAC_IP_ADDRESS/32 -o wg0 -j MASQUERADE
-        ${pkgs.iptables}/bin/iptables -A FORWARD -s $MAC_IP_ADDRESS/32 -o wg0 -j ACCEPT
-        ${pkgs.iptables}/bin/iptables -A FORWARD -d $MAC_IP_ADDRESS/32 -i wg0 -j ACCEPT
+        # MAC_IP_ADDRESS=192.168.49.149
+        # ${pkgs.iproute2}/bin/ip rule add from $MAC_IP_ADDRESS lookup 200
+        # ${pkgs.iptables}/bin/iptables -t nat -A POSTROUTING -s $MAC_IP_ADDRESS/32 -o wg0 -j MASQUERADE
+        # ${pkgs.iptables}/bin/iptables -A FORWARD -s $MAC_IP_ADDRESS/32 -o wg0 -j ACCEPT
+        # ${pkgs.iptables}/bin/iptables -A FORWARD -d $MAC_IP_ADDRESS/32 -i wg0 -j ACCEPT
       '';
 
       # This undoes the above command
       postShutdown = ''
         # ${pkgs.iptables}/bin/iptables -t nat -D POSTROUTING -s 10.47.0.0/16 -o enp3s0 -j MASQUERADE
 
-        ${pkgs.iproute2}/bin/ip route del default via 10.47.0.1 dev wg0 table 200
+        # ${pkgs.iproute2}/bin/ip route del default via 10.47.0.1 dev wg0 table 200
 
-        MAC_IP_ADDRESS=192.168.49.149
-        ${pkgs.iproute2}/bin/ip rule del from $MAC_IP_ADDRESS lookup 200
-        ${pkgs.iptables}/bin/iptables -t nat -D POSTROUTING -s $MAC_IP_ADDRESS/32 -o wg0 -j MASQUERADE
-        ${pkgs.iptables}/bin/iptables -D FORWARD -s $MAC_IP_ADDRESS/32 -o wg0 -j ACCEPT
-        ${pkgs.iptables}/bin/iptables -D FORWARD -d $MAC_IP_ADDRESS/32 -i wg0 -j ACCEPT
+        # MAC_IP_ADDRESS=192.168.49.149
+        # ${pkgs.iproute2}/bin/ip rule del from $MAC_IP_ADDRESS lookup 200
+        # ${pkgs.iptables}/bin/iptables -t nat -D POSTROUTING -s $MAC_IP_ADDRESS/32 -o wg0 -j MASQUERADE
+        # ${pkgs.iptables}/bin/iptables -D FORWARD -s $MAC_IP_ADDRESS/32 -o wg0 -j ACCEPT
+        # ${pkgs.iptables}/bin/iptables -D FORWARD -d $MAC_IP_ADDRESS/32 -i wg0 -j ACCEPT
       '';
 
       # Path to the private key file.

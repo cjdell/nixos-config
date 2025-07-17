@@ -2,6 +2,7 @@
 
 {
   imports = [
+    ./backup.nix
     ./containers.nix
     ./hardware-configuration.nix
     ./networking.nix
@@ -11,5 +12,5 @@
     ./wireguard.nix
   ];
 
-  networking.hostName = "n100nas"; # Define your hostname.
+  networking.hostName = "GEN8-NAS"; # Define your hostname.
 }

@@ -30,7 +30,7 @@ in
   boot.loader.grub.useOSProber = true;
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
-  boot.kernelPackages = latestKernelPackage;
+  #boot.kernelPackages = latestKernelPackage;
 
   boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" "usb_storage" "sd_mod" ];
   boot.initrd.kernelModules = [ ];
@@ -60,10 +60,13 @@ in
   boot.supportedFilesystems = [ "zfs" ];
   boot.zfs.extraPools = [ "sas-16tb" ];
 
+  # boot.extraModprobeConfig = ''
+  #   options zfs zfs_arc_max=8589934592
+  # '';
   boot.extraModprobeConfig = ''
-    options zfs zfs_arc_max=8589934592
+    options zfs zfs_prefetch_disable=1
   '';
-
+  
   networking.hostId = "4f1f3795";
 
   services.zfs.autoScrub = {
