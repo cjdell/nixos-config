@@ -34,8 +34,31 @@
         "oplocks" = "yes";
         "locking" = "yes";
       };
-      "Fast" = {
-        "path" = "/samsung-4tb/ds-fast";
+
+      "Cache" = {
+        "path" = "/samsung-4tb/ds-cache";
+        "browseable" = "yes";
+        "read only" = "no";
+        "guest ok" = "yes";
+        "create mask" = "0664";
+        "directory mask" = "0775";
+        "force user" = "cjdell";
+        "force group" = "users";
+      };
+
+      "Games" = {
+        "path" = "/samsung-4tb/ds-games";
+        "browseable" = "yes";
+        "read only" = "no";
+        "guest ok" = "yes";
+        "create mask" = "0664";
+        "directory mask" = "0775";
+        "force user" = "cjdell";
+        "force group" = "users";
+      };
+
+      "Media" = {
+        "path" = "/samsung-4tb/ds-media";
         "browseable" = "yes";
         "read only" = "no";
         "guest ok" = "yes";
