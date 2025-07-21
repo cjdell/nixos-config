@@ -1,4 +1,10 @@
-{ config, lib, pkgs, modulesPath, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  modulesPath,
+  ...
+}:
 
 {
   services.samba = {
@@ -59,6 +65,17 @@
 
       "Media" = {
         "path" = "/samsung-4tb/ds-media";
+        "browseable" = "yes";
+        "read only" = "no";
+        "guest ok" = "yes";
+        "create mask" = "0664";
+        "directory mask" = "0775";
+        "force user" = "cjdell";
+        "force group" = "users";
+      };
+
+      "Photos" = {
+        "path" = "/samsung-4tb/ds-photos";
         "browseable" = "yes";
         "read only" = "no";
         "guest ok" = "yes";

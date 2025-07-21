@@ -21,7 +21,7 @@
   
   system.activationScripts.immich-dir = ''
     mkdir -p /samsung-4tb/ds-photos/immich
-    chown -R immich:immich /samsung-4tb/ds-photos/immich
+    chown immich:immich /samsung-4tb/ds-photos/immich
   '';
 
   users.users.immich.extraGroups = [
