@@ -78,9 +78,10 @@
             modules = [
               ./common/desktop.nix
               ./common/nfs.nix
+              ./common/podman.nix
               ./common/system.nix
               ./common/wine.nix
-              ./users/cjdell
+              ./users/cjdell/nix.nix
               ./machines/precision
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               nixos-hardware.nixosModules.dell-precision-5520
