@@ -159,6 +159,7 @@
             ];
           };
 
+          # Dell Vostro SFF (i3-8100)
           coffeelakedell-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
@@ -175,6 +176,24 @@
               home-manager-prefs
             ];
           };
+
+          # Dell Vostro SFF (i5-7400)
+          dell-vostro-kabylake-nixos = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              ./common/folding-at-home.nix
+              ./common/nfs.nix
+              ./common/nosleep.nix
+              ./common/sunshine.nix
+              ./common/system.nix
+              ./machines/dell-vostro-kabylake
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+            ];
+          };          
 
           coffeelakelenovo-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
