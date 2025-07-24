@@ -85,7 +85,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./machines/zen1
-              ./users/cjdell/permissions.nix
+              ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
