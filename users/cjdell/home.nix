@@ -43,5 +43,9 @@
         restoreOpenApplicationsOnLogin = "startWithEmptySession";
       };
     };
+
+    configFile = {
+      baloofilerc."Basic Settings"."Indexing-Enabled" = false;
+    };
   };
 }
