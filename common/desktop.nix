@@ -69,6 +69,7 @@
     imsprog
     zed-editor
     moonlight-qt
+    remmina
 
     # GPU Related Stuff
     lact
