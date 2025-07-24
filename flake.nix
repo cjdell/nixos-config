@@ -73,6 +73,25 @@
             ];
           };
 
+        zen1-nixos =
+          nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              ./common/folding-at-home.nix
+              ./common/nfs.nix
+              ./common/nosleep.nix
+              ./common/sunshine.nix
+              ./common/system.nix
+              ./common/wine.nix
+              ./machines/zen1
+              ./users/cjdell/permissions.nix
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+            ];
+          };
+
           precision-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
