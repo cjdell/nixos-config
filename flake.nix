@@ -233,7 +233,7 @@
             modules = [
               ./common/desktop.nix
               ./common/folding-at-home.nix
-              # ./common/nfs.nix
+              ./common/nfs.nix
               ./common/podman.nix
               ./common/system.nix
               ./machines/rocketlakelatitude
