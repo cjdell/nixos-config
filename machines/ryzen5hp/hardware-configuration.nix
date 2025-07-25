@@ -23,7 +23,7 @@
 
   boot.kernelParams = [
     "mitigations=off"
-    # "amdgpu.ppfeaturemask=0xffffffff"
+    "amdgpu.ppfeaturemask=0xffffffff"
   ];
 
   hardware.graphics = {
