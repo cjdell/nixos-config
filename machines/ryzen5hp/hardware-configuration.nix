@@ -13,7 +13,7 @@
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
 
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  # boot.kernelPackages = pkgs.linuxPackages_latest;
 
   boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" "usb_storage" "usbhid" "sd_mod" ];
   boot.initrd.kernelModules = [ "amdgpu" ];
@@ -23,7 +23,7 @@
 
   boot.kernelParams = [
     "mitigations=off"
-    "amdgpu.ppfeaturemask=0xffffffff"
+    # "amdgpu.ppfeaturemask=0xffffffff"
   ];
 
   hardware.graphics = {

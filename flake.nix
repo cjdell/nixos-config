@@ -235,7 +235,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              # ./common/folding-at-home.nix
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
