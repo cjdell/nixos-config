@@ -73,8 +73,7 @@
             ];
           };
 
-        zen1-nixos =
-          nixpkgs.lib.nixosSystem {
+          zen1-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -213,7 +212,7 @@
               home-manager.nixosModules.home-manager
               home-manager-prefs
             ];
-          };          
+          };
 
           coffeelakelenovo-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
@@ -249,7 +248,8 @@
             ];
           };
 
-          rocketlakelenovo-nixos = nixpkgs.lib.nixosSystem {              # { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
+          rocketlakelenovo-nixos = nixpkgs.lib.nixosSystem {
+            # { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
 
             inherit system pkgs;
             modules = [
@@ -280,6 +280,23 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
+            ];
+          };
+
+          skylakexeon-nixos = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              ./common/folding-at-home.nix
+              ./common/nfs.nix
+              ./common/podman.nix
+              ./common/system.nix
+              ./machines/skylakexeon
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
             ];
           };
 
