@@ -259,7 +259,7 @@
               ./common/nosleep.nix
               ./common/sunshine.nix
               ./common/system.nix
-              ./machines/rocketlakelenovo
+              ./machines/lenovo-thinkcentre-core-11400
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
