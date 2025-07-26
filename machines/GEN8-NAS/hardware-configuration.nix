@@ -47,7 +47,6 @@ in
   boot.extraModulePackages = [ ];
 
   boot.kernelParams = [
-    "mitigations=off"
     # "i915.force_probe=!46d1"
     # "xe.force_probe=46d1"
   ];

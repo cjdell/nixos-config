@@ -53,6 +53,15 @@
 
   # environment.sessionVariables.POWERDEVIL_NO_DDCUTIL = "1";
 
+  # sudo ddcutil detect --verbose
+  # sudo ddcutil getvcp known
+  # sudo ddcutil setvcp 100 50 --display 1
+  boot.extraModulePackages = [ config.boot.kernelPackages.ddcci-driver ];
+  boot.kernelModules = [
+    "i2c-dev"
+    "ddcci_backlight"
+  ];
+
   # List packages installed in system profile. To search, run:
   # $ nix search wget
   environment.systemPackages = with pkgs; [
@@ -72,18 +81,8 @@
     remmina
 
     # GPU Related Stuff
-    lact
     furmark
     mesa-demos
   ];
 
-  systemd.services.lact = {
-    description = "AMDGPU Control Daemon";
-    after = [ "multi-user.target" ];
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.lact}/bin/lact daemon";
-    };
-    enable = true;
-  };
 }

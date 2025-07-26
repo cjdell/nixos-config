@@ -10,6 +10,8 @@
       "networkmanager"
       "wheel"
       "dialout"
+      "i2c"
+      "video"
     ];
     packages = with pkgs; [ ];
     openssh.authorizedKeys.keys = [

@@ -1,10 +1,15 @@
-{ config, lib, pkgs, modulesPath, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  modulesPath,
+  ...
+}:
 
 {
-  imports =
-    [
-      (modulesPath + "/installer/scan/not-detected.nix")
-    ];
+  imports = [
+    (modulesPath + "/installer/scan/not-detected.nix")
+  ];
 
   # Bootloader.
   boot.loader.grub.enable = true;
@@ -13,13 +18,18 @@
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
 
-  boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" "usb_storage" "sd_mod" ];
+  boot.initrd.availableKernelModules = [
+    "xhci_pci"
+    "ahci"
+    "nvme"
+    "usb_storage"
+    "sd_mod"
+  ];
   boot.initrd.kernelModules = [ "amdgpu" ];
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
   boot.kernelParams = [
-    "mitigations=off"
   ];
 
   # hardware.amdgpu.opencl.enable = true;
@@ -46,11 +56,10 @@
       ];
     };
 
-  fileSystems."/" =
-    {
-      device = "/dev/disk/by-label/ROOT";
-      fsType = "ext4";
-    };
+  fileSystems."/" = {
+    device = "/dev/disk/by-label/ROOT";
+    fsType = "ext4";
+  };
 
   # Enables DHCP on each ethernet and wireless interface. In case of scripted networking
   # (the default) this is the recommended approach. When using systemd-networkd it's

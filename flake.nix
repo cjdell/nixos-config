@@ -234,6 +234,7 @@
           ryzen5hp-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
+              ./common/amdgpu.nix
               ./common/desktop.nix
               # ./common/folding-at-home.nix
               ./common/nfs.nix

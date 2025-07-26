@@ -1,13 +1,14 @@
 { config, pkgs, ... }:
 
 {
-  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+  nix.settings.experimental-features = [
+    "nix-command"
+    "flakes"
+  ];
 
-  # sudo ddcutil detect --verbose
-  # sudo ddcutil getvcp known
-  # sudo ddcutil setvcp 100 50 --display 1
-  boot.extraModulePackages = [ config.boot.kernelPackages.ddcci-driver ];
-  boot.kernelModules = [ "i2c-dev" "ddcci_backlight" ];
+  boot.kernelParams = [
+    "mitigations=off"
+  ];
 
   networking.firewall.enable = false;
 

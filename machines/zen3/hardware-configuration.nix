@@ -22,8 +22,7 @@
   boot.supportedFilesystems = [ "ext4" "ntfs" "fat32" "exfat" "ntfs" ];
 
   boot.kernelParams = [
-    "mitigations=off"
-    "amd_iommu=on"
+        "amd_iommu=on"
     "amdgpu.gttsize=57344"
     "ttm.pages_limit=13668850"
     "ttm.page_pool_size=13668850"
