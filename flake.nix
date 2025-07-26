@@ -28,7 +28,8 @@
       home-manager,
       plasma-manager,
     }@attrs:
-    {
+
+    let
       nixosConfigurations =
         let
           system = "x86_64-linux";
@@ -231,7 +232,7 @@
             ];
           };
 
-          ryzen5hp-nixos = nixpkgs.lib.nixosSystem {
+          hp-elitedesk-ryzen-2400-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/amdgpu.nix
@@ -241,7 +242,7 @@
               ./common/nosleep.nix
               ./common/sunshine.nix
               ./common/system.nix
-              ./machines/ryzen5hp
+              ./machines/hp-elitedesk-ryzen-2400
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
@@ -352,5 +353,11 @@
             ];
           };
         };
+    in
+    {
+      nixosConfigurations = nixosConfigurations // {
+        # Map old names to new names...
+        ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
+      };
     };
 }

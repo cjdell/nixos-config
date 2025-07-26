@@ -5,5 +5,5 @@
     ./hardware-configuration.nix
   ];
 
-  networking.hostName = "ryzen5hp-nixos"; # Define your hostname.
+  networking.hostName = "hp-elitedesk-ryzen-2400-nixos"; # Define your hostname.
 }
