@@ -250,9 +250,7 @@
             ];
           };
 
-          rocketlakelenovo-nixos = nixpkgs.lib.nixosSystem {
-            # { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
-
+          lenovo-thinkcentre-core-11400-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -358,6 +356,7 @@
       nixosConfigurations = nixosConfigurations // {
         # Map old names to new names...
         ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
+        rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
       };
     };
 }
