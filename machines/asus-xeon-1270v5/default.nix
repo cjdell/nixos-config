@@ -5,5 +5,5 @@
     ./hardware-configuration.nix
   ];
 
-  networking.hostName = "skylakexeon-nixos"; # Define your hostname.
+  networking.hostName = "asus-xeon-1270v5-nixos"; # Define your hostname.
 }
