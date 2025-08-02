@@ -6,5 +6,5 @@
     ./3d.nix
   ];
 
-  networking.hostName = "haswelldell-nixos"; # Define your hostname.
+  networking.hostName = "dell-optiplex-core-4770-nixos"; # Define your hostname.
 }
