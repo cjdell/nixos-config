@@ -13,9 +13,7 @@
 
     nixos-install --impure --root /mnt --flake .#hostname
 
-    cd /mnt
-
-    nixos-enter
+    nixos-enter --root '/mnt'
 
     passwd cjdell
 

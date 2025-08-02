@@ -232,6 +232,23 @@
             ];
           };
 
+          lenovo-thinkcentre-core-8400-c-nixos = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              ./common/folding-at-home.nix
+              ./common/nfs.nix
+              ./common/nosleep.nix
+              ./common/sunshine.nix
+              ./common/system.nix
+              ./machines/lenovo-thinkcentre-core-8400-c
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+            ];
+          };
+
           hp-elitedesk-ryzen-2400-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
