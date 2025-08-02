@@ -125,7 +125,7 @@
             ];
           };
 
-          haswelldell-nixos = nixpkgs.lib.nixosSystem {
+          dell-optiplex-core-4770-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -134,8 +134,9 @@
               ./common/nosleep.nix
               ./common/podman.nix
               ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
-              ./machines/haswelldell
+              ./machines/dell-optiplex-core-4770
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
@@ -170,6 +171,7 @@
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/kabylakeitx
               ./users/cjdell
@@ -188,6 +190,7 @@
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/coffeelakedell
               ./users/cjdell
@@ -206,6 +209,7 @@
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/dell-vostro-kabylake
               ./users/cjdell
@@ -223,6 +227,7 @@
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/coffeelakelenovo
               ./users/cjdell
@@ -240,6 +245,7 @@
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/lenovo-thinkcentre-core-8400-c
               ./users/cjdell
@@ -307,6 +313,8 @@
               ./common/folding-at-home.nix
               ./common/nfs.nix
               ./common/podman.nix
+              ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/asus-xeon-1270v5
               ./users/cjdell
