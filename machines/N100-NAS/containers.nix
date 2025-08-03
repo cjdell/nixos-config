@@ -8,7 +8,7 @@
 
 let
   RENDER_GID = "303";
-  FRIGATE_UID = 8096;
+  JELLYFIN_UID = 8096;
 in
 {
   virtualisation.podman = {
@@ -40,7 +40,7 @@ in
       ];
       environment = {
         TZ = "Europe/London";
-        PUID = toString FRIGATE_UID;
+        PUID = toString JELLYFIN_UID;
         PGID = "100";
       };
       extraOptions = [
@@ -51,7 +51,7 @@ in
   };
 
   users.users.jellyfin = {
-    uid = FRIGATE_UID;
+    uid = JELLYFIN_UID;
     group = "users";
     isNormalUser = true;
   };
@@ -61,7 +61,7 @@ in
     mkdir -p /srv/jellyfin/config
 
     # Ensure correct permissions
-    chown -R ${toString FRIGATE_UID}:users /srv/jellyfin
+    chown -R ${toString JELLYFIN_UID}:users /srv/jellyfin
     chmod -R g+rw /srv/jellyfin
   '';
 }

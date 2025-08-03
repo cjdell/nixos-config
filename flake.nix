@@ -325,6 +325,25 @@
             ];
           };
 
+          hp-z240-xeon-1240v6-nixos = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/desktop.nix
+              ./common/folding-at-home.nix
+              ./common/nfs.nix
+              ./common/podman.nix
+              ./common/sunshine.nix
+              ./common/sunshine-nvidia.nix
+              ./common/system.nix
+              ./machines/hp-z240-xeon-1240v6
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
+              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
+            ];
+          };
+
           GEN8-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
