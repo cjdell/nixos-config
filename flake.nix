@@ -59,7 +59,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) false)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/podman.nix
@@ -78,7 +78,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) false)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -111,7 +111,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) false)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -129,7 +129,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/podman.nix
@@ -148,7 +148,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) false)
               # ./common/boinc.nix
               ./common/nfs.nix
               ./common/nosleep.nix
@@ -167,7 +167,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -186,7 +186,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -205,7 +205,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -223,7 +223,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -241,7 +241,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -260,7 +260,6 @@
             modules = [
               ./common/amdgpu.nix
               ./common/desktop.nix
-              # ./common/folding-at-home.nix
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -277,7 +276,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -294,7 +293,6 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
               ./common/nfs.nix
               ./common/podman.nix
               ./common/system.nix
@@ -310,7 +308,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/podman.nix
               ./common/sunshine.nix
@@ -329,7 +327,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) true)
               ./common/nfs.nix
               ./common/podman.nix
               ./common/sunshine.nix

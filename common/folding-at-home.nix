@@ -1,7 +1,15 @@
-{ config, pkgs, ... }:
+isNvidia:
+
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 
 let
   FAH_UID = 7396;
+  RENDER_GID = "303";
 in
 {
   # services.foldingathome = {
@@ -57,8 +65,13 @@ in
         MACHINE_NAME = config.networking.hostName;
       };
       extraOptions = [
+        "--device=/dev/kfd"
+        "--device=/dev/dri"
+        "--group-add=${RENDER_GID}"
+      ]
+      ++ (lib.optionals isNvidia [
         "--device=nvidia.com/gpu=all"
-      ];
+      ]);
     };
   };
 }
