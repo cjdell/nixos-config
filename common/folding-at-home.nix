@@ -65,7 +65,7 @@ in
         MACHINE_NAME = config.networking.hostName;
       };
       extraOptions = [
-        "--device=/dev/kfd"
+        # "--device=/dev/kfd"
         "--device=/dev/dri"
         "--group-add=${RENDER_GID}"
       ]
