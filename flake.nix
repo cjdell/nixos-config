@@ -400,7 +400,7 @@
         ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
         rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
         skylakexeon-nixos = nixosConfigurations.asus-xeon-1270v5-nixos;
-        coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c;
+        coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c-nixos;
       };
     };
 }
