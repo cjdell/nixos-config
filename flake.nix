@@ -219,7 +219,7 @@
             ];
           };
 
-          coffeelakelenovo-nixos = nixpkgs.lib.nixosSystem {
+          lenovo-thinkcentre-core-8400-a-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
@@ -229,7 +229,7 @@
               ./common/sunshine.nix
               ./common/sunshine-nvidia.nix
               ./common/system.nix
-              ./machines/coffeelakelenovo
+              ./machines/lenovo-thinkcentre-core-8400-a
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
@@ -400,6 +400,7 @@
         ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
         rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
         skylakexeon-nixos = nixosConfigurations.asus-xeon-1270v5-nixos;
+        coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c;
       };
     };
 }
