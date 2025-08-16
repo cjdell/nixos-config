@@ -359,7 +359,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              # ./common/folding-at-home.nix
+              ((import ./common/folding-at-home.nix) "none")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
