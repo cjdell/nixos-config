@@ -59,7 +59,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) false)
+              ((import ./common/folding-at-home.nix) "amd")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/podman.nix
@@ -78,7 +78,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) false)
+              ((import ./common/folding-at-home.nix) "amd")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -111,7 +111,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) false)
+              ((import ./common/folding-at-home.nix) "none")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -129,7 +129,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/podman.nix
@@ -148,7 +148,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) false)
+              ((import ./common/folding-at-home.nix) "none")
               # ./common/boinc.nix
               ./common/nfs.nix
               ./common/nosleep.nix
@@ -167,7 +167,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -186,7 +186,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -205,7 +205,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -223,7 +223,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -241,7 +241,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -276,7 +276,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
@@ -308,7 +308,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/podman.nix
               ./common/sunshine.nix
@@ -327,7 +327,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) true)
+              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/podman.nix
               ./common/sunshine.nix

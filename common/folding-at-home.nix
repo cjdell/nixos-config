@@ -1,4 +1,4 @@
-isNvidia:
+dgpu:
 
 {
   config,
@@ -65,13 +65,17 @@ in
         MACHINE_NAME = config.networking.hostName;
       };
       extraOptions = [
-        # "--device=/dev/kfd"
         "--device=/dev/dri"
         "--group-add=${RENDER_GID}"
       ]
-      ++ (lib.optionals isNvidia [
-        "--device=nvidia.com/gpu=all"
-      ]);
+      ++ (
+        if dgpu == "nvidia" then
+          [ "--device=nvidia.com/gpu=all" ]
+        else if dgpu == "amd" then
+          [ "--device=/dev/kfd" ]
+        else
+          [ ]
+      );
     };
   };
 }
