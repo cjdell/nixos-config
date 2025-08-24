@@ -2,6 +2,7 @@
 
 {
   imports = [
+    ./backup.nix
     ./containers.nix
     ./hardware-configuration.nix
     ./immich.nix
