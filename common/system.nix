@@ -65,7 +65,6 @@
     iotop
     p7zip
     _7zz
-    rar
     ethtool
     flashrom
     ch341eeprom

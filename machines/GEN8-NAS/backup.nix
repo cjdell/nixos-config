@@ -26,6 +26,12 @@
     };
   };
 
+  system.activationScripts.installBackupKey = ''
+    cat << EOF > /var/lib/syncoid/backup.key
+    ${builtins.readFile "/home/cjdell/nixos-config/secrets/backup.key"}
+    EOF
+  '';
+
   # services.syncoid = {
   #   enable = true;
   #   interval = "*:35"; # run this less often than sanoid (every hour at 35 mins)
