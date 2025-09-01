@@ -11,7 +11,7 @@
     ./postgres.nix
     ./samba.nix
     ./scrutiny.nix
-    # ./wireguard.nix
+    ./wireguard.nix
   ];
 
   networking.hostName = "N100-NAS"; # Define your hostname.

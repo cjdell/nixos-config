@@ -5,7 +5,7 @@
     # "wg0" is the network interface name. You can name the interface arbitrarily.
     wg0 = {
       # Determines the IP address and subnet of the client's end of the tunnel interface.
-      ips = [ "10.47.49.21/16" ];
+      ips = [ "10.47.49.22/16" ];
       listenPort = 51820; # to match firewall allowedUDPPorts (without this wg uses random port numbers)
 
       # This allows the wireguard server to route your traffic to the internet and hence be like a VPN
