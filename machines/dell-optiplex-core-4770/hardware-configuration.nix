@@ -113,7 +113,7 @@
   };
 
   swapDevices = [
-    { device = "/dev/disk/by-uuid/00c2e344-c262-4c91-9ffe-9e3d1c60244a"; }
+    { device = "/swapfile"; }
   ];
 
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
