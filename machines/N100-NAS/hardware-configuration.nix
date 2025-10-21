@@ -45,10 +45,10 @@ in
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
-  boot.kernelParams = [
-    "i915.force_probe=!46d1"
-    "xe.force_probe=46d1"
-  ];
+  # boot.kernelParams = [
+  #   "i915.force_probe=!46d1"
+  #   "xe.force_probe=46d1"
+  # ];
 
   hardware.graphics = {
     enable = true;
