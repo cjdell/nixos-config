@@ -44,6 +44,16 @@
         "force user" = "cjdell";
         "force group" = "users";
       };
+      "Downloads" = {
+        "path" = "/sas-16tb/ds-downloads";
+        "browseable" = "yes";
+        "read only" = "no";
+        "guest ok" = "yes";
+        "create mask" = "0664";
+        "directory mask" = "0775";
+        "force user" = "cjdell";
+        "force group" = "users";
+      };
       "cjdell" = {
         "path" = "/sas-16tb/ds-cjdell";
         "browseable" = "yes";
