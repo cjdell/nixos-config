@@ -17,6 +17,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.home-manager.follows = "home-manager";
     };
+    pxe-server = {
+      url = "git+file:///home/cjdell/Projects/pxe-server";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -27,6 +31,7 @@
       nixos-hardware,
       home-manager,
       plasma-manager,
+      pxe-server,
     }@attrs:
 
     let
@@ -101,7 +106,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./users/cjdell/nix.nix
-              ./machines/precision
+              (import ./machines/precision pxe-server)
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               nixos-hardware.nixosModules.dell-precision-5520
             ];
