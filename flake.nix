@@ -360,7 +360,6 @@
             modules = [
               ./common/desktop.nix
               ((import ./common/folding-at-home.nix) "none")
-              ./common/nfs.nix
               ./common/nosleep.nix
               ./common/sunshine.nix
               ./common/system.nix
