@@ -80,6 +80,11 @@
     vulkan-tools
     vdpauinfo
     libva-utils
+
+    # Programming
+    deno
+    cargo
+    rustup
   ];
 
   # This value determines the NixOS release from which the default

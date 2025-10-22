@@ -1,8 +1,25 @@
-{ config, pkgs, lib, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 
 {
   networking.networkmanager.enable = lib.mkForce false;
   networking.useDHCP = lib.mkForce false;
+
+  # networking.wireless.enable = true;  # Enable wpa_supplicant
+
+  # # WiFi network configuration
+  # networking.wireless.networks = {
+  #   "The Lab" = {
+  #     psk = "Graft0nSt.";
+  #   };
+  # };
+
+  # # Explicitly set interface for wpa_supplicant
+  # networking.wireless.interfaces = [ "wlp4s0" ];
 
   systemd.network = {
     enable = true;
@@ -18,6 +35,13 @@
     };
 
     networks = {
+      # # WiFi interface configuration
+      # "10-wlp4s0" = {
+      #   matchConfig.Name = "wlp4s0";
+      #   networkConfig.DHCP = "yes";
+      #   linkConfig.RequiredForOnline = "routable";
+      # };
+
       "21-br0-en" = {
         matchConfig.Name = "en*";
         networkConfig.Bridge = "br0";
