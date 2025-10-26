@@ -12,10 +12,19 @@
       url = "github:nix-community/home-manager/release-25.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    home-manager-unstable = {
+      url = "github:nix-community/home-manager/master";
+      inputs.nixpkgs.follows = "nixpkgs-unstable";
+    };
     plasma-manager = {
       url = "github:nix-community/plasma-manager";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.home-manager.follows = "home-manager";
+    };
+    plasma-manager-unstable = {
+      url = "github:nix-community/plasma-manager/trunk";
+      inputs.nixpkgs.follows = "nixpkgs-unstable";
+      inputs.home-manager.follows = "home-manager-unstable";
     };
     pxe-server = {
       url = "git+file:///home/cjdell/Projects/pxe-server";
@@ -30,7 +39,9 @@
       nixpkgs-unstable,
       nixos-hardware,
       home-manager,
+      home-manager-unstable,
       plasma-manager,
+      plasma-manager-unstable,
       pxe-server,
     }@attrs:
 
@@ -57,6 +68,11 @@
             home-manager.useGlobalPkgs = true;
             home-manager.useUserPackages = true;
             home-manager.sharedModules = [ plasma-manager.homeModules.plasma-manager ];
+          };
+          home-manager-unstable-prefs = {
+            home-manager.useGlobalPkgs = true;
+            home-manager.useUserPackages = true;
+            home-manager.sharedModules = [ plasma-manager-unstable.homeModules.plasma-manager ];
           };
         in
         {
@@ -360,19 +376,21 @@
             ];
           };
 
-          N100-NAS = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
+          N100-NAS = nixpkgs-unstable.lib.nixosSystem {
+            inherit system;
+            pkgs = pkgs-unstable;
             modules = [
               ./common/desktop.nix
               ((import ./common/folding-at-home.nix) "none")
               ./common/nosleep.nix
               ./common/sunshine.nix
+              ./common/sunshine-xe.nix
               ./common/system.nix
               ./machines/N100-NAS
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
-              home-manager.nixosModules.home-manager
-              home-manager-prefs
+              { nix.registry.nixpkgs.flake = nixpkgs-unstable; } # For "nix shell"
+              home-manager-unstable.nixosModules.home-manager
+              home-manager-unstable-prefs
             ];
           };
 

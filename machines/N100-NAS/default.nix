@@ -7,7 +7,6 @@
     ./hardware-configuration.nix
     ./immich.nix
     ./networking.nix
-    # ./networking-host.nix
     ./nfs.nix
     ./postgres.nix
     ./samba.nix

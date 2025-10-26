@@ -45,18 +45,20 @@ in
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
-  # boot.kernelParams = [
-  #   "i915.force_probe=!46d1"
-  #   "xe.force_probe=46d1"
-  # ];
+  boot.kernelParams = [
+    "i915.force_probe=!46d1"
+    "xe.force_probe=46d1"
+  ];
 
   hardware.graphics = {
     enable = true;
     enable32Bit = true;
-    extraPackages = [
-      pkgs.vpl-gpu-rt
-      pkgs.intel-compute-runtime
-      pkgs.ocl-icd
+    extraPackages = with pkgs; [
+      vpl-gpu-rt
+      intel-compute-runtime
+      ocl-icd
+      vaapiIntel
+      intel-media-driver
     ];
   };
 
