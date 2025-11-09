@@ -75,7 +75,7 @@
     intel-gpu-tools
     radeontop
     amdgpu_top
-    glxinfo
+    mesa-demos
     clinfo
     vulkan-tools
     vdpauinfo

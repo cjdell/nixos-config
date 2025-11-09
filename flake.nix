@@ -2,29 +2,19 @@
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
-    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
     };
     home-manager = {
-      url = "github:nix-community/home-manager/release-25.05";
+      url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
-    home-manager-unstable = {
-      url = "github:nix-community/home-manager/master";
-      inputs.nixpkgs.follows = "nixpkgs-unstable";
     };
     plasma-manager = {
       url = "github:nix-community/plasma-manager";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.home-manager.follows = "home-manager";
-    };
-    plasma-manager-unstable = {
-      url = "github:nix-community/plasma-manager/trunk";
-      inputs.nixpkgs.follows = "nixpkgs-unstable";
-      inputs.home-manager.follows = "home-manager-unstable";
     };
     pxe-server = {
       url = "git+file:///home/cjdell/Projects/pxe-server";
@@ -36,12 +26,9 @@
     {
       self,
       nixpkgs,
-      nixpkgs-unstable,
       nixos-hardware,
       home-manager,
-      home-manager-unstable,
       plasma-manager,
-      plasma-manager-unstable,
       pxe-server,
     }@attrs:
 
@@ -58,21 +45,10 @@
               };
             };
           };
-          pkgs-unstable = import nixpkgs-unstable {
-            inherit system;
-            config = {
-              allowUnfree = true;
-            };
-          };
           home-manager-prefs = {
             home-manager.useGlobalPkgs = true;
             home-manager.useUserPackages = true;
             home-manager.sharedModules = [ plasma-manager.homeModules.plasma-manager ];
-          };
-          home-manager-unstable-prefs = {
-            home-manager.useGlobalPkgs = true;
-            home-manager.useUserPackages = true;
-            home-manager.sharedModules = [ plasma-manager-unstable.homeModules.plasma-manager ];
           };
         in
         {
@@ -340,7 +316,7 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
-              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
+              { environment.systemPackages = with pkgs; [ deskflow ]; }
             ];
           };
 
@@ -359,7 +335,7 @@
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               home-manager-prefs
-              { environment.systemPackages = with pkgs-unstable; [ deskflow ]; }
+              { environment.systemPackages = with pkgs; [ deskflow ]; }
             ];
           };
 
@@ -376,9 +352,8 @@
             ];
           };
 
-          N100-NAS = nixpkgs-unstable.lib.nixosSystem {
-            inherit system;
-            pkgs = pkgs-unstable;
+          N100-NAS = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
             modules = [
               ./common/desktop.nix
               ((import ./common/folding-at-home.nix) "none")
@@ -388,9 +363,9 @@
               ./common/system.nix
               ./machines/N100-NAS
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs-unstable; } # For "nix shell"
-              home-manager-unstable.nixosModules.home-manager
-              home-manager-unstable-prefs
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              home-manager-prefs
             ];
           };
 
@@ -400,7 +375,7 @@
               inherit system;
               config = {
                 allowUnfree = true;
-                permittedInsecurePackages = [ "freeimage-unstable-2021-11-01" ];
+                permittedInsecurePackages = [ "freeimage-2021-11-01" ];
               };
             };
             modules = [
