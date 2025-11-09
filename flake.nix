@@ -43,6 +43,9 @@
               packageOverrides = pkgs: {
                 fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
               };
+              permittedInsecurePackages = [
+                "broadcom-sta-6.30.223.271-59-6.17.7"
+              ];
             };
           };
           home-manager-prefs = {
@@ -301,17 +304,14 @@
             ];
           };
 
-          asus-xeon-1270v5-nixos = nixpkgs.lib.nixosSystem {
+          macbook-pro-2009-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "nvidia")
               ./common/nfs.nix
               ./common/podman.nix
-              ./common/sunshine.nix
-              ./common/sunshine-nvidia.nix
               ./common/system.nix
-              ./machines/asus-xeon-1270v5
+              ./machines/macbook-pro-2009
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
@@ -396,7 +396,6 @@
         # Map old names to new names...
         ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
         rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
-        skylakexeon-nixos = nixosConfigurations.asus-xeon-1270v5-nixos;
         coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c-nixos;
       };
     };
