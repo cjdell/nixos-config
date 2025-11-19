@@ -57,7 +57,7 @@ in
       vpl-gpu-rt
       intel-compute-runtime
       ocl-icd
-      vaapiIntel
+      intel-vaapi-driver
       intel-media-driver
     ];
   };
@@ -111,6 +111,17 @@ in
       "noatime"
       "nodiratime"
       "x-systemd.after=network-online.target"
+    ];
+  };
+
+  fileSystems."/electronerds/ds-private" = {
+    device = "//10.47.98.10/Private";
+    fsType = "cifs";
+    options = [
+      "username=admin"
+      "password=${builtins.readFile "/home/cjdell/nixos-config/secrets/enpass.txt"}"
+      "uid=1000"
+      "gid=100"
     ];
   };
 

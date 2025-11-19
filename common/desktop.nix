@@ -83,6 +83,10 @@
     # GPU Related Stuff
     furmark
     mesa-demos
+
+    # Tools
+    ffmpeg
+    mediainfo
   ];
 
 }
