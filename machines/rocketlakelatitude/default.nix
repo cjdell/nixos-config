@@ -30,7 +30,7 @@
     rustup
     cargo-binutils
     gcc
-    probe-rs
+    probe-rs-tools
     wlink
   ];
 }
