@@ -104,10 +104,13 @@ in
 }
 
 ## Open a PSQL shell to the database
-# sudo -u postgres psql door_system
+# sudo -u postgres psql immich
+
+## Restore a backup
+# sudo -u postgres psql immich < backup.sql
 
 ## Dump schema for the "user" table
-# sudo -u postgres pg_dump -st user door_system
+# sudo -u postgres pg_dump -st user immich
 
 ## First time setup of PostgreSQL certificate
 # cd ~postgres
