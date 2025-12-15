@@ -15,4 +15,7 @@
   ];
 
   networking.hostName = "N100-NAS"; # Define your hostname.
+
+  system.autoRollback.enable = true;
+  system.updateContainers.enable = true;
 }

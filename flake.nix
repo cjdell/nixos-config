@@ -2,10 +2,14 @@
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
+    };
+    nixos-utils = {
+      url = "github:cjdell/nixos-utils";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     home-manager = {
       url = "github:nix-community/home-manager";
@@ -27,6 +31,7 @@
       self,
       nixpkgs,
       nixos-hardware,
+      nixos-utils,
       home-manager,
       plasma-manager,
       pxe-server,
@@ -355,6 +360,8 @@
           N100-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
+              nixos-utils.modules.rollback
+              nixos-utils.modules.containers
               # ./common/desktop.nix
               ((import ./common/folding-at-home.nix) "none")
               ./common/nosleep.nix
