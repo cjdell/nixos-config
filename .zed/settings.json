@@ -1,0 +1,11 @@
+{
+    "lsp": {
+        "nil": {
+            "settings": {
+                "diagnostics": {
+                    "ignored": ["unused_binding"]
+                }
+            }
+        }
+    }
+}

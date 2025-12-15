@@ -1,4 +1,9 @@
-{ config, pkgs, lib, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 
 {
   networking.networkmanager.enable = lib.mkForce false;
@@ -19,7 +24,10 @@
 
     networks = {
       "21-br0-en" = {
-        matchConfig.Name = "eno*";
+        matchConfig.Name = [
+          "eno1"
+          "eno2"
+        ];
         networkConfig.Bridge = "br0";
       };
 
