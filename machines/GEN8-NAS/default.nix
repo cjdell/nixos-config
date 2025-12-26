@@ -6,6 +6,7 @@
     ./backup.nix
     ./containers.nix
     ./hardware-configuration.nix
+    ./monitoring.nix
     ./networking.nix
     ./nfs.nix
     ./samba.nix

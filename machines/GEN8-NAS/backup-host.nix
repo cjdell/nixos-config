@@ -29,7 +29,7 @@ in
     };
   };
 
-  users.groups.backup = { 
+  users.groups.backup = {
     gid = 999999;
   };
 
@@ -88,5 +88,6 @@ in
       home.file."bin/zpool".source = config.lib.file.mkOutOfStoreSymlink "${pkgs.zfs}/bin/zpool";
       home.file."bin/zstd".source = config.lib.file.mkOutOfStoreSymlink "${pkgs.zstd}/bin/zstd";
       home.file."bin/ps".source = config.lib.file.mkOutOfStoreSymlink "${pkgs.procps}/bin/ps";
+      home.file."bin/borg".source = config.lib.file.mkOutOfStoreSymlink "${pkgs.borgbackup}/bin/borg";
     };
 }
