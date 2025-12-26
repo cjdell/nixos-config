@@ -44,9 +44,6 @@
     git
     nmap
     inetutils
-    nixfmt-rfc-style
-    nil
-    nixd
     wget
     tmux
     screen
@@ -85,6 +82,10 @@
     deno
     cargo
     rustup
+    nixfmt-rfc-style
+    alejandra
+    nil
+    nixd
   ];
 
   # This value determines the NixOS release from which the default

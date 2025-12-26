@@ -1,11 +1,22 @@
 {
-    "lsp": {
-        "nil": {
-            "settings": {
-                "diagnostics": {
-                    "ignored": ["unused_binding"]
-                }
-            }
-        }
+  "languages": {
+    "Nix": {
+      "language_servers": ["nixd", "!nil"]
     }
+  },
+  "lsp": {
+    "nixd": {
+      "initialization_options": {
+        "formatting": {
+          "command": ["alejandra", "--quiet", "--"] // or ["nixfmt"]
+        }
+      },
+      "settings": {
+        "diagnostic": {
+          "suppress": ["sema-extra-with"]
+        }
+      }
+    }
+  },
+  "tab_size": 2
 }

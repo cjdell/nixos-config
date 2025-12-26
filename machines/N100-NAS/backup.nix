@@ -1,13 +1,11 @@
 {
-  config,
-  lib,
-  pkgs,
-  modulesPath,
   options,
   ...
 }:
 
 {
+  # sudo systemctl start syncoid-ds-photos
+  # journalctl -u syncoid-ds-photos -f
   services.syncoid = {
     enable = true;
     interval = "*:35"; # run this less often than sanoid (every hour at 35 mins)

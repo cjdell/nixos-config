@@ -9,6 +9,11 @@
     };
     nixos-utils = {
       url = "github:cjdell/nixos-utils";
+      # url = "git+file:///home/cjdell/Projects/nixos-utils";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     home-manager = {
@@ -32,6 +37,7 @@
       nixpkgs,
       nixos-hardware,
       nixos-utils,
+      sops-nix,
       home-manager,
       plasma-manager,
       pxe-server,
@@ -360,13 +366,15 @@
           N100-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
-              nixos-utils.modules.rollback
-              nixos-utils.modules.containers
+              nixos-utils.nixosModules.rollback
+              nixos-utils.nixosModules.containers
+              sops-nix.nixosModules.sops
               # ./common/desktop.nix
               ((import ./common/folding-at-home.nix) "none")
               ./common/nosleep.nix
-              ./common/sunshine.nix
-              ./common/sunshine-xe.nix
+              ./common/sops.nix
+              # ./common/sunshine.nix
+              # ./common/sunshine-xe.nix
               ./common/system.nix
               ./machines/N100-NAS
               ./users/cjdell
