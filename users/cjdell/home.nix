@@ -25,11 +25,12 @@
           action = "nothing";
         };
         turnOffDisplay = {
-          idleTimeout = "never";
+          idleTimeout = 300;
+          # idleTimeout = "never";
         };
-        dimDisplay = {
-          idleTimeout = null;
-        };
+        # dimDisplay = {
+        #   idleTimeout = null;
+        # };
         displayBrightness = 100;
         powerProfile = "performance";
       };

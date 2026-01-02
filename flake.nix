@@ -59,10 +59,16 @@
               ];
             };
           };
-          home-manager-prefs = {
+          homeManagerPrefs = {
             home-manager.useGlobalPkgs = true;
             home-manager.useUserPackages = true;
             home-manager.sharedModules = [ plasma-manager.homeModules.plasma-manager ];
+          };
+          commonModules = {
+            imports = [
+              nixos-utils.nixosModules.rollback
+              nixos-utils.nixosModules.containers
+            ];
           };
         in
         {
@@ -81,7 +87,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -99,7 +106,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -115,6 +123,7 @@
               (import ./machines/precision pxe-server)
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               nixos-hardware.nixosModules.dell-precision-5520
+              commonModules
             ];
           };
 
@@ -132,7 +141,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -151,7 +161,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -170,7 +181,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -188,7 +200,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -207,7 +220,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -226,7 +240,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -244,7 +259,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -262,7 +278,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -279,7 +296,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -296,7 +314,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -311,7 +330,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -326,8 +346,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
-              { environment.systemPackages = with pkgs; [ deskflow ]; }
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -345,8 +365,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
-              { environment.systemPackages = with pkgs; [ deskflow ]; }
+              homeManagerPrefs
+              commonModules
             ];
           };
 
@@ -359,15 +379,14 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 
           N100-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
-              nixos-utils.nixosModules.rollback
-              nixos-utils.nixosModules.containers
               sops-nix.nixosModules.sops
               # ./common/desktop.nix
               ((import ./common/folding-at-home.nix) "none")
@@ -380,7 +399,8 @@
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
-              home-manager-prefs
+              homeManagerPrefs
+              commonModules
             ];
           };
 

@@ -1,6 +1,11 @@
-{ config, pkgs, ... }:
+{ pkgs, ... }:
 
 {
+  system.updateContainers = {
+    enable = true;
+    webhookUrl = "https://notify.home.chrisdell.info";
+  };
+
   nix.settings.experimental-features = [
     "nix-command"
     "flakes"
