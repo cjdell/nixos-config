@@ -11,7 +11,6 @@
       hostname = "klipper";
       image = "mkuf/klipper:latest";
       autoStart = true;
-      privileged = true;
       volumes = [
         "/dev:/dev"
         "/home/cjdell/Projects/prind.delta/config:/opt/printer_data/config"
@@ -29,8 +28,9 @@
         "printer_data/logs/klippy.log"
       ];
       extraOptions = [
-        "--privileged"
         "--ip=10.88.0.10"
+        "--device=/dev/ttyACM0"
+        "--device=/dev/serial/by-id/usb-Klipper_lpc1768_0D40001727953EAE6BC5B753C52000F5-if00"
         # Add container process to group `dialout` so it has permission to access serial devices
         "--group-add=${toString config.users.groups.dialout.gid}"
       ];
