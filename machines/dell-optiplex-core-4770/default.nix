@@ -6,5 +6,5 @@
     ./3d.nix
   ];
 
-  networking.hostName = "dell-optiplex-core-4770-nixos"; # Define your hostname.
+  networking.hostName = "3d-printer-server"; # Define your hostname.
 }

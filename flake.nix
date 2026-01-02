@@ -136,7 +136,7 @@
             ];
           };
 
-          dell-optiplex-core-4770-nixos = nixpkgs.lib.nixosSystem {
+          "3d-printer-server" = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/desktop.nix

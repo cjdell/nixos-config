@@ -72,6 +72,8 @@
 
   services.nginx.virtualHosts = {
     "192.168.49.60" = {
+      serverAliases = [ "3d-printer-server.grafton.lan" ];
+
       locations."/" = {
         proxyPass = "http://10.88.0.12:80";
         recommendedProxySettings = true;
