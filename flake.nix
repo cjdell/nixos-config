@@ -323,7 +323,7 @@
             inherit system pkgs;
             modules = [
               ./common/desktop.nix
-              ./common/nfs.nix
+              # ./common/nfs.nix
               ./common/podman.nix
               ./common/system.nix
               ./machines/rocketlakelatitude
