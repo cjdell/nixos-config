@@ -4,6 +4,7 @@
   lib,
   ...
 }:
+
 # Alert rules for backup jobs and system health
 {
   services.prometheus = {

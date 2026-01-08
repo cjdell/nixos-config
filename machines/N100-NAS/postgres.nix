@@ -4,8 +4,6 @@
 }:
 
 let
-  # DATABASES = [ "immich" ];
-
   PG_AUTH = ''
     #type   database  DBuser  auth-method
     local   all       all     trust

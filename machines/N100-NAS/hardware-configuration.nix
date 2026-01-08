@@ -23,9 +23,7 @@ let
   );
 in
 {
-  imports = [
-    (modulesPath + "/installer/scan/not-detected.nix")
-  ];
+  hardware.enableRedistributableFirmware = lib.mkDefault true;
 
   # Bootloader.
   boot.loader.systemd-boot.enable = true;
