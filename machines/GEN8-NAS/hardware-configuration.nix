@@ -5,7 +5,6 @@
   config,
   lib,
   pkgs,
-  modulesPath,
   ...
 }:
 
@@ -23,9 +22,7 @@ let
   );
 in
 {
-  imports = [
-    (modulesPath + "/installer/scan/not-detected.nix")
-  ];
+  hardware.enableRedistributableFirmware = lib.mkDefault true;
 
   # Bootloader.
   boot.loader.grub.enable = true;
@@ -33,7 +30,7 @@ in
   boot.loader.grub.useOSProber = true;
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
-  #boot.kernelPackages = latestKernelPackage;
+  boot.kernelPackages = latestKernelPackage;
 
   boot.initrd.availableKernelModules = [
     "xhci_pci"
@@ -46,32 +43,13 @@ in
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
-  boot.kernelParams = [
-    # "i915.force_probe=!46d1"
-    # "xe.force_probe=46d1"
-  ];
-
-  hardware.graphics = {
-    enable = true;
-    enable32Bit = true;
-    extraPackages = [
-      pkgs.vpl-gpu-rt
-      pkgs.intel-compute-runtime
-      pkgs.ocl-icd
-    ];
-  };
-
-  # environment.sessionVariables = { LIBVA_DRIVER_NAME = "iHD"; }; # Force intel-media-driver
-
-  programs.nbd.enable = true;
+  boot.kernelParams = [ ];
 
   boot.supportedFilesystems = [ "zfs" ];
   boot.zfs.extraPools = [ "sas-16tb" ];
 
-  # boot.extraModprobeConfig = ''
-  #   options zfs zfs_arc_max=8589934592
-  # '';
   boot.extraModprobeConfig = ''
+    options zfs zfs_arc_max=8589934592
     options zfs zfs_prefetch_disable=1
   '';
 
