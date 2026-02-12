@@ -1,7 +1,6 @@
-{ config, lib, pkgs, modulesPath, ... }:
-
 {
   services.scrutiny = {
     enable = true;
+    collector.schedule = "*:*:00";
   };
 }
