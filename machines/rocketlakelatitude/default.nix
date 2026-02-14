@@ -2,6 +2,7 @@
 
 {
   imports = [
+    ./ardour.nix
     ./hardware-configuration.nix
     ./wireguard.nix
   ];
