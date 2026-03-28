@@ -3,16 +3,15 @@
 {
   imports = [
     ./backup-host.nix
-    # ./backup.nix
-    # ./containers.nix
+    ./backup.nix
+    ./containers.nix
     ./hardware-configuration.nix
     ./monitoring.nix
     ./networking.nix
-    # ./nfs.nix
-    # ./samba.nix
+    ./nfs.nix
+    ./samba.nix
     ./scrutiny.nix
-    # ./wireguard.nix
   ];
 
-  networking.hostName = "GEN8-NAS"; # Define your hostname.
+  networking.hostName = "N40L-NAS"; # Define your hostname.
 }

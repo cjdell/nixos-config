@@ -370,12 +370,12 @@
             ];
           };
 
-          GEN8-NAS = nixpkgs.lib.nixosSystem {
+          N40L-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
               ./common/nosleep.nix
               ./common/system.nix
-              ./machines/GEN8-NAS
+              ./machines/N40L-NAS
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
@@ -396,6 +396,20 @@
               # ./common/sunshine-xe.nix
               ./common/system.nix
               ./machines/N100-NAS
+              ./users/cjdell
+              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+              home-manager.nixosModules.home-manager
+              homeManagerPrefs
+              commonModules
+            ];
+          };
+
+          GEN8-NAS = nixpkgs.lib.nixosSystem {
+            inherit system pkgs;
+            modules = [
+              ./common/nosleep.nix
+              ./common/system.nix
+              ./machines/GEN8-NAS
               ./users/cjdell
               { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager

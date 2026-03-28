@@ -38,18 +38,19 @@ in
     "nvme"
     "usb_storage"
     "sd_mod"
+    "ohci_pci" "ehci_pci" "pata_atiixp" "mpt3sas" "usbhid"
   ];
   boot.initrd.kernelModules = [ ];
-  boot.kernelModules = [ "kvm-intel" ];
+  boot.kernelModules = [ "kvm-amd" ];
   boot.extraModulePackages = [ ];
 
   boot.kernelParams = [ ];
 
   boot.supportedFilesystems = [ "zfs" ];
-  # boot.zfs.extraPools = [ "sas-16tb" ];
+  boot.zfs.extraPools = [ "sas-16tb" ];
 
   boot.extraModprobeConfig = ''
-    options zfs zfs_arc_max=8589934592
+    options zfs zfs_arc_max=4294967296
     options zfs zfs_prefetch_disable=1
   '';
 
@@ -61,7 +62,8 @@ in
   };
 
   fileSystems."/" = {
-    device = "/dev/disk/by-label/ROOT";
+    device = "/dev/disk/by-uuid/21ef19ea-c954-45b4-87ef-9bee40377375";
+#    device = "/dev/disk/by-label/ROOT";
     fsType = "ext4";
   };
 
