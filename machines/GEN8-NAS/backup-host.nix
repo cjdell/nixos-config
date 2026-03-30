@@ -7,7 +7,7 @@
 }:
 
 let
-  POOL_NAME = "sas-16tb";
+  POOL_NAME = "sas-24tb";
   HOME_DIR = "/var/lib/backup";
 in
 {

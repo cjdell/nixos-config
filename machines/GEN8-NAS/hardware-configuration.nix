@@ -26,7 +26,7 @@ in
 
   # Bootloader.
   boot.loader.grub.enable = true;
-  boot.loader.grub.device = "/dev/disk/by-id/wwn-0x500a0751e1d7a3aa";
+  boot.loader.grub.device = "/dev/disk/by-id/wwn-0x50026b7686276076";
   boot.loader.grub.useOSProber = true;
 
   # boot.kernelPackages = pkgs.linuxPackages_latest;
@@ -46,7 +46,7 @@ in
   boot.kernelParams = [ ];
 
   boot.supportedFilesystems = [ "zfs" ];
-  # boot.zfs.extraPools = [ "sas-16tb" ];
+  boot.zfs.extraPools = [ "sas-24tb" ];
 
   boot.extraModprobeConfig = ''
     options zfs zfs_arc_max=8589934592

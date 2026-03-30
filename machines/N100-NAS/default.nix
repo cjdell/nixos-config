@@ -20,4 +20,13 @@
   networking.hostName = "N100-NAS"; # Define your hostname.
 
   system.autoRollback.enable = true;
+
+  sops = {
+    secrets = {
+      immich_db_password = { };
+      grafana_oidc_client_secret = {
+        owner = config.systemd.services.grafana.serviceConfig.User;
+      };
+    };
+  };
 }

@@ -14,13 +14,6 @@
   sops = {
     age.keyFile = "/var/lib/sops-nix/key.txt";
     defaultSopsFile = ../secrets/secrets.yaml;
-    secrets = {
-      immich_db_password = { };
-      grafana_oidc_client_secret = {
-        owner = config.systemd.services.grafana.serviceConfig.User;
-      };
-      tailscale_pre_auth_key = { };
-    };
   };
 
   system.activationScripts.sopsNixKey = ''
