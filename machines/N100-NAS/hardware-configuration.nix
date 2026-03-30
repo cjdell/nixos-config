@@ -93,7 +93,7 @@ in
   };
 
   fileSystems."/dbthr33/ds-public" = {
-    device = "10.47.35.20:/dbthr33/ds-public";
+    device = "dbthr33-server.grafton.tailscale:/dbthr33/ds-public";
     fsType = "nfs4"; # Use NFSv4 for better performance
     options = [
       "rw"

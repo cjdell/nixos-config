@@ -19,6 +19,7 @@
       grafana_oidc_client_secret = {
         owner = config.systemd.services.grafana.serviceConfig.User;
       };
+      tailscale_pre_auth_key = { };
     };
   };
 
