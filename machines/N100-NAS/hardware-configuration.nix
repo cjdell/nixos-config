@@ -113,7 +113,7 @@ in
   };
 
   fileSystems."/electronerds/ds-private" = {
-    device = "//10.47.98.10/Private";
+    device = "//colin.grafton.tailscale/Private";
     fsType = "cifs";
     options = [
       "username=admin"
