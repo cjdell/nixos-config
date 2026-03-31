@@ -373,7 +373,9 @@
           N40L-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
+              sops-nix.nixosModules.sops
               ./common/nosleep.nix
+              ./common/sops.nix
               ./common/system.nix
               ./machines/N40L-NAS
               ./users/cjdell
