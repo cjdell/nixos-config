@@ -166,6 +166,7 @@
             targets = [
               "n100-nas.grafton.lan:9100" # monitoring server itself
               "gen8-nas.grafton.lan:9100"
+              "n40l-nas.grafton.lan:9100"
             ];
           }
         ];
@@ -185,6 +186,7 @@
             targets = [
               "n100-nas.grafton.lan:9558"
               "gen8-nas.grafton.lan:9558"
+              "n40l-nas.grafton.lan:9558"
             ];
           }
         ];
@@ -204,6 +206,7 @@
             targets = [
               "n100-nas.grafton.lan:9134"
               "gen8-nas.grafton.lan:9134"
+              "n40l-nas.grafton.lan:9134"
             ];
           }
         ];
@@ -224,6 +227,7 @@
             targets = [
               "n100-nas.grafton.lan:9633"
               "gen8-nas.grafton.lan:9633"
+              "n40l-nas.grafton.lan:9633"
             ];
           }
         ];

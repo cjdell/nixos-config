@@ -1,9 +1,4 @@
-{
-  config,
-  pkgs,
-  lib,
-  ...
-}:
+{ lib, ... }:
 
 {
   networking.networkmanager.enable = lib.mkForce false;

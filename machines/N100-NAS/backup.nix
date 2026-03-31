@@ -1,7 +1,4 @@
-{
-  options,
-  ...
-}:
+{ options, ... }:
 
 {
   # sudo systemctl start syncoid-ds-photos
