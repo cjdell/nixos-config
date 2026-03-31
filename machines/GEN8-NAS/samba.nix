@@ -35,7 +35,7 @@
         "locking" = "yes";
       };
       "Public" = {
-        "path" = "/sas-16tb/ds-public";
+        "path" = "/sas-24tb/ds-public";
         "browseable" = "yes";
         "read only" = "no";
         "guest ok" = "yes";
@@ -45,7 +45,7 @@
         "force group" = "users";
       };
       "Downloads" = {
-        "path" = "/sas-16tb/ds-downloads";
+        "path" = "/sas-24tb/ds-downloads";
         "browseable" = "yes";
         "read only" = "no";
         "guest ok" = "yes";
@@ -55,7 +55,7 @@
         "force group" = "users";
       };
       "cjdell" = {
-        "path" = "/sas-16tb/ds-cjdell";
+        "path" = "/sas-24tb/ds-cjdell";
         "browseable" = "yes";
         "read only" = "no";
         "guest ok" = "no";
@@ -64,17 +64,17 @@
         "force user" = "cjdell";
         "force group" = "users";
       };
-      "Backup" = {
-        "path" = "/sas-16tb/ds-backup";
-        "browseable" = "yes";
-        "read only" = "no";
-        "guest ok" = "no";
-        "create mask" = "0664";
-        "directory mask" = "0775";
-        "force user" = "cjdell";
-        "force group" = "users";
-        "fruit:time machine" = "yes";
-      };
+      # "Backup" = {
+      #   "path" = "/sas-24tb/ds-backup";
+      #   "browseable" = "yes";
+      #   "read only" = "no";
+      #   "guest ok" = "no";
+      #   "create mask" = "0664";
+      #   "directory mask" = "0775";
+      #   "force user" = "cjdell";
+      #   "force group" = "users";
+      #   "fruit:time machine" = "yes";
+      # };
     };
   };
 

@@ -14,7 +14,7 @@
     interval = "*:2,32"; # run this more often than syncoid (every 30 mins)
     datasets = {
       # https://github.com/jimsalterjrs/sanoid/wiki/Syncoid#snapshot-management-with-sanoid
-      "sas-16tb/ds-public" = {
+      "sas-24tb/ds-public" = {
         autoprune = true;
         autosnap = true;
         hourly = 4;

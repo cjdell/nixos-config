@@ -13,21 +13,21 @@
 
   virtualisation.oci-containers.backend = "podman";
 
-  virtualisation.oci-containers.containers = {
-    unifi = {
-      hostname = "unifi";
-      image = "jacobalberty/unifi";
-      autoStart = true;
-      volumes = [
-        "/srv/unifi:/unifi"
-      ];
-      environment = {
-        TZ = "Europe/London";
-      };
-      extraOptions = [
-        "--network=host"
-        "--privileged"
-      ];
-    };
-  };
+  # virtualisation.oci-containers.containers = {
+  #   unifi = {
+  #     hostname = "unifi";
+  #     image = "jacobalberty/unifi";
+  #     autoStart = true;
+  #     volumes = [
+  #       "/srv/unifi:/unifi"
+  #     ];
+  #     environment = {
+  #       TZ = "Europe/London";
+  #     };
+  #     extraOptions = [
+  #       "--network=host"
+  #       "--privileged"
+  #     ];
+  #   };
+  # };
 }
