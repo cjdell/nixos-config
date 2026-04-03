@@ -91,36 +91,36 @@ in
     ];
   };
 
-  fileSystems."/dbthr33/ds-public" = {
-    device = "dbthr33-server.grafton.tailscale:/dbthr33/ds-public";
-    fsType = "nfs4"; # Use NFSv4 for better performance
-    options = [
-      "rw"
-      "hard"
-      "intr"
-      "rsize=1048576"
-      "wsize=1048576"
-      "proto=tcp" # Ensure TCP is used for NFS
-      "acregmin=3"
-      "acregmax=60"
-      "acdirmin=30"
-      "acdirmax=120" # Increase dir attribute cache time
-      "noatime"
-      "nodiratime"
-      "x-systemd.after=network-online.target"
-    ];
-  };
+  # fileSystems."/dbthr33/ds-public" = {
+  #   device = "dbthr33-server.grafton.tailscale:/dbthr33/ds-public";
+  #   fsType = "nfs4"; # Use NFSv4 for better performance
+  #   options = [
+  #     "rw"
+  #     "hard"
+  #     "intr"
+  #     "rsize=1048576"
+  #     "wsize=1048576"
+  #     "proto=tcp" # Ensure TCP is used for NFS
+  #     "acregmin=3"
+  #     "acregmax=60"
+  #     "acdirmin=30"
+  #     "acdirmax=120" # Increase dir attribute cache time
+  #     "noatime"
+  #     "nodiratime"
+  #     "x-systemd.after=network-online.target"
+  #   ];
+  # };
 
-  fileSystems."/electronerds/ds-private" = {
-    device = "//colin.grafton.tailscale/Private";
-    fsType = "cifs";
-    options = [
-      "username=admin"
-      "password=${builtins.readFile "/home/cjdell/nixos-config/secrets/enpass.txt"}"
-      "uid=1000"
-      "gid=100"
-    ];
-  };
+  # fileSystems."/electronerds/ds-private" = {
+  #   device = "//colin.grafton.tailscale/Private";
+  #   fsType = "cifs";
+  #   options = [
+  #     "username=admin"
+  #     "password=${builtins.readFile "/home/cjdell/nixos-config/secrets/enpass.txt"}"
+  #     "uid=1000"
+  #     "gid=100"
+  #   ];
+  # };
 
   swapDevices = [
     #    { device = "/dev/disk/by-uuid/6f808fe4-0c13-4cf2-85d1-1d5cec20ca82"; }
