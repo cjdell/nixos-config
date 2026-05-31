@@ -30,9 +30,22 @@ in
 
     dataDir = "/samsung-4tb/ds-postgres/data";
 
-    extensions = ps: [ ps.pgvecto-rs ];
+    # extensions = ps: [ ps.pgvecto-rs ];
+    # settings = {
+    #   shared_preload_libraries = [ "vectors.so" ];
+    #   search_path = "\"$user\", public, vectors";
+    # };
+
+    extensions = ps: [
+      # ps.pgvecto-rs
+      ps.pgvector
+      ps.vectorchord
+    ];
     settings = {
-      shared_preload_libraries = [ "vectors.so" ];
+      shared_preload_libraries = [
+        "vectors.so"
+        "vchord.so"
+      ];
       search_path = "\"$user\", public, vectors";
     };
   };
@@ -88,3 +101,11 @@ in
 # chmod og-rwx server.key
 # systemctl restart postgresql
 # journalctl -u postgresql.service
+
+## Fix COLLATION
+# ALTER DATABASE immich REFRESH COLLATION VERSION
+
+## Fix permissions
+# for tbl in `sudo -u postgres psql -qAt -c "select tablename from pg_tables where schemaname = 'public';" immich` ; do  sudo -u postgres psql -c "alter table \"$tbl\" owner to immich" immich ; done
+# for tbl in `sudo -u postgres psql -qAt -c "select sequence_name from information_schema.sequences where sequence_schema = 'public';" immich` ; do  sudo -u postgres psql -c "alter sequence \"$tbl\" owner to immich" immich ; done
+# for tbl in `sudo -u postgres psql -qAt -c "select table_name from information_schema.views where table_schema = 'public';" immich` ; do  sudo -u postgres psql -c "alter view \"$tbl\" owner to immich" immich ; done

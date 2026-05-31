@@ -17,7 +17,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     home-manager = {
-      url = "github:nix-community/home-manager";
+      url = "github:nix-community/home-manager/release-25.11";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     plasma-manager = {
@@ -41,36 +41,35 @@
       home-manager,
       plasma-manager,
       pxe-server,
-    }@attrs:
+    }@inputs:
 
     let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs {
+        inherit system;
+        config = {
+          allowUnfree = true;
+          packageOverrides = pkgs: {
+            fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
+          };
+          permittedInsecurePackages = [
+            "broadcom-sta-6.30.223.271-59-6.17.7"
+          ];
+        };
+      };
+      homeManagerPrefs = {
+        home-manager.useGlobalPkgs = true;
+        home-manager.useUserPackages = true;
+        home-manager.sharedModules = [ plasma-manager.homeModules.plasma-manager ];
+      };
+      commonModules = {
+        imports = [
+          nixos-utils.nixosModules.rollback
+          nixos-utils.nixosModules.containers
+        ];
+      };
       nixosConfigurations =
-        let
-          system = "x86_64-linux";
-          pkgs = import nixpkgs {
-            inherit system;
-            config = {
-              allowUnfree = true;
-              packageOverrides = pkgs: {
-                fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
-              };
-              permittedInsecurePackages = [
-                "broadcom-sta-6.30.223.271-59-6.17.7"
-              ];
-            };
-          };
-          homeManagerPrefs = {
-            home-manager.useGlobalPkgs = true;
-            home-manager.useUserPackages = true;
-            home-manager.sharedModules = [ plasma-manager.homeModules.plasma-manager ];
-          };
-          commonModules = {
-            imports = [
-              nixos-utils.nixosModules.rollback
-              nixos-utils.nixosModules.containers
-            ];
-          };
-        in
+
         {
           zen3-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
@@ -386,25 +385,25 @@
             ];
           };
 
-          N100-NAS = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              sops-nix.nixosModules.sops
-              # ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "none")
-              ./common/nosleep.nix
-              ./common/sops.nix
-              # ./common/sunshine.nix
-              # ./common/sunshine-xe.nix
-              ./common/system.nix
-              ./machines/N100-NAS
-              ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
+          # N100-NAS = nixpkgs.lib.nixosSystem {
+          #   inherit system pkgs;
+          #   modules = [
+          #     sops-nix.nixosModules.sops
+          #     # ./common/desktop.nix
+          #     ((import ./common/folding-at-home.nix) "none")
+          #     ./common/nosleep.nix
+          #     ./common/sops.nix
+          #     # ./common/sunshine.nix
+          #     # ./common/sunshine-xe.nix
+          #     ./common/system.nix
+          #     ./machines/N100-NAS
+          #     ./users/cjdell
+          #     { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
+          #     home-manager.nixosModules.home-manager
+          #     homeManagerPrefs
+          #     commonModules
+          #   ];
+          # };
 
           GEN8-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
@@ -445,11 +444,49 @@
         };
     in
     {
-      nixosConfigurations = nixosConfigurations // {
-        # Map old names to new names...
-        ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
-        rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
-        coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c-nixos;
-      };
+      nixosConfigurations =
+        nixosConfigurations
+        // {
+          # Map old names to new names...
+          ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
+          rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
+          coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c-nixos;
+        }
+        # ================ New way of doing things ================
+        // (
+          let
+            hosts = builtins.filter (x: x != null) (
+              nixpkgs.lib.mapAttrsToList (name: value: if (value == "directory") then name else null) (
+                builtins.readDir ./hosts
+              )
+            );
+          in
+          builtins.listToAttrs (
+            (map (host: {
+              name = host;
+              value = nixpkgs.lib.nixosSystem {
+                inherit system pkgs;
+                modules = [
+                  # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
+                  {
+                    nix.registry.nixpkgs.flake = nixpkgs;
+                    networking.hostName = host;
+                  }
+                  ./common/system.nix
+                  ./users/cjdell
+                  home-manager.nixosModules.home-manager
+                  homeManagerPrefs
+                  commonModules
+
+                ]
+                ++ (import (./hosts + "/${host}") inputs);
+                specialArgs = {
+                  inherit inputs;
+                };
+              };
+            }))
+              hosts
+          )
+        );
     };
 }
