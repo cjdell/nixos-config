@@ -30,20 +30,12 @@ in
 
     dataDir = "/samsung-4tb/ds-postgres/data";
 
-    # extensions = ps: [ ps.pgvecto-rs ];
-    # settings = {
-    #   shared_preload_libraries = [ "vectors.so" ];
-    #   search_path = "\"$user\", public, vectors";
-    # };
-
     extensions = ps: [
-      # ps.pgvecto-rs
       ps.pgvector
       ps.vectorchord
     ];
     settings = {
       shared_preload_libraries = [
-        "vectors.so"
         "vchord.so"
       ];
       search_path = "\"$user\", public, vectors";
