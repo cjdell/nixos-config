@@ -35,7 +35,7 @@
   system.activationScripts.xhostConfig = ''
     mkdir -p /home/cjdell/.config/autostart
     echo "#!/usr/bin/env bash"                >   /home/cjdell/xhost-config.sh
-    echo "${pkgs.xorg.xhost}/bin/xhost +"     >>  /home/cjdell/xhost-config.sh
+    echo "${pkgs.xhost}/bin/xhost +"          >>  /home/cjdell/xhost-config.sh
     chmod +x                                      /home/cjdell/xhost-config.sh
     chown cjdell:users                            /home/cjdell/xhost-config.sh
 

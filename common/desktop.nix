@@ -72,7 +72,7 @@
     google-chrome
     kdePackages.kate
     bottles
-    xorg.xhost
+    xhost
     notify-desktop
     ddcutil
     imsprog

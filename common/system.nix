@@ -87,7 +87,7 @@
     deno
     cargo
     rustup
-    nixfmt-rfc-style
+    nixfmt
     alejandra
     nil
     nixd
