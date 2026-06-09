@@ -30,6 +30,7 @@
       sops = {
         secrets = {
           immich_db_password = { };
+          immich_oidc_client_secret = { };
           grafana_oidc_client_secret = {
             owner = config.systemd.services.grafana.serviceConfig.User;
           };

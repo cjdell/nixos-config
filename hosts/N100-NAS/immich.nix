@@ -24,7 +24,7 @@
         autoRegister = true;
         buttonText = "Login with OAuth";
         clientId = "immich";
-        clientSecret = "LrxLrbUHvX2KXCJabzKfF7KvXSV55Z8pdVbdbh5a9fDWzZUt";
+        clientSecret._secret = "${config.sops.secrets.immich_oidc_client_secret.path}";
         defaultStorageQuota = null;
         enabled = true;
         issuerUrl = "https://kanidm.home.chrisdell.info/oauth2/openid/immich";
