@@ -22,21 +22,18 @@
   ./scrutiny.nix
   ./tailscale.nix
 
-  (
-    { config, ... }:
-    {
-      system.autoRollback.enable = true;
+  ({ config, ... }: {
+    system.autoRollback.enable = true;
 
-      sops = {
-        secrets = {
-          immich_db_password = { };
-          immich_oidc_client_secret = { };
-          grafana_oidc_client_secret = {
-            owner = config.systemd.services.grafana.serviceConfig.User;
-          };
-          tailscale_pre_auth_key = { };
+    sops = {
+      secrets = {
+        immich_db_password = { };
+        immich_oidc_client_secret = { };
+        grafana_oidc_client_secret = {
+          owner = config.systemd.services.grafana.serviceConfig.User;
         };
+        tailscale_pre_auth_key = { };
       };
-    }
-  )
+    };
+  })
 ]

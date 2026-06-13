@@ -68,9 +68,47 @@
           nixos-utils.nixosModules.containers
         ];
       };
+    in
+    {
       nixosConfigurations =
+        # ================ New way of doing things ================
+        (
+          let
+            hosts = builtins.filter (x: x != null) (
+              nixpkgs.lib.mapAttrsToList (name: value: if (value == "directory") then name else null) (
+                builtins.readDir ./hosts
+              )
+            );
+          in
+          builtins.listToAttrs (
+            (map (host: {
+              name = host;
+              value = nixpkgs.lib.nixosSystem {
+                inherit system pkgs;
+                modules = [
+                  # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
+                  {
+                    nix.registry.nixpkgs.flake = nixpkgs;
+                    networking.hostName = host;
+                  }
+                  ./common/system.nix
+                  ./users/cjdell
+                  home-manager.nixosModules.home-manager
+                  homeManagerPrefs
+                  commonModules
 
-        {
+                ]
+                ++ (import (./hosts + "/${host}") inputs);
+                specialArgs = {
+                  inherit inputs;
+                };
+              };
+            }))
+              hosts
+          )
+        )
+        # ================ Old way of doing things ================
+        // {
           zen3-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
@@ -318,22 +356,6 @@
             ];
           };
 
-          rocketlakelatitude-nixos = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              # ./common/nfs.nix
-              ./common/podman.nix
-              ./common/system.nix
-              ./machines/rocketlakelatitude
-              ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           macbook-pro-2009-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
@@ -385,26 +407,6 @@
             ];
           };
 
-          # N100-NAS = nixpkgs.lib.nixosSystem {
-          #   inherit system pkgs;
-          #   modules = [
-          #     sops-nix.nixosModules.sops
-          #     # ./common/desktop.nix
-          #     ((import ./common/folding-at-home.nix) "none")
-          #     ./common/nosleep.nix
-          #     ./common/sops.nix
-          #     # ./common/sunshine.nix
-          #     # ./common/sunshine-xe.nix
-          #     ./common/system.nix
-          #     ./machines/N100-NAS
-          #     ./users/cjdell
-          #     { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
-          #     home-manager.nixosModules.home-manager
-          #     homeManagerPrefs
-          #     commonModules
-          #   ];
-          # };
-
           GEN8-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
@@ -442,51 +444,5 @@
             ];
           };
         };
-    in
-    {
-      nixosConfigurations =
-        nixosConfigurations
-        // {
-          # Map old names to new names...
-          ryzen5hp-nixos = nixosConfigurations.hp-elitedesk-ryzen-2400-nixos;
-          rocketlakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-11400-nixos;
-          coffeelakelenovo-nixos = nixosConfigurations.lenovo-thinkcentre-core-8400-c-nixos;
-        }
-        # ================ New way of doing things ================
-        // (
-          let
-            hosts = builtins.filter (x: x != null) (
-              nixpkgs.lib.mapAttrsToList (name: value: if (value == "directory") then name else null) (
-                builtins.readDir ./hosts
-              )
-            );
-          in
-          builtins.listToAttrs (
-            (map (host: {
-              name = host;
-              value = nixpkgs.lib.nixosSystem {
-                inherit system pkgs;
-                modules = [
-                  # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
-                  {
-                    nix.registry.nixpkgs.flake = nixpkgs;
-                    networking.hostName = host;
-                  }
-                  ./common/system.nix
-                  ./users/cjdell
-                  home-manager.nixosModules.home-manager
-                  homeManagerPrefs
-                  commonModules
-
-                ]
-                ++ (import (./hosts + "/${host}") inputs);
-                specialArgs = {
-                  inherit inputs;
-                };
-              };
-            }))
-              hosts
-          )
-        );
     };
 }
