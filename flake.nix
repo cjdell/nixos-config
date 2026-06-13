@@ -67,11 +67,13 @@
           nixos-utils.nixosModules.rollback
           nixos-utils.nixosModules.containers
         ];
+        # Make `nix-shell` use packages from this flake
+        nix.registry.nixpkgs.flake = nixpkgs;
       };
     in
     {
       nixosConfigurations =
-        # ================ New way of doing things ================
+        # Find configs in `hosts` folder and use the folder name as the host name
         (
           let
             hosts = builtins.filter (x: x != null) (
@@ -87,10 +89,7 @@
                 inherit system pkgs;
                 modules = [
                   # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
-                  {
-                    nix.registry.nixpkgs.flake = nixpkgs;
-                    networking.hostName = host;
-                  }
+                  { networking.hostName = host; }
                   ./common/system.nix
                   ./users/cjdell
                   home-manager.nixosModules.home-manager
@@ -107,7 +106,7 @@
               hosts
           )
         )
-        # ================ Old way of doing things ================
+        #  Legacy configs for old machines (to be converted)
         // {
           zen3-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
@@ -122,7 +121,6 @@
               ./common/wine.nix
               ./machines/zen3
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -141,7 +139,6 @@
               ./common/wine.nix
               ./machines/zen1
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -158,7 +155,6 @@
               ./common/wine.nix
               ./users/cjdell/nix.nix
               (import ./machines/precision pxe-server)
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               nixos-hardware.nixosModules.dell-precision-5520
               commonModules
             ];
@@ -176,7 +172,6 @@
               ./common/wine.nix
               ./machines/haswellatx
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -196,7 +191,6 @@
               ./common/system.nix
               ./machines/dell-optiplex-core-4770
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -216,7 +210,6 @@
               ./common/wine.nix
               ./machines/haswellmatx
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -235,7 +228,6 @@
               ./common/system.nix
               ./machines/kabylakeitx
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -255,7 +247,6 @@
               ./common/system.nix
               ./machines/coffeelakedell
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -275,7 +266,6 @@
               ./common/system.nix
               ./machines/dell-vostro-kabylake
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -294,7 +284,6 @@
               ./common/system.nix
               ./machines/lenovo-thinkcentre-core-8400-a
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -313,7 +302,6 @@
               ./common/system.nix
               ./machines/lenovo-thinkcentre-core-8400-c
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -331,7 +319,6 @@
               ./common/system.nix
               ./machines/hp-elitedesk-ryzen-2400
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -349,7 +336,6 @@
               ./common/system.nix
               ./machines/lenovo-thinkcentre-core-11400
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -365,7 +351,6 @@
               ./common/system.nix
               ./machines/macbook-pro-2009
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -384,7 +369,6 @@
               ./common/system.nix
               ./machines/hp-z240-xeon-1240v6
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -400,7 +384,6 @@
               ./common/system.nix
               ./machines/N40L-NAS
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -416,7 +399,6 @@
               ./common/system.nix
               ./machines/GEN8-NAS
               ./users/cjdell
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
               home-manager.nixosModules.home-manager
               homeManagerPrefs
               commonModules
@@ -440,7 +422,6 @@
               ./common/system.nix
               ./users/user.nix
               ./machines/arcadebox-101
-              { nix.registry.nixpkgs.flake = nixpkgs; } # For "nix shell"
             ];
           };
         };
