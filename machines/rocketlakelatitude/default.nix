@@ -4,7 +4,7 @@
   imports = [
     ./ardour.nix
     ./hardware-configuration.nix
-    ./wireguard.nix
+    # ./wireguard.nix
   ];
 
   networking.hostName = "rocketlakelatitude-nixos"; # Define your hostname.

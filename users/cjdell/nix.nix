@@ -26,10 +26,10 @@
 
   users.groups.libvirtd.members = [ "cjdell" ];
 
-  system.activationScripts.homeDir = ''
-    usermod -u 1000 cjdell
-    chown -R 1000 /home/cjdell
-  '';
+  # system.activationScripts.homeDir = ''
+  #   usermod -u 1000 cjdell
+  #   chown -R 1000 /home/cjdell
+  # '';
 
   # Allow launching of remote X11 apps on this display
   system.activationScripts.xhostConfig = ''
