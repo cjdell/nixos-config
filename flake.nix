@@ -25,10 +25,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.home-manager.follows = "home-manager";
     };
-    pxe-server = {
-      url = "git+file:///home/cjdell/Projects/pxe-server";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    # pxe-server = {
+    #   url = "git+file:///home/cjdell/Projects/pxe-server";
+    #   inputs.nixpkgs.follows = "nixpkgs";
+    # };
   };
 
   outputs =
@@ -40,7 +40,7 @@
       sops-nix,
       home-manager,
       plasma-manager,
-      pxe-server,
+      # pxe-server,
     }@inputs:
 
     let
@@ -108,25 +108,6 @@
         )
         #  Legacy configs for old machines (to be converted)
         // {
-          zen3-nixos = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "amd")
-              ./common/nfs.nix
-              ./common/nosleep.nix
-              ./common/podman.nix
-              ./common/sunshine.nix
-              ./common/system.nix
-              ./common/wine.nix
-              ./machines/zen3
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           zen1-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
@@ -154,7 +135,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./users/cjdell/nix.nix
-              (import ./machines/precision pxe-server)
+              # (import ./machines/precision pxe-server)
               nixos-hardware.nixosModules.dell-precision-5520
               commonModules
             ];
