@@ -40,7 +40,7 @@
         tokenEndpointAuthMethod = "client_secret_post";
       };
     };
-    mediaLocation = "/samsung-4tb/ds-photos/immich";
+    mediaLocation = "/samsung-4tb/ds-photos/immich/upload";
     openFirewall = true;
   };
 

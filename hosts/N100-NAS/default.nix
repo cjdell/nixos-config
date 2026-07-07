@@ -12,7 +12,8 @@
   ./containers.nix
   ./filebrowser.nix
   ./hardware-configuration.nix
-  ./immich.nix
+  # ./immich.nix
+  ./immich-container.nix
   ./jellyfin.nix
   ./monitoring.nix
   ./networking.nix
