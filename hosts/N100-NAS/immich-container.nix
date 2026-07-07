@@ -1,5 +1,6 @@
 { config, utils, ... }:
 let
+  IMMICH_UID = 2283;
   # Write compiled config file here...
   configFile = "/run/immich.json";
   # Config file which includes SOPS secrets...
@@ -37,7 +38,7 @@ in
   };
 
   users.users.immich = {
-    uid = 2283;
+    uid = IMMICH_UID;
     group = "users";
     isNormalUser = true;
   };
@@ -66,7 +67,7 @@ in
       };
       extraOptions = [
         "--ip=10.88.0.50"
-        "--user=2283:100"
+        "--user=${toString IMMICH_UID}:100"
       ];
       dependsOn = [
         "immich-redis"
@@ -90,7 +91,7 @@ in
       };
       extraOptions = [
         "--ip=10.88.0.51"
-        "--user=2283:100"
+        "--user=${toString IMMICH_UID}:100"
       ];
     };
 
@@ -100,7 +101,7 @@ in
       autoStart = true;
       extraOptions = [
         "--ip=10.88.0.52"
-        "--user=2283:100"
+        "--user=${toString IMMICH_UID}:100"
       ];
     };
 
@@ -120,7 +121,7 @@ in
       extraOptions = [
         "--ip=10.88.0.53"
         "--shm-size=128mb"
-        "--user=2283:100"
+        "--user=${toString IMMICH_UID}:100"
       ];
     };
   };
