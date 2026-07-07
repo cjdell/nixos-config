@@ -33,6 +33,7 @@
         grafana_oidc_client_secret = {
           owner = config.systemd.services.grafana.serviceConfig.User;
         };
+        filebrowser_oidc_client_secret = { };
         tailscale_pre_auth_key = { };
       };
     };

@@ -1,7 +1,7 @@
 { config, utils, ... }:
 let
   # Write compiled config file here...
-  immichConfigFile = "/run/immich.json";
+  configFile = "/run/immich.json";
   # Config file which includes SOPS secrets...
   secretsReplacement = (
     utils.genJqSecretsReplacement { } {
@@ -24,10 +24,11 @@ let
         timeout = 30000;
         tokenEndpointAuthMethod = "client_secret_post";
       };
-    } immichConfigFile
+    } configFile
   );
 in
 {
+  # journalctl -u immich-secrets -f
   systemd.services.immich-secrets = {
     description = "Immich Secrets";
     requiredBy = [ "podman-immich-server.service" ];
@@ -44,7 +45,7 @@ in
         "2284:2283"
       ];
       volumes = [
-        "${immichConfigFile}:/config.json" # Config file. Contains OIDC settings
+        "${configFile}:/config.json" # Config file. Contains OIDC settings
         "/samsung-4tb/ds-photos/immich/upload:/data" # Native data
         "/samsung-4tb/ds-photos:/samsung-4tb/ds-photos" # External Libraries
         "/etc/localtime:/etc/localtime:ro"
