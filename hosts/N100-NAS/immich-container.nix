@@ -36,13 +36,19 @@ in
     script = secretsReplacement.script;
   };
 
+  users.users.immich = {
+    uid = 2283;
+    group = "users";
+    isNormalUser = true;
+  };
+
   virtualisation.oci-containers.containers = {
     immich-server = {
       hostname = "immich-server";
       image = "ghcr.io/immich-app/immich-server:v3.0.1";
       autoStart = true;
       ports = [
-        "2284:2283"
+        "2283:2283"
       ];
       volumes = [
         "${configFile}:/config.json" # Config file. Contains OIDC settings
@@ -60,6 +66,7 @@ in
       };
       extraOptions = [
         "--ip=10.88.0.50"
+        "--user=2283:100"
       ];
       dependsOn = [
         "immich-redis"
@@ -83,6 +90,7 @@ in
       };
       extraOptions = [
         "--ip=10.88.0.51"
+        "--user=2283:100"
       ];
     };
 
@@ -92,6 +100,7 @@ in
       autoStart = true;
       extraOptions = [
         "--ip=10.88.0.52"
+        "--user=2283:100"
       ];
     };
 
@@ -111,12 +120,8 @@ in
       extraOptions = [
         "--ip=10.88.0.53"
         "--shm-size=128mb"
+        "--user=2283:100"
       ];
     };
   };
 }
-
-# sudo mkdir          /samsung-4tb/ds-photos/immich/upload
-# sudo mkdir          /samsung-4tb/ds-photos/immich/model-cache
-# sudo mkdir          /samsung-4tb/ds-photos/immich/postgres
-# sudo chmod -R +rwX  /samsung-4tb/ds-photos/immich
