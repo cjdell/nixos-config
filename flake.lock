@@ -40,12 +40,15 @@
       }
     },
     "nixos-hardware": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
       "locked": {
-        "lastModified": 1771585855,
-        "narHash": "sha256-sJSX2JW33I+6fFoXbmTXFMxcsiYFkDRIoAOWfF1uU54=",
+        "lastModified": 1785716867,
+        "narHash": "sha256-nhOQebrNSYcx5NfGNZ52eEyAf7tQ4o4BS4gCC4Ky2hk=",
         "owner": "cjdell",
         "repo": "nixos-hardware",
-        "rev": "c432ed5bbf2cf1171159c1fb86d67f2bddf6bd8c",
+        "rev": "0721ca277cbd0673a0adfa195b89525b5a9253a7",
         "type": "github"
       },
       "original": {
@@ -77,6 +80,19 @@
       }
     },
     "nixpkgs": {
+      "locked": {
+        "lastModified": 1767892417,
+        "narHash": "sha256-8bW3q88CEg2u4hSP66Vf4lpbLonHz7hqDNBMcCY7E9U=",
+        "rev": "3497aa5c9457a9d88d71fa93a4a8368816fbeeba",
+        "type": "tarball",
+        "url": "https://releases.nixos.org/nixos/unstable/nixos-26.05pre924538.3497aa5c9457/nixexprs.tar.xz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
+      }
+    },
+    "nixpkgs_2": {
       "locked": {
         "lastModified": 1781216227,
         "narHash": "sha256-9mUW6gNwoN2SWc/l0fW4svPNOulXLl8ijqKyeSOGgJE=",
@@ -120,7 +136,7 @@
         "home-manager": "home-manager",
         "nixos-hardware": "nixos-hardware",
         "nixos-utils": "nixos-utils",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": "nixpkgs_2",
         "plasma-manager": "plasma-manager",
         "sops-nix": "sops-nix"
       }

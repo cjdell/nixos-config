@@ -135,7 +135,7 @@
               ./common/system.nix
               ./common/wine.nix
               ./users/cjdell/nix.nix
-              # (import ./machines/precision pxe-server)
+              ./machines/precision
               nixos-hardware.nixosModules.dell-precision-5520
               commonModules
             ];
