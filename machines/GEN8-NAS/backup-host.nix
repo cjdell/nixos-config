@@ -35,8 +35,7 @@ in
 
   nix.settings.trusted-users = [ "backup" ];
 
-  systemd.services.backup-permissions =
-  {
+  systemd.services.backup-permissions = {
     script = ''
       ${pkgs.coreutils-full}/bin/mkdir -p ${HOME_DIR}
       ${pkgs.coreutils-full}/bin/chown -R backup:backup ${HOME_DIR}

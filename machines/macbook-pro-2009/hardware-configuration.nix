@@ -28,7 +28,10 @@
     "sd_mod"
   ];
   # boot.initrd.kernelModules = [ "amdgpu" ];
-  boot.kernelModules = [ "kvm-intel" "wl" ];
+  boot.kernelModules = [
+    "kvm-intel"
+    "wl"
+  ];
   boot.extraModulePackages = with config.boot.kernelPackages; [ broadcom_sta ];
 
   # boot.kernelParams = [
@@ -94,7 +97,10 @@
   # hardware.nvidia-container-toolkit.enable = true;
 
   # blacklist similar modules to avoid collision
-  boot.blacklistedKernelModules = [ "b43" "bcma" ];
+  boot.blacklistedKernelModules = [
+    "b43"
+    "bcma"
+  ];
 
   # nixpkgs.config.permittedInsecurePackages = "broadcom-sta-6.30.223.271-57-6.16.7";
 

@@ -1,5 +1,3 @@
-{ config, lib, pkgs, modulesPath, ... }:
-
 {
   services.samba = {
     enable = true;

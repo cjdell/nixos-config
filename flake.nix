@@ -25,10 +25,18 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.home-manager.follows = "home-manager";
     };
-    # pxe-server = {
-    #   url = "git+file:///home/cjdell/Projects/pxe-server";
-    #   inputs.nixpkgs.follows = "nixpkgs";
-    # };
+    stylix = {
+      url = "github:nix-community/stylix/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    llama-cpp = {
+      url = "github:ggml-org/llama.cpp";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    llama-cpp-uma = {
+      url = "git+file:///home/cjdell/Projects/llama.cpp";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -40,7 +48,9 @@
       sops-nix,
       home-manager,
       plasma-manager,
-      # pxe-server,
+      stylix,
+      llama-cpp,
+      llama-cpp-uma,
     }@inputs:
 
     let

@@ -1,4 +1,10 @@
-{ config, lib, pkgs, modulesPath, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  modulesPath,
+  ...
+}:
 
 {
   networking.wireguard.interfaces = {
@@ -11,12 +17,12 @@
       # This allows the wireguard server to route your traffic to the internet and hence be like a VPN
       # For this to work you have to set the dnsserver IP of your router (or dnsserver of choice) in your clients
       postSetup = ''
-        
+
       '';
 
       # This undoes the above command
       postShutdown = ''
-        
+
       '';
 
       # Path to the private key file.

@@ -38,7 +38,11 @@ in
     "nvme"
     "usb_storage"
     "sd_mod"
-    "ohci_pci" "ehci_pci" "pata_atiixp" "mpt3sas" "usbhid"
+    "ohci_pci"
+    "ehci_pci"
+    "pata_atiixp"
+    "mpt3sas"
+    "usbhid"
   ];
   boot.initrd.kernelModules = [ ];
   boot.kernelModules = [ "kvm-amd" ];
@@ -63,7 +67,7 @@ in
 
   fileSystems."/" = {
     device = "/dev/disk/by-uuid/21ef19ea-c954-45b4-87ef-9bee40377375";
-#    device = "/dev/disk/by-label/ROOT";
+    #    device = "/dev/disk/by-label/ROOT";
     fsType = "ext4";
   };
 

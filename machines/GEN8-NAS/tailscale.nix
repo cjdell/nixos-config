@@ -1,4 +1,7 @@
-{ config, lib, pkgs, modulesPath, ... }:
+{
+  config,
+  ...
+}:
 
 {
   services.tailscale = {

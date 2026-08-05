@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   NIX_LD_LIBRARY_PATH = "/run/current-system/sw/share/nix-ld/lib";
