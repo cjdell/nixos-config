@@ -16,6 +16,8 @@
     "L+    /opt/rocm   -    -    -     -    ${pkgs.rocmPackages.clr}"
   ];
 
+  boot.kernelParams = [ "amdgpu.lockup_timeout=10000" ];
+
   systemd.services.llama-swap = {
     description = "Llama Swap";
     after = [ "wait-for-network.service" ];
@@ -24,12 +26,15 @@
 
     environment = {
       HSA_OVERRIDE_GFX_VERSION = "9.0.0";
+      # GGML_VK_LOG_SUBMISSIONS = "1";
+      # GGML_VK_SERIALIZE_SUBMISSIONS = "1";
     };
 
     serviceConfig =
       let
         llama-cpp-cpu = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        llama-cpp-vulkan = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
+        llama-cpp-vulkan =
+          specialArgs.inputs.llama-cpp-uma.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
         llama-cpp-rocm = specialArgs.inputs.llama-cpp-uma.packages.${pkgs.stdenv.hostPlatform.system}.rocm;
 
         llamaCmdCpu = "${llama-cpp-cpu}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 16 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
@@ -65,17 +70,17 @@
             #   cmd = "${llamaCmdCpu} -m ${modelsPath}/Laguna-S-2.1-UD-IQ4_NL-00001-of-00003.gguf --ctx-size 262144 --metrics --reasoning-preserve";
             # };
 
-            "cpu" = {
-              cmd = "${llamaCmdCpu} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
-            };
+            # "cpu" = {
+            #   cmd = "${llamaCmdCpu} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
+            # };
 
             "vulkan" = {
               cmd = "${llamaCmdVulkan} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
             };
 
-            "rocm" = {
-              cmd = "${llamaCmdRocm} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
-            };
+            # "rocm" = {
+            #   cmd = "${llamaCmdRocm} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
+            # };
           };
         };
 

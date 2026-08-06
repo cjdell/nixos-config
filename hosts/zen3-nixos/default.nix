@@ -14,9 +14,13 @@
   ./hardware-configuration.nix
   ./netboot.nix
 
-  ({ lib, ... }: {
+  ({ lib, pkgs, ... }: {
 
     # 74:56:3c:6f:aa:16
+
+    environment.systemPackages = with pkgs; [
+      opencode
+    ];
 
     system.autoRollback.enable = true;
 

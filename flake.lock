@@ -304,11 +304,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785687473,
-        "narHash": "sha256-sgFVddVCCK4nsg1pnlKqLSGQ+Cd2JMffaZjBmr73asc=",
+        "lastModified": 1786018678,
+        "narHash": "sha256-a6oshhgc4pctcBPmA0qfRkVHElUXsnOrP5ZwsFozYhc=",
         "ref": "refs/heads/master",
-        "rev": "38eeafa982e73c59e46e402a73d13024ff56ee01",
-        "revCount": 10231,
+        "rev": "d6f2fb54d2eb1ecb226593617b64f742ef58902e",
+        "revCount": 10296,
         "type": "git",
         "url": "file:///home/cjdell/Projects/llama.cpp"
       },
