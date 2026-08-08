@@ -37,6 +37,15 @@
       url = "git+file:///home/cjdell/Projects/llama.cpp";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    disko = {
+      url = "github:nix-community/disko";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    disko-zfs = {
+      url = "github:numtide/disko-zfs";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.disko.follows = "disko";
+    };
   };
 
   outputs =
@@ -51,6 +60,8 @@
       stylix,
       llama-cpp,
       llama-cpp-uma,
+      disko,
+      disko-zfs,
     }@inputs:
 
     let
@@ -366,20 +377,20 @@
             ];
           };
 
-          N40L-NAS = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              sops-nix.nixosModules.sops
-              ./common/nosleep.nix
-              ./common/sops.nix
-              ./common/system.nix
-              ./machines/N40L-NAS
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
+          # N40L-NAS = nixpkgs.lib.nixosSystem {
+          #   inherit system pkgs;
+          #   modules = [
+          #     sops-nix.nixosModules.sops
+          #     ./common/nosleep.nix
+          #     ./common/sops.nix
+          #     ./common/system.nix
+          #     ./machines/N40L-NAS
+          #     ./users/cjdell
+          #     home-manager.nixosModules.home-manager
+          #     homeManagerPrefs
+          #     commonModules
+          #   ];
+          # };
 
           GEN8-NAS = nixpkgs.lib.nixosSystem {
             inherit system pkgs;

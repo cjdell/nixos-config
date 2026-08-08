@@ -51,7 +51,9 @@ in
   boot.kernelParams = [ ];
 
   boot.supportedFilesystems = [ "zfs" ];
+
   boot.zfs.extraPools = [ "sas-16tb" ];
+  boot.zfs.forceImportRoot = false;
 
   boot.extraModprobeConfig = ''
     options zfs zfs_arc_max=4294967296
@@ -74,6 +76,16 @@ in
   swapDevices = [
     { device = "/swapfile"; }
   ];
+
+  disko.zfs = {
+    enable = true;
+
+    settings = {
+      datasets = {
+        "sas-16tb/ds-external-backups/ds-dbthr33/ds-frigate-archive" = { };
+      };
+    };
+  };
 
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
   hardware.cpu.intel.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;
