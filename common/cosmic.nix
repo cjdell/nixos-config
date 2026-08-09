@@ -16,9 +16,8 @@
   hardware.bluetooth.enable = true; # enables support for Bluetooth
   hardware.bluetooth.powerOnBoot = true; # powers up the default Bluetooth controller on boot
 
-  # Enable the KDE Plasma Desktop Environment.
-  services.displayManager.sddm.enable = true;
-  services.desktopManager.plasma6.enable = true;
+  services.displayManager.cosmic-greeter.enable = true;
+  services.desktopManager.cosmic.enable = true;
 
   # Configure keymap in X11
   services.xserver.xkb = {
@@ -41,13 +40,7 @@
   # Install firefox.
   programs.firefox.enable = true;
 
-  programs.virt-manager.enable = true;
-
   programs.gnome-disks.enable = true;
-
-  virtualisation.libvirtd.enable = true;
-
-  virtualisation.spiceUSBRedirection.enable = true;
 
   environment.sessionVariables.NIXOS_OZONE_WL = "1";
 
@@ -70,7 +63,6 @@
     appimage-run
     geekbench
     google-chrome
-    kdePackages.kate
     bottles
     xhost
     notify-desktop
