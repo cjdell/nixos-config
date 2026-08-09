@@ -87,6 +87,7 @@
     # Programming
     deno
     cargo
+    cargo-binutils
     rustup
     nixfmt
     alejandra

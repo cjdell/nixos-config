@@ -27,14 +27,14 @@ in
   environment.systemPackages = [
     (pkgs.writeShellScriptBin "ardour-with-plugin-support" ''
       export LD_LIBRARY_PATH=${config.services.pipewire.package.jack}/lib:${NIX_LD_LIBRARY_PATH}
-      exec ${pkgs.ardour}/bin/ardour8 "$@"
+      exec ${lib.getExe pkgs.ardour} "$@"
     '')
 
     (pkgs.makeDesktopItem {
       name = "ardour-with-plugin-support";
       desktopName = "Ardour With Plugin Support";
       exec = "ardour-with-plugin-support";
-      icon = "${pkgs.ardour}/share/icons/hicolor/512x512/apps/ardour8.png";
+      icon = "${pkgs.ardour}/share/icons/hicolor/512x512/apps/ardour9.png";
       categories = [
         "AudioVideo"
         "Audio"
