@@ -3,6 +3,7 @@
 [
   ../../common/gnome.nix
   ../../common/podman.nix
+  ../../common/printer.nix
   ../../common/system.nix
   ../../users/cjdell
 
