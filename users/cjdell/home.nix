@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 {
   home.stateVersion = "24.11";
 
@@ -12,7 +12,9 @@
   };
 
   programs.plasma = {
-    enable = true;
+    # Only enabled when the host actually runs Plasma — users/cjdell/default.nix
+    # overrides this with services.desktopManager.plasma6.enable.
+    enable = lib.mkDefault true;
 
     kscreenlocker = {
       autoLock = false;

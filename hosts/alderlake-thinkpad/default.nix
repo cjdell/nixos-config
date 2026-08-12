@@ -52,4 +52,56 @@
     #   load_direnv = "shell_hook";
     # };
   })
+
+  # This machine runs GNOME, but ~/.config still carries GTK settings written by
+  # KDE Plasma's kde-gtk-config during the initial setup (Aug 2026), pointing at
+  # the Breeze icon/cursor themes which are not installed here. That left GNOME
+  # with a fallback (white square) cursor and missing window-decoration icons.
+  # Point GTK/GNOME at the installed Adwaita theme instead and neutralise the
+  # stale KDE GTK files.
+  {
+    home-manager.users.cjdell = {
+      gtk = {
+        enable = true;
+        theme.name = "Adwaita";
+        iconTheme.name = "Adwaita";
+        cursorTheme.name = "Adwaita";
+      };
+
+      dconf.settings."org/gnome/desktop/interface" = {
+        cursor-theme = "Adwaita";
+        icon-theme = "Adwaita";
+        gtk-theme = "Adwaita";
+      };
+
+      # Remove stale KDE-generated GTK files (settings.ini is managed by the gtk
+      # module above; these are not).
+      home.file = {
+        ".config/gtkrc" = {
+          text = "";
+          force = true;
+        };
+        ".config/gtkrc-2.0" = {
+          text = "";
+          force = true;
+        };
+        ".config/gtk-3.0/gtk.css" = {
+          text = "";
+          force = true;
+        };
+        ".config/gtk-3.0/colors.css" = {
+          text = "";
+          force = true;
+        };
+        ".config/gtk-4.0/gtk.css" = {
+          text = "";
+          force = true;
+        };
+        ".config/gtk-4.0/colors.css" = {
+          text = "";
+          force = true;
+        };
+      };
+    };
+  }
 ]
