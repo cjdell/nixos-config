@@ -1,11 +1,16 @@
-{ ... }:
+{ sops-nix, ... }:
 
 [
+  sops-nix.nixosModules.sops
+
   ../../common/gnome.nix
   ../../common/podman.nix
   ../../common/printer.nix
+  ../../common/sops.nix
   ../../common/system.nix
   ../../users/cjdell
+
+  ./tailscale.nix
 
   ({ lib, pkgs, ... }: {
     imports = [
@@ -14,6 +19,8 @@
     ];
 
     services.fprintd.enable = true;
+
+    sops.secrets.tailscale_pre_auth_key = { };
 
     services.displayManager.autoLogin.enable = lib.mkForce false;
 
