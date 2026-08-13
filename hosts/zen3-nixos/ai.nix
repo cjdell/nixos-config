@@ -1,10 +1,20 @@
 {
+  config,
   lib,
   pkgs,
   specialArgs,
   ...
 }:
 
+let
+  llama-log-viewer = pkgs.rustPlatform.buildRustPackage {
+    pname = "llama-log-viewer";
+    version = "0.1.0";
+    src = ../../llama-log-viewer;
+    cargoLock.lockFile = ../../llama-log-viewer/Cargo.lock;
+    doCheck = false;
+  };
+in
 {
   environment.systemPackages = with pkgs; [
     rocmPackages.rocminfo
@@ -16,6 +26,7 @@
     "L+    /opt/rocm   -    -    -     -    ${pkgs.rocmPackages.clr}"
   ];
 
+  # Stop crashes for large context sizes
   boot.kernelParams = [ "amdgpu.lockup_timeout=10000" ];
 
   systemd.services.llama-swap = {
@@ -92,5 +103,63 @@
         WorkingDirectory = modelsPath;
         Restart = "always";
       };
+  };
+
+  systemd.services.llama-log-viewer = {
+    description = "Llama Log Viewer";
+    after = [ "wait-for-network.service" ];
+    wants = [ "wait-for-network.service" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      ExecStart = "${llama-log-viewer}/bin/llama-log-viewer --logs /home/cjdell/nixos-config/llama-logs --host 127.0.0.1 --port 8083";
+      Restart = "always";
+      RestartSec = 5;
+    };
+  };
+
+  virtualisation.oci-containers.containers.diamcp = {
+    hostname = "diamcp";
+    image = "localhost/diamcp";
+    autoStart = true;
+    ports = [ "8082:8000" ];
+    volumes = [
+      "/home/cjdell:/workspace"
+    ];
+    extraOptions = [
+      "--user=${toString config.users.users.cjdell.uid}:100"
+    ];
+  };
+
+  services.nginx.virtualHosts = {
+    "192.168.49.50" = {
+      locations."/" = {
+        proxyPass = "http://127.0.0.1:8081";
+        recommendedProxySettings = true;
+        proxyWebsockets = true;
+      };
+
+      locations."/mcp" = {
+        proxyPass = "http://127.0.0.1:8082/mcp";
+        recommendedProxySettings = true;
+        proxyWebsockets = true;
+      };
+
+      locations."/logs" = {
+        # Strip the /logs prefix explicitly, then proxy without a URI so
+        # nginx forwards the rewritten path (e.g. /logs/api/stats -> /api/stats)
+        proxyPass = "http://127.0.0.1:8083";
+        extraConfig = ''
+          rewrite ^/logs/?(.*)$ /$1 break;
+        '';
+        recommendedProxySettings = true;
+        proxyWebsockets = true;
+      };
+
+      # Redirect bare /logs to /logs/ so relative URLs resolve inside the app
+      locations."= /logs" = {
+        return = "301 /logs/";
+      };
+    };
   };
 }

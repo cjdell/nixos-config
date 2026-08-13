@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Llama Log Viewer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <h1>🦙 Llama Log Viewer</h1>
+  <div id="stats" class="stats"></div>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Search message content…" autocomplete="off">
+    <button id="refresh" title="Reload log index">⟳ Refresh</button>
+  </div>
+</header>
+
+<div id="layout">
+  <nav id="tree-panel">
+    <div class="panel-title">Threads <span id="tree-count" class="muted"></span>
+      <button id="collapse-all" class="mini-btn" title="Collapse all branches">Collapse all</button>
+    </div>
+    <div id="tree"></div>
+  </nav>
+  <main id="detail-panel">
+    <div id="detail-empty" class="placeholder">
+      <p>Select a thread on the left to inspect it.</p>
+      <p class="muted">Branches diverge where conversation contexts stop matching; leaves are complete API calls.</p>
+    </div>
+    <div id="detail" class="hidden"></div>
+  </main>
+</div>
+
+<div id="raw-modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="raw-title"></span>
+      <button id="raw-close" class="btn">✕</button>
+    </div>
+    <pre id="raw-content"></pre>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

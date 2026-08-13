@@ -1,0 +1,11 @@
+[package]
+name = "llama-log-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "Web viewer for llama.cpp --log-prompts-dir logs, showing conversations as a deduplicated tree"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
