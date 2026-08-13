@@ -146,10 +146,19 @@
               }
               {
                 alert = "ServiceDown";
-                expr = "up == 0";
+                expr = "up{job=\"node\"} == 0";
                 for = "2m";
                 labels.severity = "critical";
                 annotations.summary = "{{ $labels.instance }} is down";
+              }
+              {
+                # Auxiliary exporters (smartctl/zfs/systemd) can be slow or
+                # briefly unreachable without the host itself being down.
+                alert = "ExporterDown";
+                expr = "up{job!=\"node\"} == 0";
+                for = "5m";
+                labels.severity = "warning";
+                annotations.summary = "{{ $labels.job }} exporter on {{ $labels.instance }} is unreachable";
               }
             ];
           }
@@ -233,6 +242,8 @@
         ];
         # SMART checks are slow, scrape less frequently
         scrape_interval = "120s";
+        # smartctl queries can exceed the 10s default on slow/degraded disks
+        scrape_timeout = "30s";
         relabel_configs = [
           {
             source_labels = [ "__address__" ];
