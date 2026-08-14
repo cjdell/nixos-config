@@ -1,5 +1,11 @@
-# sudo nixos-rebuild boot   --impure --flake . --max-jobs 1
-# sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+# alderlake-thinkpad offloads all Nix builds to the zen3-nixos build machine
+# (192.168.49.50): nix.settings.max-jobs = 0 disables local builds and the
+# daemon schedules up to 16 parallel jobs on the remote. Do NOT pass --max-jobs
+# to nixos-rebuild there — it overrides that and serializes remote builds.
+# Hosts without a build machine can still append --max-jobs 1 to keep builds
+# light on limited-RAM targets.
+# sudo nixos-rebuild boot   --impure --flake .
+# sudo nixos-rebuild switch --impure --flake .
 {
   inputs = {
     # Stable nixpkgs: every host except alderlake-thinkpad (see nixpkgsFor).
@@ -81,6 +87,15 @@
     let
       system = "x86_64-linux";
 
+      # zed-editor from the zed flake's own package output rather than its
+      # overlay: the overlay builds against each host's nixpkgs, which fails on
+      # stable nixos-26.05 (nixpkgs' cargo-about passes --features=cli, which
+      # the 0.8.2 that zed pins lacks). The flake package builds against zed's
+      # own pinned nixpkgs and is a single derivation shared by every host.
+      zed-editor-overlay = _final: _prev: {
+        zed-editor = zed.packages.${system}.default;
+      };
+
       # Build a pkgs set from a given nixpkgs input (shared package config).
       mkPkgs =
         nixpkgs:
@@ -100,7 +115,7 @@
           };
           # Bleeding-edge zed-editor (source build tracking main) instead of the
           # prebuilt release binary that nixpkgs' zed-editor packages.
-          overlays = [ zed.overlays.default ];
+          overlays = [ zed-editor-overlay ];
         };
 
       # Stable pkgs used by the legacy machines below.
@@ -449,7 +464,7 @@
                 permittedInsecurePackages = [ "freeimage-2021-11-01" ];
               };
               # Same zed-editor overlay as mkPkgs (arcadebox installs desktop.nix).
-              overlays = [ zed.overlays.default ];
+              overlays = [ zed-editor-overlay ];
             };
             modules = [
               ./common/arcade.nix

@@ -61,13 +61,20 @@ You can also pass a generation number: `sudo nixos-confirm 189`.
 Per-host rebuilds use the flake; the canonical commands (from `flake.nix` header):
 
 ```sh
-sudo nixos-rebuild boot   --impure --flake . --max-jobs 1
-sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+sudo nixos-rebuild boot   --impure --flake .
+sudo nixos-rebuild switch --impure --flake .
 ```
 
 - `--impure` is required (config reads the live system, e.g. UIDs).
-- `--max-jobs 1` keeps builds light on the target host (commonly used on
-  machines with limited RAM); the whole flake evaluates all ~20 hosts either way.
+- **alderlake-thinkpad builds exclusively on zen3-nixos** (`192.168.49.50`):
+  `nix.distributedBuilds` + `nix.buildMachines` write `/etc/nix/machines`
+  (Nix's default `builders = @/etc/nix/machines` picks it up) and
+  `nix.settings.max-jobs = 0` disables local builds, so the daemon schedules
+  up to 16 parallel jobs on the remote. Do **not** pass `--max-jobs` there —
+  it overrides the config and serializes remote builds to one at a time.
+- Hosts *without* a build machine can still append `--max-jobs 1` to keep
+  builds light on limited-RAM targets; the whole flake evaluates all ~20 hosts
+  either way.
 - Always follow with `sudo nixos-confirm` on hosts that enable autoRollback
   (see above).
 - Avoid running `nix build`/`nixos-rebuild` for heavy jobs unless the task

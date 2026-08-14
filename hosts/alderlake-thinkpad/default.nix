@@ -21,6 +21,11 @@
     # Use the Zen 3 workstation (zen3-nixos, 192.168.49.50) as a remote Nix
     # build machine, so heavy derivations build there instead of on this laptop.
     nix.distributedBuilds = true;
+    # Build exclusively on the build machine: max-jobs = 0 disables local
+    # builds, so every derivation goes to the ssh-ng builder (16 parallel jobs
+    # there). Don't pass --max-jobs to nixos-rebuild — it overrides this and
+    # serializes remote builds to one at a time.
+    nix.settings.max-jobs = 0;
     nix.buildMachines = [
       {
         hostName = "192.168.49.50";
@@ -44,6 +49,15 @@
     };
 
     services.fprintd.enable = true;
+
+    # 16 GiB swapfile: evaluating this flake (~20 hosts + the zed package graph)
+    # can exceed RAM and OOM the machine (see systemd-oomd kills in dmesg).
+    swapDevices = [
+      {
+        device = "/swapfile";
+        size = 16384;
+      }
+    ];
 
     sops.secrets.tailscale_pre_auth_key = { };
 
