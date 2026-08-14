@@ -88,15 +88,17 @@ up:
     just rebuild
     just confirm
 
-# Fleet-wide git pull + nixos-rebuild switch. Checks ssh reachability and git
-# dirtiness (tracked changes only; untracked files ignored) first, asks for
-# confirmation, then deploys to every reachable host, running locally on this
-# machine and over ssh (with tty, so sudo prompts work) on the rest. Runs
-# nixos-confirm on autoRollback hosts (where the binary exists).
-# Pull + switch on every reachable host.
+# Fleet-wide git pull + nixos-rebuild switch. Checks ssh reachability, git
+# state (clean/DIRTY + short SHA, marked (current) when it matches this
+# machine's HEAD) and github auth via the forwarded ssh agent (machines hold
+# no keys of their own), then shows an interactive menu to pick which hosts to
+# deploy to, then pulls + switches on the selection, running locally on this
+# machine and over ssh -t -A (tty for sudo, agent forwarding for the pull) on
+# the rest. Runs nixos-confirm on autoRollback hosts (where the binary exists).
+# Pull + switch on hosts you select from the fleet menu.
 deploy-all:
     @tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; \
-    : > "$tmp/reachable"; : > "$tmp/unreachable"; : > "$tmp/dirty"; : > "$tmp/failed"; \
+    : > "$tmp/reachable"; : > "$tmp/unreachable"; : > "$tmp/info"; : > "$tmp/selected"; : > "$tmp/failed"; \
     echo "==> checking ssh reachability of: {{ deploy_hosts }}"; \
     for h in {{ deploy_hosts }}; do \
         if [ "$h" = "{{ hostname }}" ]; then \
@@ -107,29 +109,55 @@ deploy-all:
             echo "$h" >> "$tmp/unreachable"; \
         fi; \
     done; \
-    for h in $(cat "$tmp/reachable"); do \
-        if [ "$h" = "{{ hostname }}" ]; then \
-            if git -C {{ repo }} status --porcelain 2>/dev/null | grep -qv '^??'; then \
-                echo "$h" >> "$tmp/dirty"; \
-            fi; \
-        elif ssh -n -o BatchMode=yes -o ConnectTimeout=5 {{ user }}@"$h" 'git -C {{ repo }} status --porcelain 2>/dev/null | grep -qv "^??"' 2>/dev/null; then \
-            echo "$h" >> "$tmp/dirty"; \
-        fi; \
-    done; \
-    echo; \
-    echo "reachable: $(tr '\n' ' ' < "$tmp/reachable")"; \
-    echo "offline:   $(tr '\n' ' ' < "$tmp/unreachable")"; \
-    if [ -s "$tmp/dirty" ]; then \
-        echo "WARNING: dirty repos (tracked changes; git pull may conflict): $(tr '\n' ' ' < "$tmp/dirty")"; \
-    else \
-        echo "all repos clean"; \
-    fi; \
     if [ ! -s "$tmp/reachable" ]; then \
         echo "error: no reachable hosts"; exit 1; \
     fi; \
-    read -r -p "git pull + nixos-rebuild switch on these hosts? [y/N] " ans; \
-    case "$ans" in y|Y) ;; *) echo "aborted"; exit 0;; esac; \
+    echo "==> collecting git state from reachable hosts"; \
+    local_sha="$(git -C {{ repo }} rev-parse --short HEAD 2>/dev/null)"; \
     for h in $(cat "$tmp/reachable"); do \
+        if [ "$h" = "{{ hostname }}" ]; then \
+            sha_now="$(git -C {{ repo }} rev-parse --short HEAD 2>/dev/null)"; \
+            if git -C {{ repo }} status --porcelain 2>/dev/null | grep -qv '^??'; then dirty_now=1; else dirty_now=0; fi; \
+            auth_out="$(ssh -n -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true)"; \
+            case "$auth_out" in *"successfully authenticated"*) auth_now=1;; *) auth_now=0;; esac; \
+        else \
+            st="$(ssh -n -A -o BatchMode=yes -o ConnectTimeout=5 {{ user }}@"$h" 'sha=$(git -C {{ repo }} rev-parse --short HEAD 2>/dev/null); dirty=0; if git -C {{ repo }} status --porcelain 2>/dev/null | grep -qv "^??"; then dirty=1; fi; auth=0; auth_out=$(ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true); case "$auth_out" in *"successfully authenticated"*) auth=1;; esac; echo "$sha $dirty $auth"' 2>/dev/null || true)"; \
+            sha_now="${st%% *}"; rest="${st#* }"; dirty_now="${rest%% *}"; auth_now="${rest##* }"; [ -n "$dirty_now" ] || dirty_now=0; [ -n "$auth_now" ] || auth_now=0; \
+        fi; \
+        echo "$h|$sha_now|$dirty_now|$auth_now" >> "$tmp/info"; \
+    done; \
+    echo; \
+    echo "Available hosts ((current) = same SHA as this machine; no-github = pull will fail):"; \
+    i=0; \
+    while IFS='|' read -r h sha d a; do \
+        i=$((i+1)); \
+        status="clean"; [ "$d" = "1" ] && status="DIRTY"; \
+        cur=""; [ -n "$local_sha" ] && [ -n "$sha" ] && [ "$sha" = "$local_sha" ] && cur=" (current)"; \
+        gauth=""; [ "$a" != "1" ] && gauth=" (no-github)"; \
+        sha_disp="$sha"; [ -z "$sha_disp" ] && sha_disp="-"; \
+        printf '  [%d] %-20s %-6s %s%s%s\n' "$i" "$h" "$status" "$sha_disp" "$cur" "$gauth"; \
+    done < "$tmp/info"; \
+    if awk -F'|' '$4 != 1 {n++} END {exit !n}' "$tmp/info"; then \
+        echo "WARNING: github auth failed for: $(awk -F'|' '$4 != 1 {printf "%s ", $1}' "$tmp/info")(agent not forwarded?)"; \
+    fi; \
+    echo "  offline (skipped): $(tr '\n' ' ' < "$tmp/unreachable")"; \
+    read -r -p "Select hosts to deploy (space-separated numbers, 'a' = all, Enter = none): " sel; \
+    if [ -z "$sel" ]; then echo "no hosts selected; aborted"; exit 0; fi; \
+    if [ "$sel" = "a" ] || [ "$sel" = "A" ]; then \
+        cut -d'|' -f1 "$tmp/info" > "$tmp/selected"; \
+    else \
+        for n in $sel; do \
+            case "$n" in *[!0-9]*) echo "invalid selection: $n"; exit 0;; esac; \
+            line="$(sed -n "${n}p" "$tmp/info")"; \
+            if [ -z "$line" ]; then echo "invalid selection: $n (out of range)"; exit 0; fi; \
+            echo "${line%%|*}" >> "$tmp/selected"; \
+        done; \
+        sort -u "$tmp/selected" -o "$tmp/selected"; \
+    fi; \
+    echo "will deploy to: $(tr '\n' ' ' < "$tmp/selected")"; \
+    read -r -p "Proceed? [y/N] " ans; \
+    case "$ans" in y|Y) ;; *) echo "aborted"; exit 0;; esac; \
+    for h in $(cat "$tmp/selected"); do \
         echo; \
         echo "==> deploying to $h"; \
         if [ "$h" = "{{ hostname }}" ]; then \
@@ -139,7 +167,7 @@ deploy-all:
             else \
                 echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
             fi; \
-        elif ssh -t {{ user }}@"$h" 'cd {{ repo }} && git pull && sudo nixos-rebuild switch --impure --flake . --max-jobs 1 && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }'; then \
+        elif ssh -t -A {{ user }}@"$h" 'cd {{ repo }} && GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new" git pull && sudo nixos-rebuild switch --impure --flake . --max-jobs 1 && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }'; then \
             echo "$h: ok"; \
         else \
             echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
