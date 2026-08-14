@@ -72,6 +72,11 @@ sudo nixos-rebuild switch --impure --flake .
   `nix.settings.max-jobs = 0` disables local builds, so the daemon schedules
   up to 16 parallel jobs on the remote. Do **not** pass `--max-jobs` there —
   it overrides the config and serializes remote builds to one at a time.
+- **If zen3-nixos is down**, the Thinkpad can still build locally: pass
+  `--max-jobs 4` (root is a trusted user, so the flag overrides the daemon's
+  `max-jobs = 0`), or temporarily set `nix.settings.max-jobs = 4` in
+  `hosts/alderlake-thinkpad/default.nix`. Without an override, `nixos-rebuild`
+  fails outright because local builds are disabled.
 - Hosts *without* a build machine can still append `--max-jobs 1` to keep
   builds light on limited-RAM targets; the whole flake evaluates all ~20 hosts
   either way.
