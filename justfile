@@ -41,6 +41,13 @@ user := "cjdell"
 # hosts that import common/sops.nix (targets for `key-install-all`)
 sops_hosts := "N100-NAS N40L-NAS GEN8-NAS alderlake-thinkpad"
 
+# hosts to target with `deploy-all` (current fleet under hosts/; add any
+# legacy machines/ hosts here if you want them included)
+deploy_hosts := "N100-NAS N40L-NAS alderlake-thinkpad rocketlakelatitude zen3-nixos"
+
+# where the repo lives on each host
+repo := "~/nixos-config"
+
 # current hostname (used to pick local vs remote install)
 hostname := `hostname`
 
@@ -80,6 +87,70 @@ confirm:
 up:
     just rebuild
     just confirm
+
+# Fleet-wide git pull + nixos-rebuild switch. Checks ssh reachability and git
+# dirtiness (tracked changes only; untracked files ignored) first, asks for
+# confirmation, then deploys to every reachable host, running locally on this
+# machine and over ssh (with tty, so sudo prompts work) on the rest. Runs
+# nixos-confirm on autoRollback hosts (where the binary exists).
+# Pull + switch on every reachable host.
+deploy-all:
+    @tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; \
+    : > "$tmp/reachable"; : > "$tmp/unreachable"; : > "$tmp/dirty"; : > "$tmp/failed"; \
+    echo "==> checking ssh reachability of: {{ deploy_hosts }}"; \
+    for h in {{ deploy_hosts }}; do \
+        if [ "$h" = "{{ hostname }}" ]; then \
+            echo "$h" >> "$tmp/reachable"; \
+        elif ssh -n -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new {{ user }}@"$h" true 2>/dev/null; then \
+            echo "$h" >> "$tmp/reachable"; \
+        else \
+            echo "$h" >> "$tmp/unreachable"; \
+        fi; \
+    done; \
+    for h in $(cat "$tmp/reachable"); do \
+        if [ "$h" = "{{ hostname }}" ]; then \
+            if git -C {{ repo }} status --porcelain 2>/dev/null | grep -qv '^??'; then \
+                echo "$h" >> "$tmp/dirty"; \
+            fi; \
+        elif ssh -n -o BatchMode=yes -o ConnectTimeout=5 {{ user }}@"$h" 'git -C {{ repo }} status --porcelain 2>/dev/null | grep -qv "^??"' 2>/dev/null; then \
+            echo "$h" >> "$tmp/dirty"; \
+        fi; \
+    done; \
+    echo; \
+    echo "reachable: $(tr '\n' ' ' < "$tmp/reachable")"; \
+    echo "offline:   $(tr '\n' ' ' < "$tmp/unreachable")"; \
+    if [ -s "$tmp/dirty" ]; then \
+        echo "WARNING: dirty repos (tracked changes; git pull may conflict): $(tr '\n' ' ' < "$tmp/dirty")"; \
+    else \
+        echo "all repos clean"; \
+    fi; \
+    if [ ! -s "$tmp/reachable" ]; then \
+        echo "error: no reachable hosts"; exit 1; \
+    fi; \
+    read -r -p "git pull + nixos-rebuild switch on these hosts? [y/N] " ans; \
+    case "$ans" in y|Y) ;; *) echo "aborted"; exit 0;; esac; \
+    for h in $(cat "$tmp/reachable"); do \
+        echo; \
+        echo "==> deploying to $h"; \
+        if [ "$h" = "{{ hostname }}" ]; then \
+            if cd {{ repo }} && git pull && sudo nixos-rebuild switch --impure --flake . --max-jobs 1; then \
+                if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; \
+                echo "$h: ok"; \
+            else \
+                echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
+            fi; \
+        elif ssh -t {{ user }}@"$h" 'cd {{ repo }} && git pull && sudo nixos-rebuild switch --impure --flake . --max-jobs 1 && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }'; then \
+            echo "$h: ok"; \
+        else \
+            echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
+        fi; \
+    done; \
+    echo; \
+    if [ -s "$tmp/failed" ]; then \
+        echo "FAILED: $(tr '\n' ' ' < "$tmp/failed")"; \
+        exit 1; \
+    fi; \
+    echo "done"
 
 # Format all .nix files (nixfmt)
 format:
