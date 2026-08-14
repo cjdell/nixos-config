@@ -18,6 +18,31 @@
       ./hardware-configuration.nix
     ];
 
+    # Use the Zen 3 workstation (zen3-nixos, 192.168.49.50) as a remote Nix
+    # build machine, so heavy derivations build there instead of on this laptop.
+    nix.distributedBuilds = true;
+    nix.buildMachines = [
+      {
+        hostName = "192.168.49.50";
+        protocol = "ssh-ng";
+        sshUser = "root";
+        sshKey = "/root/.ssh/id_ed25519";
+        system = "x86_64-linux";
+        maxJobs = 16;
+        speedFactor = 4;
+        supportedFeatures = [
+          "nixos-test"
+          "benchmark"
+          "big-parallel"
+        ];
+      }
+    ];
+    # Pin the builder's SSH host key so ssh-ng connects without a prompt.
+    programs.ssh.knownHosts."192.168.49.50" = {
+      hostNames = [ "192.168.49.50" ];
+      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFdeRHV02KmEdG3YoH2aq1++9PqeTwGlWUsG0XKzUE27";
+    };
+
     services.fprintd.enable = true;
 
     sops.secrets.tailscale_pre_auth_key = { };

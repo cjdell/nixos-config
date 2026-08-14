@@ -2,7 +2,8 @@
 
 ## Install
 
-    git clone https://github.com/cjdell/nixos-config.git
+    git clone --depth 1 https://github.com/cjdell/nixos-config.git
+    # (shallow clone; run `git fetch --unshallow` if you want the full history)
 
     cd nixos-config
 

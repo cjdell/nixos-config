@@ -54,6 +54,9 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.disko.follows = "disko";
     };
+    # Bleeding-edge Zed: source build tracking zed main (via zed.overlays.default),
+    # replaces nixpkgs' zed-editor package which ships the prebuilt release channel.
+    zed.url = "github:zed-industries/zed";
   };
 
   outputs =
@@ -72,6 +75,7 @@
       llama-cpp-uma,
       disko,
       disko-zfs,
+      zed,
     }@inputs:
 
     let
@@ -94,6 +98,9 @@
               "broadcom-sta-6.30.223.271-59-6.17.7"
             ];
           };
+          # Bleeding-edge zed-editor (source build tracking main) instead of the
+          # prebuilt release binary that nixpkgs' zed-editor packages.
+          overlays = [ zed.overlays.default ];
         };
 
       # Stable pkgs used by the legacy machines below.
@@ -441,6 +448,8 @@
                 allowUnfree = true;
                 permittedInsecurePackages = [ "freeimage-2021-11-01" ];
               };
+              # Same zed-editor overlay as mkPkgs (arcadebox installs desktop.nix).
+              overlays = [ zed.overlays.default ];
             };
             modules = [
               ./common/arcade.nix

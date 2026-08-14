@@ -25,6 +25,12 @@
 
     system.autoRollback.enable = true;
 
+    # Let the alderlake-thinkpad use this machine as a remote Nix build machine
+    # (matches the sshKey configured in hosts/alderlake-thinkpad/default.nix).
+    users.users.root.openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICx2X9y6tglYE8dnTPW1j28iSmv8wftzaVhpUulB5fez root@alderlake-thinkpad (nix builder)"
+    ];
+
     boot.kernel.sysctl = {
       # enable IPv4 and IPv6 forwarding on all interfaces
       "net.ipv4.conf.all.forwarding" = true;
