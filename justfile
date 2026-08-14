@@ -23,8 +23,11 @@ ssh_key := "~/.ssh/id_ed25519_ps"
 # passphrase for that key when it is passphrase-protected
 passphrase := env_var_or_default("SSH_TO_AGE_PASSPHRASE", "")
 
-# where sops-nix expects the age key on every host (common/sops.nix)
-age_key_path := "/var/lib/sops-nix/key.txt"
+# directory where sops-nix expects the age key on every host (common/sops.nix)
+age_key_dir := "/var/lib/sops-nix"
+
+# the age key file itself
+age_key_path := age_key_dir + "/key.txt"
 
 # local copy of the derived age key (handy for sops editing on this machine)
 age_key_file := "~/age-key.txt"
@@ -136,6 +139,27 @@ key-update file=secrets:
 
 # --- deriving / installing the age key --------------------------------------
 
+# Generate the missing .pub file for each private key in ~/.ssh (id_*).
+# Passphrase-protected keys use {{passphrase}} if set, otherwise ssh-keygen
+# prompts interactively. Existing .pub files are kept unless --force=true.
+# Generate .pub files for all private keys in ~/.ssh.
+[arg("force", long="force")]
+pubkeys force="false":
+    @for f in ~/.ssh/id_*; do \
+        [ -f "$f" ] || continue; \
+        case "$f" in *.pub) continue;; esac; \
+        if [ -f "$f.pub" ] && [ "{{ force }}" != "true" ]; then \
+            echo "skip: $f.pub already exists (use --force=true to overwrite)"; \
+            continue; \
+        fi; \
+        echo "==> generating $f.pub"; \
+        if [ -n "{{ passphrase }}" ]; then \
+            ssh-keygen -y -f "$f" -P "{{ passphrase }}" > "$f.pub"; \
+        else \
+            ssh-keygen -y -f "$f" > "$f.pub"; \
+        fi; \
+    done
+
 # Derived pubkey should match .sops.yaml unless you are rotating keys.
 # Print the age public key for {{ssh_key}}.
 key-pub:
@@ -159,7 +183,7 @@ key-install:
         exit 1; \
     }
     @if [ -n "{{ passphrase }}" ]; then export SSH_TO_AGE_PASSPHRASE='{{ passphrase }}'; fi
-    sudo mkdir -p {{ age_key_path }}
+    sudo mkdir -p {{ age_key_dir }}
     {{ ssh_to_age }} -private-key -i {{ ssh_key }} | sudo tee {{ age_key_path }} > /dev/null
     sudo chmod 400 {{ age_key_path }}
     @echo "installed age key at {{ age_key_path }}"
@@ -173,7 +197,7 @@ key-install-remote host:
         exit 1; \
     }
     @if [ -n "{{ passphrase }}" ]; then export SSH_TO_AGE_PASSPHRASE='{{ passphrase }}'; fi
-    ssh {{ user }}@{{ host }} "sudo mkdir -p {{ age_key_path }}"
+    ssh {{ user }}@{{ host }} "sudo mkdir -p {{ age_key_dir }}"
     {{ ssh_to_age }} -private-key -i {{ ssh_key }} | ssh {{ user }}@{{ host }} "sudo tee {{ age_key_path }} > /dev/null && sudo chmod 400 {{ age_key_path }}"
     @echo "installed age key on {{ host }}"
 
