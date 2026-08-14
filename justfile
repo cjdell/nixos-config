@@ -98,15 +98,20 @@ up:
 # Pull + switch on hosts you select from the fleet menu.
 deploy-all:
     @tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; \
-    : > "$tmp/reachable"; : > "$tmp/unreachable"; : > "$tmp/info"; : > "$tmp/selected"; : > "$tmp/failed"; \
+    : > "$tmp/reachable"; : > "$tmp/unreachable"; : > "$tmp/noauth"; : > "$tmp/info"; : > "$tmp/selected"; : > "$tmp/failed"; \
     echo "==> checking ssh reachability of: {{ deploy_hosts }}"; \
     for h in {{ deploy_hosts }}; do \
         if [ "$h" = "{{ hostname }}" ]; then \
             echo "$h" >> "$tmp/reachable"; \
-        elif ssh -n -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new {{ user }}@"$h" true 2>/dev/null; then \
-            echo "$h" >> "$tmp/reachable"; \
         else \
-            echo "$h" >> "$tmp/unreachable"; \
+            out="$(ssh -n -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new {{ user }}@"$h" true 2>&1 || true)"; \
+            if [ -z "$out" ]; then \
+                echo "$h" >> "$tmp/reachable"; \
+            elif echo "$out" | grep -q "Permission denied"; then \
+                echo "$h" >> "$tmp/noauth"; \
+            else \
+                echo "$h" >> "$tmp/unreachable"; \
+            fi; \
         fi; \
     done; \
     if [ ! -s "$tmp/reachable" ]; then \
@@ -139,6 +144,9 @@ deploy-all:
     done < "$tmp/info"; \
     if awk -F'|' '$4 != 1 {n++} END {exit !n}' "$tmp/info"; then \
         echo "WARNING: github auth failed for: $(awk -F'|' '$4 != 1 {printf "%s ", $1}' "$tmp/info")(agent not forwarded?)"; \
+    fi; \
+    if [ -s "$tmp/noauth" ]; then \
+        echo "  reachable, but key auth failed (ssh in once with a password to fix): $(tr '\n' ' ' < "$tmp/noauth")"; \
     fi; \
     echo "  offline (skipped): $(tr '\n' ' ' < "$tmp/unreachable")"; \
     read -r -p "Select hosts to deploy (space-separated numbers, 'a' = all, Enter = none): " sel; \
