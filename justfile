@@ -88,15 +88,14 @@ up:
     just rebuild
     just confirm
 
-# Fleet-wide git pull + nixos-rebuild switch. Checks ssh reachability, git
-# state (clean/DIRTY + short SHA, marked (current) when it matches this
-# machine's HEAD) and github auth via the forwarded ssh agent (machines hold
-# no keys of their own), then shows an interactive menu to pick which hosts to
-# deploy to, then pulls + switches on the selection, running locally on this
-# machine and over ssh -t -A (tty for sudo, agent forwarding for the pull) on
-# the rest. Runs nixos-confirm on autoRollback hosts (where the binary exists).
-# Pull + switch on hosts you select from the fleet menu.
-deploy-all:
+# Generic fleet runner: checks ssh reachability (offline vs no-key-auth), git
+# state (clean/DIRTY + short SHA, (current) = same as this machine's HEAD) and
+# github auth via the forwarded ssh agent (machines hold no keys of their own),
+# shows a menu to pick hosts, then runs an op on each selection (locally here,
+# ssh -t -A elsewhere). ops: deploy = git pull + nixos-rebuild switch (+ nixos-
+# confirm on autoRollback hosts); reboot = sudo reboot.
+# Select hosts and run an op (deploy|reboot) on them.
+hosts-run op="deploy":
     @tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; \
     : > "$tmp/reachable"; : > "$tmp/unreachable"; : > "$tmp/noauth"; : > "$tmp/info"; : > "$tmp/selected"; : > "$tmp/failed"; \
     echo "==> checking ssh reachability of: {{ deploy_hosts }}"; \
@@ -149,7 +148,7 @@ deploy-all:
         echo "  reachable, but key auth failed (ssh in once with a password to fix): $(tr '\n' ' ' < "$tmp/noauth")"; \
     fi; \
     echo "  offline (skipped): $(tr '\n' ' ' < "$tmp/unreachable")"; \
-    read -r -p "Select hosts to deploy (space-separated numbers, 'a' = all, Enter = none): " sel; \
+    read -r -p "Select hosts for '{{ op }}' (space-separated numbers, 'a' = all, Enter = none): " sel; \
     if [ -z "$sel" ]; then echo "no hosts selected; aborted"; exit 0; fi; \
     if [ "$sel" = "a" ] || [ "$sel" = "A" ]; then \
         cut -d'|' -f1 "$tmp/info" > "$tmp/selected"; \
@@ -162,23 +161,29 @@ deploy-all:
         done; \
         sort -u "$tmp/selected" -o "$tmp/selected"; \
     fi; \
-    echo "will deploy to: $(tr '\n' ' ' < "$tmp/selected")"; \
+    echo "will run '{{ op }}' on: $(tr '\n' ' ' < "$tmp/selected")"; \
+    case "{{ op }}" in \
+        deploy) cmd="git pull && GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' sudo nixos-rebuild switch --impure --flake . --max-jobs 1 && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }";; \
+        reboot) cmd="sudo reboot";; \
+        *) echo "unknown op: {{ op }} (supported: deploy, reboot)"; exit 1;; \
+    esac; \
     read -r -p "Proceed? [y/N] " ans; \
     case "$ans" in y|Y) ;; *) echo "aborted"; exit 0;; esac; \
     for h in $(cat "$tmp/selected"); do \
         echo; \
-        echo "==> deploying to $h"; \
+        echo "==> {{ op }} on $h"; \
         if [ "$h" = "{{ hostname }}" ]; then \
-            if cd {{ repo }} && git pull && sudo nixos-rebuild switch --impure --flake . --max-jobs 1; then \
-                if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; \
+            if ( cd {{ repo }} && eval "$cmd" ); then \
                 echo "$h: ok"; \
             else \
                 echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
             fi; \
-        elif ssh -t -A {{ user }}@"$h" 'cd {{ repo }} && GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new" git pull && sudo nixos-rebuild switch --impure --flake . --max-jobs 1 && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }'; then \
-            echo "$h: ok"; \
         else \
-            echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
+            if ssh -t -A {{ user }}@"$h" "cd {{ repo }} && $cmd"; then \
+                echo "$h: ok"; \
+            else \
+                echo "$h: FAILED"; echo "$h" >> "$tmp/failed"; \
+            fi; \
         fi; \
     done; \
     echo; \
@@ -187,6 +192,14 @@ deploy-all:
         exit 1; \
     fi; \
     echo "done"
+
+# Pull + switch on hosts you select from the fleet menu.
+deploy-all:
+    @just hosts-run deploy
+
+# Reboot hosts you select from the fleet menu.
+reboot-all:
+    @just hosts-run reboot
 
 # Format all .nix files (nixfmt)
 format:
