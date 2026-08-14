@@ -2,7 +2,10 @@
 # sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 {
   inputs = {
+    # Stable nixpkgs: every host except alderlake-thinkpad (see nixpkgsFor).
     nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
+    # Unstable nixpkgs: hosts opt in per-host (see nixpkgsFor in outputs).
+    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
@@ -19,6 +22,11 @@
     home-manager = {
       url = "github:nix-community/home-manager/release-26.05";
       inputs.nixpkgs.follows = "nixpkgs";
+    };
+    # master for hosts on unstable nixpkgs (see homeManagerFor)
+    home-manager-unstable = {
+      url = "github:nix-community/home-manager/master";
+      inputs.nixpkgs.follows = "nixpkgs-unstable";
     };
     plasma-manager = {
       url = "github:nix-community/plasma-manager";
@@ -52,10 +60,12 @@
     {
       self,
       nixpkgs,
+      nixpkgs-unstable,
       nixos-hardware,
       nixos-utils,
       sops-nix,
       home-manager,
+      home-manager-unstable,
       plasma-manager,
       stylix,
       llama-cpp,
@@ -66,18 +76,37 @@
 
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        config = {
-          allowUnfree = true;
-          packageOverrides = pkgs: {
-            fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
+
+      # Build a pkgs set from a given nixpkgs input (shared package config).
+      mkPkgs =
+        nixpkgs:
+        import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+            packageOverrides = pkgs: {
+              fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
+              # moonlight-qt 6.1.0 doesn't build against ffmpeg 9 (unstable's
+              # default); nixpkgs master pins it to ffmpeg_8, mirror that here.
+              moonlight-qt = pkgs.moonlight-qt.override { ffmpeg = pkgs.ffmpeg_8; };
+            };
+            permittedInsecurePackages = [
+              "broadcom-sta-6.30.223.271-59-6.17.7"
+            ];
           };
-          permittedInsecurePackages = [
-            "broadcom-sta-6.30.223.271-59-6.17.7"
-          ];
         };
-      };
+
+      # Stable pkgs used by the legacy machines below.
+      pkgs = mkPkgs nixpkgs;
+
+      # Which nixpkgs each host runs on: hosts listed here opt into unstable,
+      # everything else uses the stable `nixpkgs` input.
+      nixpkgsFor = host: if host == "alderlake-thinkpad" then nixpkgs-unstable else nixpkgs;
+
+      # Home-manager follows the same split: the release branch for stable
+      # hosts, master for hosts on unstable nixpkgs.
+      homeManagerFor = host: if host == "alderlake-thinkpad" then home-manager-unstable else home-manager;
+
       homeManagerPrefs = {
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
@@ -91,6 +120,35 @@
         # Make `nix-shell` use packages from this flake
         nix.registry.nixpkgs.flake = nixpkgs;
       };
+
+      # Build one host with the nixpkgs input that nixpkgsFor picks for it.
+      mkHost =
+        host:
+        let
+          hostPkgs = nixpkgsFor host;
+          hostHomeManager = homeManagerFor host;
+        in
+        hostPkgs.lib.nixosSystem {
+          inherit system;
+          pkgs = mkPkgs hostPkgs;
+          modules = [
+            # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
+            { networking.hostName = host; }
+            # Point the registry at the host's nixpkgs (unstable on opted-in hosts)
+            ({ lib, ... }: {
+              nix.registry.nixpkgs.flake = lib.mkForce hostPkgs;
+            })
+            ./common/system.nix
+            ./users/cjdell
+            hostHomeManager.nixosModules.home-manager
+            homeManagerPrefs
+            commonModules
+          ]
+          ++ (import (./hosts + "/${host}") inputs);
+          specialArgs = {
+            inherit inputs;
+          };
+        };
     in
     {
       nixosConfigurations =
@@ -104,27 +162,10 @@
             );
           in
           builtins.listToAttrs (
-            (map (host: {
+            map (host: {
               name = host;
-              value = nixpkgs.lib.nixosSystem {
-                inherit system pkgs;
-                modules = [
-                  # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
-                  { networking.hostName = host; }
-                  ./common/system.nix
-                  ./users/cjdell
-                  home-manager.nixosModules.home-manager
-                  homeManagerPrefs
-                  commonModules
-
-                ]
-                ++ (import (./hosts + "/${host}") inputs);
-                specialArgs = {
-                  inherit inputs;
-                };
-              };
-            }))
-              hosts
+              value = mkHost host;
+            }) hosts
           )
         )
         #  Legacy configs for old machines (to be converted)

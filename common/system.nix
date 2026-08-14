@@ -72,6 +72,7 @@
     ch341eeprom
     smartmontools
     gptfdisk
+    just
 
     # GPU Related Stuff
     intel-gpu-tools

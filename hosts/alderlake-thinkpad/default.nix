@@ -73,6 +73,10 @@
         theme.name = "Adwaita";
         iconTheme.name = "Adwaita";
         cursorTheme.name = "Adwaita";
+        # The gtk module manages ~/.gtkrc-2.0, which still holds stale KDE
+        # (Breeze) settings from the initial Plasma setup. Force-overwrite it
+        # or home-manager activation fails with "would be clobbered".
+        gtk2.force = true;
       };
 
       dconf.settings."org/gnome/desktop/interface" = {
