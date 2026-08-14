@@ -25,6 +25,9 @@ let
         timeout = 30000;
         tokenEndpointAuthMethod = "client_secret_post";
       };
+      machineLearning = {
+        urls = [ "http://10.88.0.51:3003" ];
+      };
     } configFile
   );
 in
@@ -44,9 +47,10 @@ in
   };
 
   virtualisation.oci-containers.containers = {
+    # journalctl -u podman-immich-server -f
     immich-server = {
       hostname = "immich-server";
-      image = "ghcr.io/immich-app/immich-server:v3.0.1";
+      image = "ghcr.io/immich-app/immich-server:v3.0.3";
       autoStart = true;
       ports = [
         "2283:2283"
@@ -75,9 +79,10 @@ in
       ];
     };
 
+    # journalctl -u podman-immich-machine-learning -f
     immich-machine-learning = {
       hostname = "immich-machine-learning";
-      image = "ghcr.io/immich-app/immich-machine-learning:v3.0.1";
+      image = "ghcr.io/immich-app/immich-machine-learning:v3.0.3";
       autoStart = true;
       volumes = [
         "/samsung-4tb/ds-photos/immich/model-cache:/cache"
@@ -91,7 +96,7 @@ in
       };
       extraOptions = [
         "--ip=10.88.0.51"
-        "--user=${toString IMMICH_UID}:100"
+        # "--user=${toString IMMICH_UID}:100"
       ];
     };
 

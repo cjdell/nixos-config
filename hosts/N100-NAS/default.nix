@@ -35,6 +35,14 @@
         };
         filebrowser_oidc_client_secret = { };
         tailscale_pre_auth_key = { };
+
+        # Jellyfin LDAP plugin config (Kanidm bind credentials). Deployed by
+        # the jellyfin-ldap-config systemd service (see jellyfin.nix).
+        jellyfin_ldap_auth = {
+          sopsFile = ../../secrets/jellyfin_ldap_auth.env;
+          format = "dotenv";
+          key = ""; # whole file
+        };
       };
     };
   })
