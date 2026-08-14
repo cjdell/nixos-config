@@ -1,0 +1,11 @@
+[package]
+name = "ollama-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Ollama-compatible API bridge in front of an OpenAI-compatible llama.cpp endpoint (llama-swap)"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

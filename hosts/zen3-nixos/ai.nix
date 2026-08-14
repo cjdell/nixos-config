@@ -14,6 +14,17 @@ let
     cargoLock.lockFile = ../../llama-log-viewer/Cargo.lock;
     doCheck = false;
   };
+
+  # Ollama-compatible API bridge in front of llama-swap's OpenAI endpoint.
+  # Recallium (and other Ollama-only clients) talk to this on port 11434;
+  # it translates to llama-swap's `/upstream/vulkan/v1` OpenAI API.
+  ollama-bridge = pkgs.rustPlatform.buildRustPackage {
+    pname = "ollama-bridge";
+    version = "0.1.0";
+    src = ../../ollama-bridge;
+    cargoLock.lockFile = ../../ollama-bridge/Cargo.lock;
+    doCheck = false;
+  };
 in
 {
   environment.systemPackages = with pkgs; [
@@ -23,7 +34,12 @@ in
 
   # I think stable-diffusion-webui needs this
   systemd.tmpfiles.rules = [
-    "L+    /opt/rocm   -    -    -     -    ${pkgs.rocmPackages.clr}"
+    "L+    /opt/rocm   -    -    -    -    ${pkgs.rocmPackages.clr}"
+    # Recallium container data dirs (container runs as uid 1000)
+    "d /var/lib/recallium/data 0700 1000 1000 - -"
+    "d /var/lib/recallium/wal 0700 1000 1000 - -"
+    "d /var/lib/recallium/documents 0700 1000 1000 - -"
+    "d /var/lib/recallium/secrets 0700 1000 1000 - -"
   ];
 
   # Stop crashes for large context sizes
@@ -118,6 +134,116 @@ in
     };
   };
 
+  # Ollama-compatible bridge -> llama-swap (port 11434). Must listen on
+  # 0.0.0.0 so the rootful podman Recallium container can reach it via
+  # host.containers.internal.
+  systemd.services.ollama-bridge = {
+    description = "Ollama-compatible API bridge to llama-swap";
+    after = [
+      "llama-swap.service"
+      "wait-for-network.service"
+    ];
+    wants = [ "wait-for-network.service" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      ExecStart = "${ollama-bridge}/bin/ollama-bridge --listen 0.0.0.0:11434 --upstream http://127.0.0.1:8081/upstream/vulkan/v1";
+      Restart = "always";
+      RestartSec = 3;
+    };
+  };
+
+  # Self-heal the Recallium MCP endpoint. The app's MCP server intermittently
+  # stops responding to /mcp (upstream bug, no fixed image yet), which clients
+  # see as a "context server request timeout". POST an `initialize`; if two
+  # consecutive checks fail, restart the container (volumes persist).
+  systemd.services.recallium-healthcheck = {
+    description = "Restart Recallium container if its MCP endpoint stops responding";
+    serviceConfig = {
+      Type = "oneshot";
+    };
+    path = [ pkgs.curl ];
+    script = ''
+      mcp_code() {
+        curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+          -X POST http://127.0.0.1:8001/mcp \
+          -H 'Content-Type: application/json' -H 'Accept: application/json' \
+          -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1"}}}'
+      }
+      first=$(mcp_code)
+      if [ "$first" != "200" ]; then
+        sleep 10
+        second=$(mcp_code)
+        if [ "$second" != "200" ]; then
+          echo "Recallium MCP endpoint unhealthy (HTTP ''${first}, then ''${second}); restarting container"
+          podman restart recallium
+        fi
+      fi
+    '';
+  };
+
+  systemd.timers.recallium-healthcheck = {
+    description = "Periodic Recallium MCP health check";
+    timerConfig = {
+      OnBootSec = "5m";
+      OnUnitActiveSec = "2m";
+      Unit = "recallium-healthcheck.service";
+    };
+    wantedBy = [ "timers.target" ];
+  };
+
+  virtualisation.oci-containers.containers.recallium = {
+    hostname = "recallium";
+    image = "recalliumai/recallium:latest";
+    autoStart = true;
+    ports = [
+      "8001:8000" # MCP API
+      "9001:9000" # Web UI
+      "5433:5432" # PostgreSQL
+    ];
+    volumes = [
+      "/var/lib/recallium/data:/data"
+      "/var/lib/recallium/wal:/wal"
+      "/var/lib/recallium/documents:/documents"
+      "/var/lib/recallium/secrets:/secrets"
+    ];
+    extraOptions = [
+      # Rootful podman: resolve host.containers.internal / host.docker.internal
+      # to the host so OLLAMA_BASE_URL reaches the ollama-bridge on 11434.
+      "--add-host=host.containers.internal:host-gateway"
+      "--add-host=host.docker.internal:host-gateway"
+    ];
+    environment = {
+      OLLAMA_BASE_URL = "http://host.containers.internal:11434";
+      OLLAMA_HOST = "http://host.containers.internal:11434";
+      UI_BASE_URL = "http://192.168.49.50:9001";
+      TZ = "UTC";
+      LOG_LEVEL = "INFO";
+      WORKERS = "2";
+      RECALLIUM_EDITION = "community";
+      ENVIRONMENT = "production";
+      LOAD_SAMPLE_DATA = "false";
+      DB_HOST = "localhost";
+      DB_PORT = "5432";
+      DB_USER = "recallium";
+      DB_PASSWORD = "recallium_password";
+      DB_NAME = "recallium_memories";
+      VAULT_PATH = "/secrets";
+      # Vault passphrase: change this if you care about the vault contents
+      # (it encrypts provider API keys; with the local Ollama provider there
+      # are none). Generate a new one with `head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'`.
+      VAULT_PASSPHRASE = "98ea4892878998a3badd3177a9d4ca61e33745a4ad074697";
+      MINIME_VAULT_KEY = "98ea4892878998a3badd3177a9d4ca61e33745a4ad074697";
+      EMBEDDING_DEVICE = "cpu";
+      EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5";
+      EMBEDDING_DIM = "768";
+      TRUST_REMOTE_CODE = "1";
+      MEMORY_PROCESSOR_MIN_WORKERS = "2";
+      MEMORY_PROCESSOR_MAX_WORKERS = "8";
+      CORS_ORIGINS = ''["http://localhost:9001","http://127.0.0.1:9001","http://192.168.49.50:9001","http://192.168.49.50"]'';
+    };
+  };
+
   virtualisation.oci-containers.containers.diamcp = {
     hostname = "diamcp";
     image = "localhost/diamcp";
@@ -131,34 +257,98 @@ in
     ];
   };
 
-  services.nginx.virtualHosts = {
-    "192.168.49.50" = {
-      locations."/" = {
-        proxyPass = "http://127.0.0.1:8081";
-        recommendedProxySettings = true;
-        proxyWebsockets = true;
-      };
+  services.nginx = {
+    # CORS maps for the Recallium MCP endpoint (see locations."/recallium-mcp").
+    # The container's own CORSMiddleware only permits its fixed CORS_ORIGINS
+    # list and answers 400 to preflights from any other origin, which breaks
+    # browser-based MCP clients. nginx owns CORS here instead.
+    appendHttpConfig = ''
+      map $http_origin $cors_origin {
+        default $http_origin;
+        "" "*";
+      }
+      map $http_access_control_request_headers $cors_request_headers {
+        default $http_access_control_request_headers;
+        "" "content-type, accept, mcp-protocol-version, mcp-session-id, authorization";
+      }
+    '';
 
-      locations."/mcp" = {
-        proxyPass = "http://127.0.0.1:8082/mcp";
-        recommendedProxySettings = true;
-        proxyWebsockets = true;
-      };
+    virtualHosts = {
+      "192.168.49.50" = {
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:8081";
+          recommendedProxySettings = true;
+          proxyWebsockets = true;
+        };
 
-      locations."/logs" = {
-        # Strip the /logs prefix explicitly, then proxy without a URI so
-        # nginx forwards the rewritten path (e.g. /logs/api/stats -> /api/stats)
-        proxyPass = "http://127.0.0.1:8083";
-        extraConfig = ''
-          rewrite ^/logs/?(.*)$ /$1 break;
-        '';
-        recommendedProxySettings = true;
-        proxyWebsockets = true;
-      };
+        locations."/mcp" = {
+          proxyPass = "http://127.0.0.1:8082/mcp";
+          recommendedProxySettings = true;
+          proxyWebsockets = true;
+        };
 
-      # Redirect bare /logs to /logs/ so relative URLs resolve inside the app
-      locations."= /logs" = {
-        return = "301 /logs/";
+        locations."/logs" = {
+          # Strip the /logs prefix explicitly, then proxy without a URI so
+          # nginx forwards the rewritten path (e.g. /logs/api/stats -> /api/stats)
+          proxyPass = "http://127.0.0.1:8083";
+          extraConfig = ''
+            rewrite ^/logs/?(.*)$ /$1 break;
+          '';
+          recommendedProxySettings = true;
+          proxyWebsockets = true;
+        };
+
+        # Redirect bare /logs to /logs/ so relative URLs resolve inside the app
+        locations."= /logs" = {
+          return = "301 /logs/";
+        };
+
+        # Recallium web UI (direct access: http://192.168.49.50:9001)
+        locations."= /recallium" = {
+          return = "301 /recallium/";
+        };
+
+        locations."/recallium/" = {
+          # Strip the /recallium prefix explicitly, then proxy without a URI.
+          proxyPass = "http://127.0.0.1:9001";
+          extraConfig = ''
+            rewrite ^/recallium/?(.*)$ /$1 break;
+          '';
+          recommendedProxySettings = true;
+          proxyWebsockets = true;
+        };
+
+        # Recallium MCP endpoint (MCP clients: http://192.168.49.50/recallium-mcp)
+        #
+        # CORS is handled here, not by the app: answer OPTIONS preflights
+        # locally (the app 400s preflights from origins outside CORS_ORIGINS)
+        # and stamp CORS headers on every response, echoing the request origin
+        # so credentialed requests work too. The upstream's own CORS headers are
+        # hidden to avoid duplicates.
+        locations."/recallium-mcp" = {
+          proxyPass = "http://127.0.0.1:8001/mcp";
+          recommendedProxySettings = true;
+          proxyWebsockets = true;
+          extraConfig = ''
+            proxy_hide_header Access-Control-Allow-Origin;
+            proxy_hide_header Access-Control-Allow-Credentials;
+            proxy_hide_header Access-Control-Allow-Methods;
+            proxy_hide_header Access-Control-Allow-Headers;
+            proxy_hide_header Access-Control-Expose-Headers;
+            proxy_hide_header Access-Control-Max-Age;
+
+            add_header Access-Control-Allow-Origin $cors_origin always;
+            add_header Access-Control-Allow-Credentials true always;
+            add_header Access-Control-Allow-Methods "GET, POST, OPTIONS, DELETE" always;
+            add_header Access-Control-Allow-Headers $cors_request_headers always;
+            add_header Access-Control-Expose-Headers "mcp-session-id" always;
+            add_header Access-Control-Max-Age 600 always;
+
+            if ($request_method = OPTIONS) {
+              return 204;
+            }
+          '';
+        };
       };
     };
   };

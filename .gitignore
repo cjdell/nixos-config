@@ -2,3 +2,4 @@ secrets/
 junk/
 tmp/
 llama-logs/
+target/

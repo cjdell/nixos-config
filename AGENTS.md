@@ -16,6 +16,7 @@ workstation, etc.). Key layout:
 | `machines/` | Legacy configs for older machines (referenced from `flake.nix`) |
 | `llama-log-viewer/` | Standalone zero-dependency Rust web app (see below) |
 | `llama-logs/` | Live `llama-server --log-prompts-dir` output consumed by the viewer |
+| `docs/recallium.md` | How to use the Recallium memory server (APIs, MCP, examples) |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
@@ -105,6 +106,39 @@ Rebuild + deploy on `zen3-nixos` (used successfully in the past):
 sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 sudo nixos-confirm
 ```
+
+## Recallium (memory server, live on zen3-nixos)
+
+Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a
+memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs
+on the **local llama.cpp via the ollama-bridge** (no cloud). Full usage docs:
+`docs/recallium.md`.
+
+- **UI:** `http://192.168.49.50:9001` or `http://192.168.49.50/recallium/`
+- **MCP:** `http://192.168.49.50/recallium-mcp` (Streamable HTTP, protocol 2025-11-25)
+- **REST:** `http://127.0.0.1:8001/api/...`; Postgres on `127.0.0.1:5433`
+  (user `recallium` / `recallium_password`, db `recallium_memories`)
+- **Chain:** container → `ollama-bridge` (`:11434`, systemd) → llama-swap
+  `/upstream/vulkan/v1` → llama.cpp. Container reaches the host via
+  `host.containers.internal:11434`.
+- **Active model:** `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M` (config id 7,
+  `llm_provider_configs`). Model names are GGUF basenames auto-loaded by
+  llama-swap from `/home/cjdell/Models`.
+
+Operational essentials:
+
+- `POST /api/memories/` **always returns 500** (upstream response-schema bug) —
+  the row is still created; read it back via `GET /api/memories/{id}`.
+- There is **no API to change the LLM model** — edit `llm_provider_configs` in
+  Postgres directly, then `sudo podman restart recallium` (see docs/recallium.md
+  for the exact SQL).
+- **Zombie generations:** if a model is slow/looping, Recallium's 120 s client
+  timeout disconnects but llama.cpp keeps generating forever. Kill with
+  `curl -X POST http://127.0.0.1:8081/api/models/unload` (or `/unload/<name>`).
+- `LFM2.5-2.6B-Q8_0` PGLoops on Recallium's JSON metadata prompt (see the
+  llama-swap UI at `http://192.168.49.50/ui/#/logs`); don't switch it back.
+- Setup is complete (`active_llm_config_id: 7`); `mcp_tools_enabled: false` in
+  `/api/setup/status` is cosmetic and does not block MCP.
 
 ## Known gotchas on this host
 
