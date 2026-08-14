@@ -14,6 +14,11 @@
   ./hardware-configuration.nix
   ./netboot.nix
 
+  # One-time root partition resize (completed 2026-08-14: / 181G->250G,
+  # /home 750G->681G). Left in the tree, commented out, for reference and
+  # possible reuse - see docs/resize-once.md and resize-once.nix.
+  # ./resize-once.nix
+
   ({ lib, pkgs, ... }: {
 
     # 74:56:3c:6f:aa:16
