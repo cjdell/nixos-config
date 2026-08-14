@@ -67,9 +67,9 @@ rebuild-host host:
 reboot-host host:
     sudo nixos-rebuild boot --impure --flake .#{{ host }} --max-jobs 1
 
-# Confirm the current generation. MANDATORY after every rebuild on autoRollback
-# hosts (currently N100-NAS and zen3-nixos), or the machine rolls itself back
-# and reboots within ~5 minutes.
+# On autoRollback hosts (N100-NAS, zen3-nixos) the machine rolls itself back
+# and reboots within ~5 minutes unless the new generation is confirmed.
+# Confirm the current generation after every rebuild.
 confirm:
     sudo nixos-confirm
 
@@ -86,8 +86,9 @@ format:
 # The recipes below use `sops`, which is installed on sops hosts via
 # common/sops.nix (`environment.systemPackages`).
 
-# Edit the secrets file. Needs an age key locally (SOPS_AGE_KEY_FILE or
-# ~/.config/sops/age/keys.txt; sops hosts get it from common/sops.nix).
+# Needs a local age key (SOPS_AGE_KEY_FILE, ~/.config/sops/age/keys.txt, or
+# from common/sops.nix on sops hosts).
+# Edit the secrets file.
 edit file=secrets:
     @key="${SOPS_AGE_KEY_FILE:-}"; \
     if [ -n "$key" ] && [ ! -r "$key" ]; then \
@@ -120,9 +121,9 @@ show key file=secrets:
     fi
     sops -d --extract '["{{ key }}"]' {{ file }}
 
-# Re-encrypt secrets for every recipient currently listed in .sops.yaml.
-# Run after adding a key to .sops.yaml (and again after removing an old one)
-# to add/drop that recipient from the encrypted file.
+# Run after adding/removing a key in .sops.yaml so the encrypted file gains
+# or drops that recipient.
+# Re-encrypt secrets for every recipient in .sops.yaml.
 key-update file=secrets:
     @key="${SOPS_AGE_KEY_FILE:-}"; \
     if [ -n "$key" ] && [ ! -r "$key" ]; then \
@@ -135,22 +136,22 @@ key-update file=secrets:
 
 # --- deriving / installing the age key --------------------------------------
 
-# Print the age public key derived from {{ssh_key}} (should match .sops.yaml
-# unless you are rotating to a new key)
+# Derived pubkey should match .sops.yaml unless you are rotating keys.
+# Print the age public key for {{ssh_key}}.
 key-pub:
     @{{ ssh_to_age }} < {{ ssh_key }}.pub
 
-# Derive the age private key and save it to a file (default ~/age-key.txt),
-# e.g. for sops editing or copying onto a fresh machine
+# Used for sops editing or copying onto a fresh machine.
+# Derive the age private key and save it to a file (default ~/age-key.txt).
 key-generate out=age_key_file:
     @if [ -n "{{ passphrase }}" ]; then export SSH_TO_AGE_PASSPHRASE='{{ passphrase }}'; fi
     @{{ ssh_to_age }} -private-key -i {{ ssh_key }} > {{ out }} || { rm -f {{ out }}; exit 1; }
     @chmod 600 {{ out }}
     @echo "wrote age key to {{ out }}"
 
-# Install the derived age key on THIS machine (fresh install after first boot,
-# or rotation). Refuses to install unless the derived pubkey is listed in
-# .sops.yaml (check with `just key-pub`).
+# For fresh installs or rotation; refuses unless the derived pubkey is listed
+# in .sops.yaml (check with `just key-pub`).
+# Install the age key on this machine.
 key-install:
     @derived="$({{ ssh_to_age }} < {{ ssh_key }}.pub)"; \
     grep -qF "$derived" .sops.yaml || { \
@@ -163,8 +164,8 @@ key-install:
     sudo chmod 400 {{ age_key_path }}
     @echo "installed age key at {{ age_key_path }}"
 
-# Install the derived age key on a remote host over ssh (rotation).
 # Requires ssh access as {{user}} and passwordless sudo on the target.
+# Install the age key on a remote host over ssh.
 key-install-remote host:
     @derived="$({{ ssh_to_age }} < {{ ssh_key }}.pub)"; \
     grep -qF "$derived" .sops.yaml || { \
@@ -176,8 +177,9 @@ key-install-remote host:
     {{ ssh_to_age }} -private-key -i {{ ssh_key }} | ssh {{ user }}@{{ host }} "sudo tee {{ age_key_path }} > /dev/null && sudo chmod 400 {{ age_key_path }}"
     @echo "installed age key on {{ host }}"
 
-# Install the derived age key on every sops host (the current host is done
-# locally, the rest over ssh). Fails fast on the first unreachable host.
+# Current host is done locally, the rest over ssh; fails fast on the first
+# unreachable host.
+# Install the age key on every sops host.
 key-install-all:
     @for h in {{ sops_hosts }}; do \
         echo "==> installing age key on $h"; \
@@ -188,10 +190,10 @@ key-install-all:
         fi; \
     done
 
-# Provision the age key into a freshly mounted target root BEFORE running
-# nixos-install (i.e. after scripts/mount-partitions.sh). Run as root, and
-# pass the ssh key path explicitly since root's ~ is /root:
-# sudo just fresh-install-key /mnt --set ssh_key /home/cjdell/.ssh/id_ed25519_ps
+# Run as root, passing the ssh key path explicitly since root's ~ is /root:
+#   sudo just fresh-install-key /mnt --set ssh_key /home/cjdell/.ssh/id_ed25519_ps
+# For use before nixos-install, after scripts/mount-partitions.sh.
+# Provision the age key into a freshly mounted target root.
 fresh-install-key mount="/mnt":
     @derived="$({{ ssh_to_age }} < {{ ssh_key }}.pub)"; \
     grep -qF "$derived" .sops.yaml || { \
@@ -214,7 +216,8 @@ fresh-install-key mount="/mnt":
 # 3. (Optional) Remove the old key from .sops.yaml and run `just key-update`
 #    again so it is dropped from the encrypted file.
 # 4. Provision the new key file on every host:
-# just key-install-all
+#        just key-install-all
+# Walk through the documented key-rotation steps.
 key-rotate:
     @echo "following the documented order above (update keys, then install everywhere):"
     just key-update
