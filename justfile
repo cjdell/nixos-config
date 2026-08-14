@@ -43,7 +43,7 @@ sops_hosts := "N100-NAS N40L-NAS GEN8-NAS alderlake-thinkpad"
 
 # hosts to target with `deploy-all` (current fleet under hosts/; add any
 # legacy machines/ hosts here if you want them included)
-deploy_hosts := "N100-NAS N40L-NAS alderlake-thinkpad rocketlakelatitude zen3-nixos"
+deploy_hosts := "GEN8-NAS N100-NAS N40L-NAS alderlake-thinkpad rocketlakelatitude zen3-nixos"
 
 # where the repo lives on each host
 repo := "~/nixos-config"
