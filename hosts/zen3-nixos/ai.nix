@@ -61,7 +61,7 @@ in
       let
         llama-cpp-cpu = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.default;
         llama-cpp-vulkan =
-          specialArgs.inputs.llama-cpp-uma.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
+          specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
         llama-cpp-rocm = specialArgs.inputs.llama-cpp-uma.packages.${pkgs.stdenv.hostPlatform.system}.rocm;
 
         llamaCmdCpu = "${llama-cpp-cpu}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 16 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
@@ -101,6 +101,7 @@ in
             #   cmd = "${llamaCmdCpu} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
             # };
 
+            # Router mode, API chooses the model but less tweakable
             "vulkan" = {
               cmd = "${llamaCmdVulkan} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
             };
