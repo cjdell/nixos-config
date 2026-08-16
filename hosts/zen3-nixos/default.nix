@@ -11,6 +11,8 @@
   ((import ../../common/folding-at-home.nix) "amd")
 
   ./ai.nix
+  ./litellm.nix
+  ./open-webui.nix
   ./hardware-configuration.nix
   ./netboot.nix
 

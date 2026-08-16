@@ -1,0 +1,126 @@
+# LiteLLM proxy config for zen3-nixos.
+#
+# One OpenAI-compatible endpoint for every local LLM "class" (model group).
+# Agents pick a class with the `model` field: scouting / planning / coding /
+# creative / uncensored.
+#
+# Every deployment points at llama-swap's Vulkan router
+# (http://127.0.0.1:8081/upstream/vulkan/v1) and names its model by the GGUF
+# basename in /home/cjdell/Models (llama-server --models-dir loads it on
+# demand, one model at a time). Adding a GPU or another box = adding more
+# deployments to a group (see docs/litellm.md).
+#
+# The systemd unit references THIS FILE DIRECTLY (no Nix rebuild needed):
+#   sudo systemctl restart litellm
+#
+# Quick test:
+#   curl http://127.0.0.1:4000/v1/chat/completions \
+#     -H "Authorization: Bearer <master_key>" -H "Content-Type: application/json" \
+#     -d '{"model":"scouting","messages":[{"role":"user","content":"hi"}]}'
+model_list:
+  # ---------------------------------------------------------------------------
+  # scouting: cheap + fast, for broad exploration / summarising / cheap passes.
+  # ONE deployment on purpose: llama-swap runs a single llama-server (one model
+  # resident at a time on this box), so a second deployment in the same group
+  # would make litellm bounce between models and force a swap on every request.
+  # Add a second deployment only when it targets a DIFFERENT backend (an RTX
+  # GPU entry, another box) - see docs/litellm.md "Model residency".
+  # ---------------------------------------------------------------------------
+  - model_name: scouting
+    litellm_params:
+      model: openai/ornith-1.0-9b-Q4_K_M
+      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_key: local-llama-swap
+    model_info:
+      id: ornith-1.0-9b-Q4_K_M
+      mode: chat
+
+  # DO NOT re-enable: neutrino-8b-fv5.gguf is unreadable by the packaged
+  # llama.cpp (invalid ggml type 44 quant - see docs/recallium.md "GGUF
+  # compatibility"). Every request to it fails to load in ~70ms.
+  # - model_name: scouting
+  #   litellm_params:
+  #     model: openai/neutrino-8b-fv5
+  #     api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+  #     api_key: local-llama-swap
+  #   model_info:
+  #     id: neutrino-8b-fv5
+  #     mode: chat
+
+  # ---------------------------------------------------------------------------
+  # planning: big MoE for deep multi-step reasoning.
+  # ---------------------------------------------------------------------------
+  - model_name: planning
+    litellm_params:
+      model: openai/Qwen3.6-35B-A3B-UD-Q3_K_XL
+      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_key: local-llama-swap
+    model_info:
+      id: Qwen3.6-35B-A3B-UD-Q3_K_XL
+      mode: chat
+
+  # ---------------------------------------------------------------------------
+  # coding: the known-good coder (Recallium's active model).
+  # ---------------------------------------------------------------------------
+  - model_name: coding
+    litellm_params:
+      model: openai/Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M
+      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_key: local-llama-swap
+    model_info:
+      id: Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M
+      mode: chat
+
+  # ---------------------------------------------------------------------------
+  # creative: the Fable finetune, for prose / roleplay.
+  # ---------------------------------------------------------------------------
+  - model_name: creative
+    litellm_params:
+      model: openai/Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-Q4_K_M
+      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_key: local-llama-swap
+    model_info:
+      id: Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-Q4_K_M
+      mode: chat
+
+  # ---------------------------------------------------------------------------
+  # uncensored: HauhauCS 35B A3B. Delete this group if you don't want it
+  # reachable through the shared endpoint.
+  # ---------------------------------------------------------------------------
+  - model_name: uncensored
+    litellm_params:
+      model: openai/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M
+      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_key: local-llama-swap
+    model_info:
+      id: Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M
+      mode: chat
+
+# Model-group aliases for agents that hardcode vendor model names. Uncomment
+# and adjust as needed:
+#   model_group_alias:
+#     "gpt-4o": "scouting"
+#     "gpt-4": "planning"
+#     "claude-sonnet-4-5": "planning"
+
+# Single GPU today, so llama-swap swaps models for concurrent requests - give
+# the router room to retry and cool down a straggler.
+router_settings:
+  routing_strategy: least-busy
+  num_retries: 2
+  cooldown_time: 30
+
+litellm_settings:
+  # llama.cpp rejects OpenAI params it doesn't know; silently drop them
+  drop_params: true
+  # 20 min: covers first-token latency while a 17 GB model loads, plus long
+  # planning/coding outputs.
+  request_timeout: 1200
+
+general_settings:
+  # Master key for the proxy. Plaintext on purpose (like DB_PASSWORD and
+  # VAULT_PASSPHRASE in ai.nix); this host doesn't run sops. Rotate with:
+  #   printf 'sk-%s\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+  master_key: sk-cd6fb8f9f282b660fbd3cfed670ac97eab1412cd8eb3f002
+  telemetry: false
+  disable_spend_tracking: true
