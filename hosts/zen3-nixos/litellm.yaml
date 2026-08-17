@@ -4,10 +4,12 @@
 # Agents pick a class with the `model` field: scouting / planning / coding /
 # creative / uncensored.
 #
-# Every deployment points at llama-swap's Vulkan router
-# (http://127.0.0.1:8081/upstream/vulkan/v1) and names its model by the GGUF
-# basename in /home/cjdell/Models (llama-server --models-dir loads it on
-# demand, one model at a time). Adding a GPU or another box = adding more
+# Two llama-swap backends (each a llama.cpp router pinned to one GPU):
+#   http://127.0.0.1:8081/upstream/vega/v1   -> Vega 8 iGPU (Vulkan1, GTT)
+#   http://127.0.0.1:8081/upstream/r9700/v1  -> Radeon R9700 32 GB (Vulkan0)
+# A model is named by its GGUF basename in /home/cjdell/Models; the router
+# loads it on demand. The R9700 router runs --models-max 1 (one model resident
+# at a time), the Vega router up to 4. Adding another box = adding more
 # deployments to a group (see docs/litellm.md).
 #
 # The systemd unit references THIS FILE DIRECTLY (no Nix rebuild needed):
@@ -20,32 +22,18 @@
 model_list:
   # ---------------------------------------------------------------------------
   # scouting: cheap + fast, for broad exploration / summarising / cheap passes.
-  # ONE deployment on purpose: llama-swap runs a single llama-server (one model
-  # resident at a time on this box), so a second deployment in the same group
-  # would make litellm bounce between models and force a swap on every request.
-  # Add a second deployment only when it targets a DIFFERENT backend (an RTX
-  # GPU entry, another box) - see docs/litellm.md "Model residency".
+  # Served by the Vega 8 iGPU (GTT-backed), so it never touches the R9700 and
+  # stays resident next to the big models. The research sub-agent should use
+  # this group.
   # ---------------------------------------------------------------------------
   - model_name: scouting
     litellm_params:
       model: openai/ornith-1.0-9b-Q4_K_M
-      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_base: http://127.0.0.1:8081/upstream/vega/v1
       api_key: local-llama-swap
     model_info:
       id: ornith-1.0-9b-Q4_K_M
       mode: chat
-
-  # DO NOT re-enable: neutrino-8b-fv5.gguf is unreadable by the packaged
-  # llama.cpp (invalid ggml type 44 quant - see docs/recallium.md "GGUF
-  # compatibility"). Every request to it fails to load in ~70ms.
-  # - model_name: scouting
-  #   litellm_params:
-  #     model: openai/neutrino-8b-fv5
-  #     api_base: http://127.0.0.1:8081/upstream/vulkan/v1
-  #     api_key: local-llama-swap
-  #   model_info:
-  #     id: neutrino-8b-fv5
-  #     mode: chat
 
   # ---------------------------------------------------------------------------
   # planning: big MoE for deep multi-step reasoning.
@@ -53,7 +41,7 @@ model_list:
   - model_name: planning
     litellm_params:
       model: openai/Qwen3.6-35B-A3B-UD-Q3_K_XL
-      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_base: http://127.0.0.1:8081/upstream/r9700/v1
       api_key: local-llama-swap
     model_info:
       id: Qwen3.6-35B-A3B-UD-Q3_K_XL
@@ -65,7 +53,7 @@ model_list:
   - model_name: coding
     litellm_params:
       model: openai/Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M
-      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_base: http://127.0.0.1:8081/upstream/r9700/v1
       api_key: local-llama-swap
     model_info:
       id: Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M
@@ -77,7 +65,7 @@ model_list:
   - model_name: creative
     litellm_params:
       model: openai/Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-Q4_K_M
-      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_base: http://127.0.0.1:8081/upstream/r9700/v1
       api_key: local-llama-swap
     model_info:
       id: Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-Q4_K_M
@@ -90,7 +78,7 @@ model_list:
   - model_name: uncensored
     litellm_params:
       model: openai/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M
-      api_base: http://127.0.0.1:8081/upstream/vulkan/v1
+      api_base: http://127.0.0.1:8081/upstream/r9700/v1
       api_key: local-llama-swap
     model_info:
       id: Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M
@@ -103,8 +91,9 @@ model_list:
 #     "gpt-4": "planning"
 #     "claude-sonnet-4-5": "planning"
 
-# Single GPU today, so llama-swap swaps models for concurrent requests - give
-# the router room to retry and cool down a straggler.
+# Two GPUs now: big models on the R9700 (one resident, --models-max 1), small
+# ones on the Vega. The R9700 router still swaps models for concurrent requests
+# to different groups, so give it room to retry and cool down a straggler.
 router_settings:
   routing_strategy: least-busy
   num_retries: 2

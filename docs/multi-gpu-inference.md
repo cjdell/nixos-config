@@ -1,5 +1,14 @@
 # Using the RTX 2060 together with the Vega iGPU for llama.cpp
 
+> **STATUS UPDATE (2026-08-16):** superseded by the **Radeon R9700 32 GB** —
+> the RTX 2060 was never installed. What shipped instead: two llama.cpp router
+> instances pinned one-per-GPU (`r9700` = Vulkan0, `vega` = Vulkan1) behind
+> llama-swap, exactly the Plan 3 architecture below but with the R9700 in the
+> RTX slot. `r9700` runs `--models-max 1` (one resident model, no GTT spill);
+> `vega` runs the small models. See `hosts/zen3-nixos/ai.nix` and
+> `docs/litellm.md` "Model residency & swapping". The split-mode analysis
+> (Plan 1/2) below still applies if you ever want one model across both GPUs.
+
 **Date:** 2026-08-14 · **Status:** research report (no config changes made)
 **Applies to:** `zen3-nixos`, llama-swap → llama-server (Vulkan backend), local fork
 `/home/cjdell/Projects/llama.cpp` (HEAD `a8c202312`, upstream base `b10297`).

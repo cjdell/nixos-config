@@ -89,7 +89,13 @@ sudo nixos-rebuild switch --impure --flake .
 
 This is the machine the repo lives on (`192.168.49.50`). It runs:
 
-- **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving)
+- **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). Two
+  llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai.nix`),
+  kept co-resident by a llama-swap `matrix` so neither evicts the other:
+  `r9700` (Radeon R9700 32 GB, Vulkan0, `--models-max 1` = one resident model,
+  no GTT spill) and `vega` (Vega 8 iGPU, Vulkan1, GTT-backed, up to 4 small
+  models). Both run `-cram 8192`: idle-slot KV cache in system RAM, restored to
+  VRAM on matching prompt prefixes (verified on Vulkan).
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
 - **nginx** (from `netboot.nix` + `ai.nix`) exposing all of it on port 80
@@ -131,7 +137,8 @@ on the **local llama.cpp via the ollama-bridge** (no cloud). Full usage docs:
 - **REST:** `http://127.0.0.1:8001/api/...`; Postgres on `127.0.0.1:5433`
   (user `recallium` / `recallium_password`, db `recallium_memories`)
 - **Chain:** container → `ollama-bridge` (`:11434`, systemd) → llama-swap
-  `/upstream/vulkan/v1` → llama.cpp. Container reaches the host via
+  `/upstream/r9700/v1` (the R9700 router; Recallium's coding model lives
+  there) → llama.cpp. Container reaches the host via
   `host.containers.internal:11434`.
 - **Active model:** `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M` (config id 7,
   `llm_provider_configs`). Model names are GGUF basenames auto-loaded by

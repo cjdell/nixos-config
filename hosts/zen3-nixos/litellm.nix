@@ -11,8 +11,8 @@
   # ./litellm.yaml, which the unit references by literal repo path so group
   # changes only need `sudo systemctl restart litellm` - no rebuild (and the
   # master key never lands in the Nix store). The proxy fronts llama-swap's
-  # Vulkan router (127.0.0.1:8081/upstream/vulkan/v1), which auto-loads GGUF
-  # models from /home/cjdell/Models on demand.
+  # per-GPU routers (127.0.0.1:8081/upstream/{vega,r9700}/v1), which auto-load
+  # GGUF models from /home/cjdell/Models on demand (see ./litellm.yaml).
   #
   # Hosts without sops keep plaintext secrets here (same as ai.nix).
   systemd.services.litellm = {

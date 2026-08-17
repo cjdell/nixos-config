@@ -17,7 +17,8 @@ let
 
   # Ollama-compatible API bridge in front of llama-swap's OpenAI endpoint.
   # Recallium (and other Ollama-only clients) talk to this on port 11434;
-  # it translates to llama-swap's `/upstream/vulkan/v1` OpenAI API.
+  # it translates to llama-swap's `/upstream/r9700/v1` OpenAI API (the R9700
+  # router, which serves Recallium's coding model).
   ollama-bridge = pkgs.rustPlatform.buildRustPackage {
     pname = "ollama-bridge";
     version = "0.1.0";
@@ -68,47 +69,62 @@ in
         llamaCmdVulkan = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 12 -ngl all --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
         llamaCmdRocm = "${llama-cpp-rocm}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 12 -ngl all --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
 
+        # Two llama.cpp router instances (llama-server --models-dir), one per GPU:
+        #
+        #   r9700 (Vulkan0, Radeon R9700 32 GB)  -> the big models. `--models-max 1`
+        #     pins residency to a single model: the router unloads the current one
+        #     and waits for the unload to finish before loading the next (LRU), so
+        #     weights + KV always stay in VRAM and never spill to GTT.
+        #   vega (Vulkan1, Vega 8 iGPU, GTT-backed) -> the small/fast research
+        #     sub-agent models. GTT overflow is fine here, so up to `--models-max 4`
+        #     models can stay resident.
+        #
+        # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
+        # VRAM on the next request with a matching prompt prefix (verified working on
+        # the Vulkan backend: a 1243-token prefix reused ~1240 tokens, 16s -> 1.9s).
+        llamaCmdR9700 = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 --ctx-size 131072 --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs";
+        llamaCmdVega = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -dev Vulkan1 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 --ctx-size 131072 --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs";
+
         modelsPath = "/home/cjdell/Models";
 
         # Native Nix structure representing the YAML config
         llamaConfig = {
           models = {
-            # "Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-Q4_K_M" = {
-            #   cmd = "${llamaCmdVulkan} -m ${modelsPath}/Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-Q4_K_M.gguf --ctx-size 262144 --metrics --reasoning-preserve";
-            # };
-
-            # "Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M" = {
-            #   cmd = "${llamaCmdVulkan} -m ${modelsPath}/Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M.gguf --ctx-size 262144 --metrics --reasoning-preserve";
-            # };
-
-            # "Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M" = {
-            #   cmd = "${llamaCmdVulkan} -m ${modelsPath}/Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M.gguf --ctx-size 262144 --metrics";
-            # };
-
-            # "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M" = {
-            #   cmd = "${llamaCmdVulkan} -m ${modelsPath}/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf --ctx-size 262144 --metrics --reasoning off";
-            # };
-
-            # "Laguna-S-2.1-UD-IQ4_NL" = {
-            #   cmd = "${llamaCmdRocm} -m ${modelsPath}/Laguna-S-2.1-UD-IQ4_NL-00001-of-00003.gguf --ctx-size 262144 --metrics --reasoning-preserve";
-            # };
-
-            # "CPU_Laguna-S-2.1-UD-IQ4_NL" = {
-            #   cmd = "${llamaCmdCpu} -m ${modelsPath}/Laguna-S-2.1-UD-IQ4_NL-00001-of-00003.gguf --ctx-size 262144 --metrics --reasoning-preserve";
-            # };
-
-            # "cpu" = {
-            #   cmd = "${llamaCmdCpu} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
-            # };
-
-            # Router mode, API chooses the model but less tweakable
-            "vulkan" = {
-              cmd = "${llamaCmdVulkan} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
+            # Router mode, API chooses the model but less tweakable. One entry
+            # per GPU; each spawns its own llama.cpp router (llama-server
+            # --models-dir) auto-loading GGUFs from /home/cjdell/Models on demand.
+            #
+            # r9700 = Radeon R9700 32 GB (Vulkan0): the big models. --models-max 1
+            #         keeps ONE model resident at a time (no GTT spill).
+            # vega  = Vega 8 iGPU (Vulkan1, GTT-backed): small research sub-agent
+            #         models, up to 4 resident.
+            #
+            # litellm routes: scouting -> /upstream/vega/v1, everything else
+            # -> /upstream/r9700/v1 (see litellm.yaml).
+            "r9700" = {
+              cmd = llamaCmdR9700;
             };
 
-            # "rocm" = {
-            #   cmd = "${llamaCmdRocm} --models-dir /home/cjdell/Models --ctx-size 262144 --metrics --reasoning-preserve";
-            # };
+            "vega" = {
+              cmd = llamaCmdVega;
+            };
+          };
+
+          # Run BOTH routers in parallel. llama-swap's default is one model at a
+          # time: without a matrix/groups it would evict whichever router is
+          # running whenever the other entry is requested, killing the other
+          # GPU's instance. Declaring them co-resident (`r & v`) means llama-swap
+          # only starts the requested entry on first use and then keeps both
+          # llama-server router processes up side by side — each GPU serves its
+          # own model pool independently.
+          matrix = {
+            vars = {
+              r = "r9700";
+              v = "vega";
+            };
+            sets = {
+              gpus = "r & v";
+            };
           };
         };
 
@@ -148,7 +164,7 @@ in
     wantedBy = [ "multi-user.target" ];
 
     serviceConfig = {
-      ExecStart = "${ollama-bridge}/bin/ollama-bridge --listen 0.0.0.0:11434 --upstream http://127.0.0.1:8081/upstream/vulkan/v1";
+      ExecStart = "${ollama-bridge}/bin/ollama-bridge --listen 0.0.0.0:11434 --upstream http://127.0.0.1:8081/upstream/r9700/v1";
       Restart = "always";
       RestartSec = 3;
     };

@@ -27,10 +27,10 @@ Clients request a **group name**, litellm routes to a concrete deployment:
 | `creative` | `Qwen3.6-27B-Fable-Fus-711-...-Q4_K_M` | prose / roleplay |
 | `uncensored` | `Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M` | unfiltered (delete if unwanted) |
 
-Every deployment points at llama-swap's Vulkan router
-(`http://127.0.0.1:8081/upstream/vulkan/v1`) and names the model by its GGUF
-basename; llama-server (`--models-dir`) loads it on demand, one model at a time
-per GPU.
+Every deployment points at one of llama-swap's two per-GPU routers
+(`http://127.0.0.1:8081/upstream/vega/v1` and `.../r9700/v1`) and names the
+model by its GGUF basename; llama-server (`--models-dir`) loads it on demand
+(scouting → Vega, everything else → R9700).
 
 ## Quick test
 
@@ -62,39 +62,57 @@ a browser.
 - The package is not in the binary cache, so the first rebuild compiles it
   (~564 MiB download + the npm frontend build; 10-25 min, one-time).
 
-## Model residency & swapping (single GPU)
+## Model residency & swapping (two GPUs, since the R9700)
 
-llama-swap runs one llama-server per loaded model; with the current single
-`vulkan` router entry that means **one model resident at a time**. A request
-for a different GGUF triggers a **swap** (kill + reload; 10-60 s for the big
-models, plus full KV allocation for the 262K ctx) while other requests queue
-FIFO. llama.cpp also serves one request at a time (`-np 1`), so there is no
-true concurrency on this box today.
+Each GPU runs its own llama.cpp router instance (`llama-server --models-dir`),
+spawned by llama-swap as the `r9700` and `vega` entries (`hosts/zen3-nixos/ai.nix`):
 
-Rules of thumb:
+| llama-swap entry | GPU | Resident models | litellm groups |
+| --- | --- | --- | --- |
+| `r9700` | Radeon R9700 32 GB (Vulkan0) | `--models-max 1` | planning, coding, creative, uncensored |
+| `vega` | Vega 8 iGPU (Vulkan1, GTT) | `--models-max 4` | scouting |
 
-- **One litellm deployment per group** until deployments point at *different*
-  backends (a second GPU entry, another box). Two deployments on the same
-  llama-swap router just make litellm bounce between models = swap thrash.
-- **Alternating groups cost a swap** per switch. Agents that interleave
-  scouting and planning should be told to batch per group, or the combo should
-  be kept co-resident (below).
-- **Co-residency is configurable**: llama-swap v224 (this host) ships a routing
-  engine — top-level `groups`, or the `matrix` solver (either, not both).
-  `groups` with `swap: false` keeps its members loaded together, e.g. a `hot`
-  group of `ornith + Qwen3.6-35B-A3B-UD-Q3_K_XL + Qwen3-Coder-REAP` (~40-60 GB
-  GTT resident — each 262K-ctx model pays its full KV cache up front; measure
-  with `free -g`). Ungrouped models (the long-tail router, Laguna) keep
-  singleton behaviour and evict the group when loaded. `matrix` adds
-  `evict_costs`/`sets` so the solver keeps the expensive models and evicts the
-  cheap ones when memory needs making.
-- `hooks.on_startup.preload` warms the combo at boot; per-model `ttl` (e.g.
-  900 s) reclaims memory from idle residents. llama-swap supports
-  `-watch-config` to reload config changes without a service restart.
-- **RTX 2060 era**: a second llama-swap entry pinned to the NVIDIA device
-  (`GGML_VK_VISIBLE_DEVICES`) gives real parallel inference (draft/scout on
-  RTX, big MoE on Vega) — that's when multi-deployment litellm groups and
-  `least-busy` start paying off. See `docs/multi-gpu-inference.md` Plan 3.
+- **R9700 keeps ONE model resident at a time.** The router unloads the current
+  model (waiting for the unload to finish) before loading the next, so weights
+  + KV never spill into GTT — the 15-21 GB models can't share 32 GB. A request
+  for a different big model still costs a swap (kill + reload + KV
+  re-allocation), so agents should batch per group when alternating.
+- **The Vega is GTT-backed** (512 MB real + ~90 GB GTT over system RAM), so
+  overflow there is harmless; up to 4 small models stay resident. The research
+  sub-agent's `scouting` group never touches the R9700.
+- **True cross-GPU concurrency:** e.g. Recallium's `coding` chat on the R9700
+  while a scouting pass runs on the Vega.
+- **The two routers are kept co-resident via llama-swap's `matrix`** (set
+  `gpus: "r & v"` in `hosts/zen3-nixos/ai.nix`). Without it llama-swap only
+  runs **one model at a time** and would kill the other GPU's router on every
+  request (verified live 2026-08-16: with no matrix, requesting `r9700`
+  evicted the running `vega` router). Within each GPU, llama.cpp's router
+  (`--models-max`) owns which GGUFs stay loaded.
+
+## Context persistence: KV cache in system RAM
+
+`-cram 8192` (MiB) is on both routers: idle-slot KV is saved to system RAM and
+restored to VRAM on the next request with a matching prompt prefix
+(`--cache-idle-slots` is enabled by default when `-cram` is set). **Verified on
+the Vulkan backend (2026-08-16):** a 1243-token prompt restored ~1240 of its
+tokens from RAM and evaluated only the new tail — 16.4 s → 1.9 s per request.
+
+Implications for agentic workflows:
+
+- Several sub-agents sharing the R9700 keep their contexts warm in RAM between
+  turns (unified KV pool, idle slots cached); returning to a conversation does
+  not re-evaluate the whole history.
+- The RAM cache dies with the model process, so it does **not** survive a model
+  swap (the R9700's `--models-max 1` unloads the current model when a different
+  one is requested).
+- `--slot-save-path` (explicit disk save/restore of a slot's KV via
+  `POST /slots/{id}?action=save` / `restore` with `{"filename": ...}`) restores
+  KV across restarts (1243 tokens in ~12 ms in testing), but this build still
+  forces a full re-process of the next OpenAI-style request ("lack of cache
+  data"), so it buys nothing yet for the stateless chat API. Revisit when
+  upstream wires restored KV into prompt reuse.
+- Tuning: `--cache-reuse N` sets the minimum chunk size to attempt reuse;
+  `-cram -1` removes the MiB cap (73 GB RAM free here).
 
 ## Adding things
 
@@ -111,11 +129,12 @@ model name must be the GGUF basename without `.gguf`.
 **A new class/group** — same, but with a fresh `model_name`. Give agents the
 group name.
 
-**A second GPU on this box** (see `docs/multi-gpu-inference.md` Plan 3) — add
-a new llama-swap model entry (e.g. `rtx` running the small model on the RTX),
-then add a deployment per group pointing at
-`http://127.0.0.1:8081/upstream/rtx/v1`. litellm load-balances (`least-busy`)
-and fails over across the deployments in a group.
+**A second GPU on this box** — done: the R9700 replaced the planned RTX (see
+`docs/multi-gpu-inference.md` Plan 3, now implemented as the `r9700` + `vega`
+llama-swap entries). Adding another deployment to a group now means a *second
+backend for the same group*, e.g. a second `scouting` deployment on another
+box. litellm load-balances (`least-busy`) and fails over across the
+deployments in a group.
 
 **Another box** — same pattern with a remote `api_base`:
 `http://<box>:<port>/upstream/<entry>/v1` (or its own litellm).
@@ -125,8 +144,8 @@ and fails over across the deployments in a group.
 - `drop_params: true` is set: llama.cpp rejects OpenAI params it doesn't know,
   litellm silently drops them instead of 400ing.
 - `request_timeout: 1200` — the first request to a model pays its load time
-  (17 GB models take a while); llama-swap swaps models for concurrent requests
-  to different groups, so requests may queue.
+  (17 GB models take a while); the R9700 router unloads/reloads models for
+  concurrent requests to different big-model groups, so requests may queue.
 - The master key is plaintext in `litellm.yaml` (this host has no sops, same
   as `DB_PASSWORD`/`VAULT_PASSPHRASE` in `ai.nix`). Rotate it if needed.
 - `LFM2.5-2.6B-Q8_0` is deliberately **not** in any group (PGLoops on JSON

@@ -20,8 +20,8 @@ flowchart LR
     Agent[IDE agent / chat client<br/>Cursor, Claude, opencode, Zed] -->|MCP over HTTP| Nginx[nginx :80<br/>/recallium-mcp]
     Nginx --> MCP[Recallium container<br/>MCP server :8000]
     MCP -->|Ollama API| Bridge[ollama-bridge<br/>systemd, :11434]
-    Bridge -->|OpenAI API| Swap[llama-swap :8081<br/>/upstream/vulkan/v1]
-    Swap --> CPP[llama.cpp llama-server<br/>Vulkan GPU]
+    Bridge -->|OpenAI API| Swap[llama-swap :8081<br/>/upstream/r9700/v1]
+    Swap --> CPP[llama.cpp llama-server<br/>R9700 32 GB, Vulkan0]
     MCP --> PG[(Postgres 17<br/>in container :5432)]
     MCP --> UI[Web UI :9000]
 ```

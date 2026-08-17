@@ -6,7 +6,7 @@
 //! stdlib only, mirroring `llama-log-viewer` in this repo.
 //!
 //! Usage:
-//!   ollama-bridge [--listen 0.0.0.0:11434] [--upstream http://127.0.0.1:8081/upstream/vulkan/v1] [--model vulkan]
+//!   ollama-bridge [--listen 0.0.0.0:11434] [--upstream http://127.0.0.1:8081/upstream/r9700/v1] [--model r9700]
 //!
 //! Implemented endpoints:
 //!   GET  /api/version
@@ -30,7 +30,7 @@ const MAX_LINE: usize = 16 * 1024 * 1024; // 16 MiB per SSE/NDJSON line
 struct Config {
     listen: String,
     upstream_host: String,  // host:port of the upstream server
-    upstream_prefix: String, // path prefix (e.g. /upstream/vulkan/v1) or ""
+    upstream_prefix: String, // path prefix (e.g. /upstream/r9700/v1) or ""
     model: String,          // model name used when the request does not specify one
     max_tokens: i64,        // default completion length cap when the client does not set one
 }
@@ -1065,8 +1065,8 @@ fn main() {
     let mut cfg = Config {
         listen: "0.0.0.0:11434".to_string(),
         upstream_host: "127.0.0.1:8081".to_string(),
-        upstream_prefix: "/upstream/vulkan/v1".to_string(),
-        model: "vulkan".to_string(),
+        upstream_prefix: "/upstream/r9700/v1".to_string(),
+        model: "r9700".to_string(),
         max_tokens: 512,
     };
     let mut i = 1;
@@ -1115,7 +1115,7 @@ fn main() {
             "--help" | "-h" => {
                 println!(
                     "usage: ollama-bridge [--listen HOST:PORT] [--upstream BASE_URL] [--model NAME] [--max-tokens N]\n\
-                     default upstream: http://127.0.0.1:8081/upstream/vulkan/v1"
+                     default upstream: http://127.0.0.1:8081/upstream/r9700/v1"
                 );
                 return;
             }
