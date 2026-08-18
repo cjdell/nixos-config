@@ -107,7 +107,7 @@ in
         # target model verifies. Must stay per-model — models without MTP tensors
         # (REAP, ornith, Laguna, LFM2.5...) fail to load if set globally. Verify
         # acceptance via the spec_decode_* counters on /metrics.
-        llamaCmdR9700 = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (192 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdR9700 = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
         llamaCmdVega = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan1 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";

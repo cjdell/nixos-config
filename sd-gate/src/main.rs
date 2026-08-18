@@ -472,14 +472,22 @@ fn relay_with_prefix(mut client: TcpStream, prefix: Vec<u8>, upstream: &str) {
         Ok(u) => u,
         Err(_) => return,
     };
-    // client -> upstream (rest of the request)
+    // client -> upstream (rest of the request). Never half-close upstream
+    // here: sd-server (stable-diffusion.cpp) treats a client FIN as "client
+    // disconnected" and, after a long generation, closes the connection
+    // WITHOUT sending the response (nginx then sees a 502 "upstream
+    // prematurely closed connection" at the moment the image finished).
+    // `up` is closed when this function returns, after the response was
+    // relayed, so the FIN reaches sd-server only when it is harmless.
     let t = thread::spawn(move || {
         let _ = std::io::copy(&mut c1, &mut u1);
-        let _ = u1.shutdown(std::net::Shutdown::Write);
     });
     // upstream -> client (response)
     let _ = std::io::copy(&mut up, &mut client);
-    let _ = client.shutdown(std::net::Shutdown::Write);
+    // Shut down both directions: the Write half tells nginx the response is
+    // complete, and the Read half unblocks the request-copy thread above on
+    // fast responses (it would otherwise sit in its 10 s read timeout).
+    let _ = client.shutdown(std::net::Shutdown::Both);
     let _ = t.join();
 }
 

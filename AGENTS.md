@@ -17,6 +17,7 @@ workstation, etc.). Key layout:
 | `llama-log-viewer/` | Standalone zero-dependency Rust web app (see below) |
 | `llama-logs/` | Live `llama-server --log-prompts-dir` output consumed by the viewer |
 | `docs/recallium.md` | How to use the Recallium memory server (APIs, MCP, examples) |
+| `docs/gtt-vram.md` | GTT-default/VRAM-cache research: `GGML_VK_ALLOW_SYSMEM_FALLBACK`, why there's no weight cache in llama.cpp, and why GTT never auto-unspills |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
