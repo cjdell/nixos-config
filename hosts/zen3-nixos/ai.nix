@@ -83,15 +83,33 @@ in
       let
         llama-cpp-vulkan = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
 
+        # Pin each router to its physical GPU via mesa's device-select layer
+        # (VK_LAYER_MESA_device_select) instead of relying on llama.cpp's
+        # `-dev VulkanN` indices. Those indices are assigned in RADV enumeration
+        # order, which is NOT stable: the implicit layer reorders devices so the
+        # boot-VGA (console) GPU comes first when no MESA_VK_DEVICE_SELECT is set.
+        # The R9700 drives no screens (console lives on the iGPU), so `-dev Vulkan0`
+        # silently meant the Vega and the r9700 router's models ran on the Vega's
+        # GTT (30 GB GTT used, R9700 idle at 57 MB). Selecting by vendor:device ID
+        # with a trailing `!` (exposes ONLY that device, making it Vulkan0) is
+        # immune to enumeration/boot-VGA changes:
+        #   1002:7551 = Radeon AI PRO R9700 (Navi 48, discrete, 32 GiB)
+        #   1002:1638 = Cezanne Vega 8 iGPU
+        # XDG_DATA_DIRS is required for the loader to discover the implicit layer
+        # manifest under /run/opengl-driver/share/vulkan/implicit_layer.d.
+        #
         # Two llama.cpp router instances (llama-server --models-dir), one per GPU:
         #
-        #   r9700 (Vulkan0, Radeon R9700 32 GB)  -> the big models. `--models-max 1`
+        #   r9700 (Radeon R9700 32 GB)  -> the big models. `--models-max 1`
         #     pins residency to a single model: the router unloads the current one
         #     and waits for the unload to finish before loading the next (LRU), so
         #     weights + KV always stay in VRAM and never spill to GTT.
-        #   vega (Vulkan1, Vega 8 iGPU, GTT-backed) -> the small/fast research
+        #   vega (Vega 8 iGPU, GTT-backed) -> the small/fast research
         #     sub-agent models. GTT overflow is fine here, so up to `--models-max 4`
         #     models can stay resident.
+        #
+        # Both wrappers exec llama-server with the layer exposing a single device,
+        # so both routers use `-dev Vulkan0` (the pinned GPU).
         #
         # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
         # VRAM on the next request with a matching prompt prefix (verified working on
@@ -107,8 +125,22 @@ in
         # target model verifies. Must stay per-model — models without MTP tensors
         # (REAP, ornith, Laguna, LFM2.5...) fail to load if set globally. Verify
         # acceptance via the spec_decode_* counters on /metrics.
-        llamaCmdR9700 = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-        llamaCmdVega = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan1 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        # The layer is discoverable via XDG_DATA_DIRS; the `!` makes the pinned
+        # device the only one exposed (so its ggml name is always Vulkan0).
+        llama-r9700 = pkgs.writeShellScript "llama-r9700" ''
+          export XDG_DATA_DIRS=/run/opengl-driver/share
+          export MESA_VK_DEVICE_SELECT=1002:7551!
+          exec ${llama-cpp-vulkan}/bin/llama-server "$@"
+        '';
+
+        llama-vega = pkgs.writeShellScript "llama-vega" ''
+          export XDG_DATA_DIRS=/run/opengl-driver/share
+          export MESA_VK_DEVICE_SELECT=1002:1638!
+          exec ${llama-cpp-vulkan}/bin/llama-server "$@"
+        '';
+
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";
 
@@ -140,9 +172,11 @@ in
             # per GPU; each spawns its own llama.cpp router (llama-server
             # --models-dir) auto-loading GGUFs from /home/cjdell/Models on demand.
             #
-            # r9700 = Radeon R9700 32 GB (Vulkan0): the big models. --models-max 1
-            #         keeps ONE model resident at a time (no GTT spill).
-            # vega  = Vega 8 iGPU (Vulkan1, GTT-backed): small research sub-agent
+            # r9700 = Radeon R9700 32 GB (device-select pinned to 1002:7551, so it
+            #         is Vulkan0): the big models. --models-max 1 keeps ONE model
+            #         resident at a time (no GTT spill).
+            # vega  = Vega 8 iGPU (device-select pinned to 1002:1638, also Vulkan0
+            #         in its own process; GTT-backed): small research sub-agent
             #         models, up to 4 resident.
             #
             # litellm routes: scouting -> /upstream/vega/v1, everything else
@@ -191,6 +225,15 @@ in
     description = "On-demand stable-diffusion.cpp server (loads on first request, unloads when idle)";
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
+
+    # Pin the spawned sd-server to the R9700 with the same device-select layer
+    # pin as llama-swap: without MESA_VK_DEVICE_SELECT the layer's boot-VGA
+    # default exposes the iGPU first and `--backend vulkan0` would put SDXL on
+    # the Vega. With the pin, vulkan0 = the R9700 (the only visible device).
+    environment = {
+      XDG_DATA_DIRS = "/run/opengl-driver/share";
+      MESA_VK_DEVICE_SELECT = "1002:7551!";
+    };
 
     serviceConfig = {
       # --vae-tiling is required: RADV caps maxMemoryAllocationSize at ~4 GiB

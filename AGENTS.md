@@ -93,10 +93,13 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
 - **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). Two
   llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai.nix`),
   kept co-resident by a llama-swap `matrix` so neither evicts the other:
-  `r9700` (Radeon R9700 32 GB, Vulkan0, `--models-max 1` = one resident model,
-  no GTT spill) and `vega` (Vega 8 iGPU, Vulkan1, GTT-backed, up to 4 small
-  models). Both run `-cram 8192`: idle-slot KV cache in system RAM, restored to
-  VRAM on matching prompt prefixes (verified on Vulkan).
+  `r9700` (Radeon R9700 32 GB, device-select pinned to `1002:7551` so it is
+  Vulkan0, `--models-max 1` = one resident model, no GTT spill) and `vega`
+  (Vega 8 iGPU, pinned to `1002:1638`, also Vulkan0 in its own process;
+  GTT-backed, up to 4 small models). See the first bullet under “Known gotchas”
+  for why the indices needed pinning. Both run `-cram 8192`: idle-slot KV cache
+  in system RAM, restored to VRAM on matching prompt prefixes (verified on
+  Vulkan).
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
 - **nginx** (from `netboot.nix` + `ai.nix`) exposing all of it on port 80
@@ -137,8 +140,9 @@ are `sd-cli` and `sd-server` (upstream renamed from `sd`).
   (`sd_xl_base_1.0.safetensors`, 6.5G) + `clip_l.fp16.safetensors`,
   `clip_g.fp16.safetensors`, `sdxl_vae.fp16.safetensors` (from
   `stabilityai/stable-diffusion-xl-base-1.0`).
-- Vulkan device numbering matches llama.cpp: `vulkan0` = R9700, `vulkan1` =
-  Vega iGPU.
+- Vulkan device numbering: sd-gate pins sd-server to the R9700 with the same
+  device-select layer env (`MESA_VK_DEVICE_SELECT=1002:7551!`), so `vulkan0` =
+  R9700 and the Vega is not visible to it. Same for the llama-swap routers.
 
 Working test command (1024×1024 SDXL, ~24 s for 30 steps on the R9700):
 
@@ -241,6 +245,21 @@ Operational essentials:
   `/api/setup/status` is cosmetic and does not block MCP.
 
 ## Known gotchas on this host
+
+- **Vulkan device indices (`Vulkan0`/`Vulkan1`) are NOT stable across boots.**
+  The mesa device-select layer (`VK_LAYER_MESA_device_select`, an implicit layer
+  auto-loaded by every Vulkan app because NixOS patches the loader's search
+  paths to `/run/opengl-driver/share`) reorders devices so the **boot-VGA
+  (console) GPU comes first** when `MESA_VK_DEVICE_SELECT` is unset. The R9700
+  drives no screens — the console lives on the iGPU — so `-dev Vulkan0`
+  silently meant the Vega: the r9700 router's models ran on the Vega's GTT
+  (30 GB GTT used, R9700 idle at 57 MB). Fixed in `hosts/zen3-nixos/ai.nix`:
+  each llama-swap router (and sd-gate's spawned sd-server) goes through a
+  wrapper that sets `XDG_DATA_DIRS=/run/opengl-driver/share` and
+  `MESA_VK_DEVICE_SELECT=1002:7551!` (R9700, Navi 48) / `1002:1638!` (Vega 8
+  iGPU) — the trailing `!` exposes only that device, so `-dev Vulkan0` /
+  `--backend vulkan0` always mean the pinned GPU. Don't "simplify" this back to
+  plain indices.
 
 - **`sudo nginx -T` is misleading** — it reads the package's stock
   `conf/nginx.conf`, NOT the NixOS-generated config under
