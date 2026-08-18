@@ -125,6 +125,60 @@ sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 sudo nixos-confirm
 ```
 
+## stable-diffusion-cpp (SDXL on the R9700)
+
+`stable-diffusion-cpp` is installed on zen3-nixos as a **Vulkan build** — the
+nixpkgs default is CPU-only (`SD_VULKAN=OFF`), so `hosts/zen3-nixos/ai.nix`
+uses `(stable-diffusion-cpp.override { vulkanSupport = true; })`. The binaries
+are `sd-cli` and `sd-server` (upstream renamed from `sd`).
+
+- Models live in `/home/cjdell/sd-models`: SDXL base fp16
+  (`sd_xl_base_1.0.safetensors`, 6.5G) + `clip_l.fp16.safetensors`,
+  `clip_g.fp16.safetensors`, `sdxl_vae.fp16.safetensors` (from
+  `stabilityai/stable-diffusion-xl-base-1.0`).
+- Vulkan device numbering matches llama.cpp: `vulkan0` = R9700, `vulkan1` =
+  Vega iGPU.
+
+Working test command (1024×1024 SDXL, ~24 s for 30 steps on the R9700):
+
+```sh
+sd-cli --backend "diffusion=vulkan0,clip=vulkan0,vae=vulkan0" \
+  -m /home/cjdell/sd-models/sd_xl_base_1.0.safetensors \
+  --vae /home/cjdell/sd-models/sdxl_vae.fp16.safetensors \
+  --clip_l /home/cjdell/sd-models/clip_l.fp16.safetensors \
+  --clip_g /home/cjdell/sd-models/clip_g.fp16.safetensors \
+  -p "a majestic golden retriever in a sunlit meadow" \
+  -H 1024 -W 1024 --steps 30 --cfg-scale 6 --vae-tiling \
+  -o out.png
+```
+
+**Gotcha — `--vae-tiling` is required for VAE decode.** RADV reports
+`maxMemoryAllocationSize = 0xfffffffc` (~4 GiB) on the R9700, and the SDXL
+VAE decode graph wants an ~8.5 GB buffer; ggml's single allocation (4.5 GiB)
+then fails with `ErrorOutOfDeviceMemory` even though 32 GB VRAM is free.
+`--max-vram` (graph-cut) does **not** fix it — only `--vae-tiling` (or putting
+the VAE on CPU: `--vae-on-cpu`). Bigger graphs (Flux/SD3 at high res) will hit
+the same cap.
+
+### sd-server service + web UI (live)
+
+- **systemd service `sd-server`** (`hosts/zen3-nixos/ai.nix`): runs
+  `sd-server` on `127.0.0.1:8084` with the SDXL model, `--vae-tiling` and
+  `--max-vram -1` (graphs size to whatever VRAM is free). Rebuilt via the
+  `stable-diffusion-cpp-vulkan` let-binding (shared with systemPackages).
+- **Web UI:** `http://192.168.49.50/sd/` (static files in `sd-webui/`,
+  copied into the store via `runCommandLocal` so nginx can serve them).
+- **API:** `http://192.168.49.50/sd-api/…` proxies to 8084 with the `/sd-api`
+  prefix stripped. The UI uses the A1111-style `POST /sd-api/sdapi/v1/txt2img`
+  (full param control: steps/cfg/seed/sampler/negative_prompt); note the
+  OpenAI-style `/v1/images/generations` on this build **ignores** steps/cfg/seed
+  and only honors prompt/n/size.
+- **Shared-GPU gotcha:** the R9700 is also home to llama-swap's resident coding
+  model (~26 GB VRAM), so SD runs at GTT-spill speed while the LLM is loaded
+  (e.g. ~36 s for 8 steps at 512×512 vs ~25 s for 30 steps at 1024×1024 when
+  free). For fast generations: `curl -X POST http://127.0.0.1:8081/api/models/unload`
+  (unloads the LLM). Model stays resident regardless, so nothing to preload.
+
 ## Recallium (memory server, live on zen3-nixos)
 
 Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a

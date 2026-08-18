@@ -15,6 +15,14 @@ let
     doCheck = false;
   };
 
+  # nixpkgs default is a CPU-only build (SD_VULKAN=OFF); enable the Vulkan
+  # backend for the R9700. Shared by systemPackages and the sd-server unit.
+  stable-diffusion-cpp-vulkan = pkgs.stable-diffusion-cpp.override { vulkanSupport = true; };
+
+  # Static web UI for sd-server, copied into the store so nginx (non-root
+  # user) can serve it — it cannot read /home/cjdell (mode 700).
+  sd-webui = pkgs.runCommandLocal "sd-webui" { src = ../../sd-webui; } "cp -r $src $out";
+
   # Ollama-compatible API bridge in front of llama-swap's OpenAI endpoint.
   # Recallium (and other Ollama-only clients) talk to this on port 11434;
   # it translates to llama-swap's `/upstream/r9700/v1` OpenAI API (the R9700
@@ -31,6 +39,8 @@ in
   environment.systemPackages = with pkgs; [
     rocmPackages.rocminfo
     rocmPackages.amdsmi
+    # Vulkan build of stable-diffusion-cpp for the R9700 (nixpkgs default is CPU-only).
+    stable-diffusion-cpp-vulkan
   ];
 
   # I think stable-diffusion-webui needs this
@@ -60,14 +70,7 @@ in
 
     serviceConfig =
       let
-        llama-cpp-cpu = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        llama-cpp-vulkan =
-          specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
-        llama-cpp-rocm = specialArgs.inputs.llama-cpp-uma.packages.${pkgs.stdenv.hostPlatform.system}.rocm;
-
-        llamaCmdCpu = "${llama-cpp-cpu}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 16 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
-        llamaCmdVulkan = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 12 -ngl all --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
-        llamaCmdRocm = "${llama-cpp-rocm}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 12 -ngl all --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
+        llama-cpp-vulkan = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
 
         # Two llama.cpp router instances (llama-server --models-dir), one per GPU:
         #
@@ -82,10 +85,42 @@ in
         # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
         # VRAM on the next request with a matching prompt prefix (verified working on
         # the Vulkan backend: a 1243-token prefix reused ~1240 tokens, 16s -> 1.9s).
-        llamaCmdR9700 = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 --ctx-size 131072 --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs";
-        llamaCmdVega = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -dev Vulkan1 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 --ctx-size 131072 --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs";
+        #
+        # `-ctk q8_0 -ctv q8_0` quantizes the KV cache: halves the VRAM/RAM footprint
+        # of the context (12 GiB -> 6 GiB at 128K for REAP) with near-lossless quality.
+        # The `-cram` RAM cache checkpoints store raw KV at the cache dtype, so it
+        # shrinks too. f16 was the previous (default) cache type.
+        #
+        # `--models-preset` (mtpPresets below) enables `draft-mtp` speculative
+        # decoding PER MODEL: the model's built-in MTP module drafts tokens, the
+        # target model verifies. Must stay per-model — models without MTP tensors
+        # (REAP, ornith, Laguna, LFM2.5...) fail to load if set globally. Verify
+        # acceptance via the spec_decode_* counters on /metrics.
+        llamaCmdR9700 = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (192 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdVega = "${llama-cpp-vulkan}/bin/llama-server --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan1 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";
+
+        # Per-model speculative decoding presets for the inner llama.cpp routers.
+        # `draft-mtp` reuses the model's own MTP module (`blk.N.nextn.*` tensors) as
+        # the draft — no separate draft model, no extra VRAM. Only MTP-capable models
+        # are listed; everything else loads without speculation.
+        mtpPresets = pkgs.writeText "llama-mtp-presets" ''
+          version = 1
+
+          [Qwen3.8-27B-UD-Q4_K_XL]
+          spec-type = draft-mtp
+          [Qwen3.8-27B-UD-Q5_K_XL]
+          spec-type = draft-mtp
+          [Qwen3.8-27B-Q4_K_S]
+          spec-type = draft-mtp
+          [Qwen3.6-35B-A3B-UD-Q3_K_XL]
+          spec-type = draft-mtp
+          [DeepSeek-V4-Pro-Qwen3.5-9B-MTP-Q4_K_M]
+          spec-type = draft-mtp
+          [Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M]
+          spec-type = draft-mtp
+        '';
 
         # Native Nix structure representing the YAML config
         llamaConfig = {
@@ -136,6 +171,23 @@ in
         WorkingDirectory = modelsPath;
         Restart = "always";
       };
+  };
+
+  systemd.services.sd-server = {
+    description = "stable-diffusion.cpp server (SDXL on the R9700)";
+    after = [ "wait-for-network.service" ];
+    wants = [ "wait-for-network.service" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      # --vae-tiling is required: RADV caps maxMemoryAllocationSize at ~4 GiB
+      # on the R9700, and the SDXL VAE decode graph (~8.5 GB) OOMs without it.
+      # --max-vram -1 sizes compute graphs to whatever VRAM is free so SD stays
+      # polite next to llama-swap's resident model. See AGENTS.md.
+      ExecStart = "${stable-diffusion-cpp-vulkan}/bin/sd-server --listen-ip 127.0.0.1 --listen-port 8084 --backend diffusion=vulkan0,clip=vulkan0,vae=vulkan0 --vae-tiling --max-vram -1 -m /home/cjdell/sd-models/sd_xl_base_1.0.safetensors --vae /home/cjdell/sd-models/sdxl_vae.fp16.safetensors --clip_l /home/cjdell/sd-models/clip_l.fp16.safetensors --clip_g /home/cjdell/sd-models/clip_g.fp16.safetensors";
+      Restart = "always";
+      RestartSec = 5;
+    };
   };
 
   systemd.services.llama-log-viewer = {
@@ -313,6 +365,30 @@ in
           '';
           recommendedProxySettings = true;
           proxyWebsockets = true;
+        };
+
+        # stable-diffusion.cpp web UI + API (http://192.168.49.50/sd/)
+        locations."= /sd" = {
+          return = "301 /sd/";
+        };
+
+        locations."/sd/" = {
+          alias = "${sd-webui}/";
+          index = "index.html";
+        };
+
+        locations."/sd-api/" = {
+          # Strip the /sd-api prefix, then proxy without a URI so nginx
+          # forwards the rewritten path (e.g. /sd-api/sdapi/v1/txt2img ->
+          # /sdapi/v1/txt2img on sd-server port 8084).
+          proxyPass = "http://127.0.0.1:8084";
+          extraConfig = ''
+            rewrite ^/sd-api/?(.*)$ /$1 break;
+            # SD generations take tens of seconds; don't let nginx time out.
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+          '';
+          recommendedProxySettings = true;
         };
 
         # Redirect bare /logs to /logs/ so relative URLs resolve inside the app

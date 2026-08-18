@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SD Studio — SDXL on the R9700</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <h1>🎨 SD Studio</h1>
+  <div class="muted" id="sub">stable-diffusion.cpp · SDXL base · Radeon R9700 (Vulkan)</div>
+  <div class="controls">
+    <span id="server-status" class="status"></span>
+  </div>
+</header>
+
+<div id="layout">
+  <aside id="controls">
+    <label class="field">
+      <span>Prompt</span>
+      <textarea id="prompt" rows="4" placeholder="describe the image you want…"></textarea>
+    </label>
+    <label class="field">
+      <span>Negative prompt</span>
+      <textarea id="neg-prompt" rows="2" placeholder="blurry, low quality, …"></textarea>
+    </label>
+    <div class="row">
+      <label class="field">
+        <span>Steps</span>
+        <input id="steps" type="number" min="1" max="100" value="30">
+      </label>
+      <label class="field">
+        <span>CFG scale</span>
+        <input id="cfg" type="number" min="1" max="20" step="0.5" value="6">
+      </label>
+    </div>
+    <label class="field">
+      <span>Sampler</span>
+      <select id="sampler">
+        <option value="euler_a" selected>euler_a</option>
+        <option value="euler">euler</option>
+        <option value="dpm++2m">dpm++2m</option>
+        <option value="dpm++2s_a">dpm++2s_a</option>
+        <option value="heun">heun</option>
+        <option value="lcm">lcm</option>
+        <option value="tcd">tcd</option>
+      </select>
+    </label>
+    <div class="row">
+      <label class="field">
+        <span>Width</span>
+        <input id="width" type="number" min="256" max="2048" step="64" value="1024">
+      </label>
+      <label class="field">
+        <span>Height</span>
+        <input id="height" type="number" min="256" max="2048" step="64" value="1024">
+      </label>
+    </div>
+    <div class="presets">
+      <button class="mini-btn" data-w="1024" data-h="1024" title="square">1024²</button>
+      <button class="mini-btn" data-w="832" data-h="1216" title="portrait">832×1216</button>
+      <button class="mini-btn" data-w="1216" data-h="832" title="landscape">1216×832</button>
+      <button class="mini-btn" data-w="768" data-h="1024" title="portrait">768×1024</button>
+      <button class="mini-btn" data-w="512" data-h="512" title="square">512²</button>
+    </div>
+    <div class="row">
+      <label class="field seed">
+        <span>Seed</span>
+        <input id="seed" type="number" value="42">
+      </label>
+      <button id="dice" class="btn" title="Random seed">🎲</button>
+      <label class="field batch">
+        <span>Batch</span>
+        <input id="batch" type="number" min="1" max="4" value="1">
+      </label>
+    </div>
+    <button id="generate" class="generate">Generate</button>
+    <div id="statusline" class="muted"></div>
+  </aside>
+
+  <main id="output">
+    <div id="empty" class="placeholder">
+      <p>Enter a prompt and hit Generate.</p>
+      <p class="muted">A 1024×1024, 30-step image takes ~25&nbsp;s when the GPU is free — slower while the coding LLM is resident on the R9700.</p>
+    </div>
+    <div id="result" class="hidden">
+      <img id="image" alt="generated image">
+      <div id="meta" class="muted"></div>
+      <a id="download" class="btn" download="sd-image.png">Save PNG</a>
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
