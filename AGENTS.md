@@ -160,24 +160,50 @@ then fails with `ErrorOutOfDeviceMemory` even though 32 GB VRAM is free.
 the VAE on CPU: `--vae-on-cpu`). Bigger graphs (Flux/SD3 at high res) will hit
 the same cap.
 
-### sd-server service + web UI (live)
+### sd-gate: on-demand sd-server + web UI (live)
 
-- **systemd service `sd-server`** (`hosts/zen3-nixos/ai.nix`): runs
-  `sd-server` on `127.0.0.1:8084` with the SDXL model, `--vae-tiling` and
-  `--max-vram -1` (graphs size to whatever VRAM is free). Rebuilt via the
-  `stable-diffusion-cpp-vulkan` let-binding (shared with systemPackages).
+VRAM is at a premium (the R9700 also hosts llama-swap's resident coding
+model), so SDXL is **not** kept resident:
+
+- **systemd service `sd-gate`** (`hosts/zen3-nixos/ai.nix`; zero-dep Rust app
+  in `sd-gate/`): always listens on `127.0.0.1:8084` (nginx's `/sd-api`
+  target). On the **first connection** it checks free VRAM (`amd-smi metric
+  -m --json`): if < `--min-vram-gib 10` (i.e. the llama-swap LLM is
+  resident) it posts to llama-swap's `POST /api/models/unload` and waits up
+  to `--vram-wait-secs 90` for the VRAM before spawning `sd-server` on
+  `127.0.0.1:8085` (same SDXL model, `--vae-tiling`, `--max-vram -1`); if the
+  VRAM stays low it proceeds anyway (GTT-spill speed). Then it waits for
+  readiness (`GET /v1/models` → 200) and proxies TCP traffic. **120 s after
+  the last request it kills `sd-server` → VRAM freed**; the next request
+  loads it back (a few seconds with a warm page cache). Lifecycle in
+  `journalctl -u sd-gate`.
+- **Status page:** `http://192.168.49.50/sd-status/` (JSON at
+  `/sd-status/status`) — state, sd-server pid/times, idle-unload countdown,
+  VRAM, and **active clients** (remote IP from nginx's `X-Forwarded-For`,
+  request, age, phase): the reason the model is running and not shut down.
+  Served by the gate on `127.0.0.1:8086`; the status listener never spawns
+  the server.
 - **Web UI:** `http://192.168.49.50/sd/` (static files in `sd-webui/`,
-  copied into the store via `runCommandLocal` so nginx can serve them).
-- **API:** `http://192.168.49.50/sd-api/…` proxies to 8084 with the `/sd-api`
-  prefix stripped. The UI uses the A1111-style `POST /sd-api/sdapi/v1/txt2img`
-  (full param control: steps/cfg/seed/sampler/negative_prompt); note the
+  copied into the store via `runCommandLocal` so nginx can serve them). The
+  UI pings `/sd-api/v1/models` on load and every 30 s (2 s while the server
+  is down/loading, status pill shows “loading model…”), so opening the page
+  wakes the model and a closed tab lets it idle-unload after ~2 min.
+- **API:** `http://192.168.49.50/sd-api/…` proxies to 8084 (the gate; it
+  forwards to 8085, spawning sd-server if needed) with the `/sd-api` prefix
+  stripped. The UI uses the A1111-style `POST /sd-api/sdapi/v1/txt2img` (full
+  param control: steps/cfg/seed/sampler/negative_prompt); note the
   OpenAI-style `/v1/images/generations` on this build **ignores** steps/cfg/seed
   and only honors prompt/n/size.
+- **Force-unload now:** `kill $(cat /run/sd-gate.pid)` — the gate survives and
+  respawns sd-server on the next request. The unit's `ExecStop` kills any
+  leftover sd-server if the gate itself is SIGKILLed, so VRAM can't be orphaned.
 - **Shared-GPU gotcha:** the R9700 is also home to llama-swap's resident coding
   model (~26 GB VRAM), so SD runs at GTT-spill speed while the LLM is loaded
   (e.g. ~36 s for 8 steps at 512×512 vs ~25 s for 30 steps at 1024×1024 when
-  free). For fast generations: `curl -X POST http://127.0.0.1:8081/api/models/unload`
-  (unloads the LLM). Model stays resident regardless, so nothing to preload.
+  free). The gate now unloads the LLM automatically when it loads SD (see
+  above); manual equivalent: `curl -X POST http://127.0.0.1:8081/api/models/unload`
+  (the LLM re-loads on the next LLM request). Model stays resident regardless,
+  so nothing to preload.
 
 ## Recallium (memory server, live on zen3-nixos)
 

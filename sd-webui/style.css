@@ -54,6 +54,7 @@ html, body {
 }
 .status.ok { color: #4ade80; border-color: #4ade8055; }
 .status.bad { color: var(--err); border-color: var(--err)55; }
+.status.warn { color: #fbbf24; border-color: #fbbf2455; }
 
 /* ---------- layout ---------- */
 

@@ -36,13 +36,26 @@ function setStatusline(text, isErr) {
   el.className = isErr ? "err" : "muted";
 }
 
+let pingTimer = null;
+
+function schedulePing(ms) {
+  if (pingTimer) clearTimeout(pingTimer);
+  pingTimer = setTimeout(pingServer, ms);
+}
+
 async function pingServer() {
+  let down = false;
   try {
     const r = await fetch("/sd-api/v1/models", { signal: AbortSignal.timeout(3000) });
     setStatus(r.ok ? "server up" : "server: HTTP " + r.status, r.ok ? "ok" : "bad");
+    down = !r.ok;
   } catch (_) {
-    setStatus("server down", "bad");
+    // The gate wakes sd-server on this very request, but loading the model
+    // takes tens of seconds — poll fast until it comes up.
+    setStatus("loading model…", "warn");
+    down = true;
   }
+  schedulePing(down ? 2000 : 30000);
 }
 
 async function generate() {
@@ -161,4 +174,3 @@ document.addEventListener("keydown", (e) => {
 
 loadSettings();
 pingServer();
-setInterval(pingServer, 30000);

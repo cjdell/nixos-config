@@ -1,0 +1,11 @@
+[package]
+name = "sd-gate"
+version = "0.1.0"
+edition = "2021"
+description = "On-demand launcher/proxy: loads sd-server on first request, kills it when idle to free VRAM"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
