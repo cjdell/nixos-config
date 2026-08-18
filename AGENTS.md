@@ -239,6 +239,22 @@ Operational essentials:
 - **`resize-once.nix` is a disabled one-shot initrd resize** (completed 2026-08-14: / 181G->250G, /home 750G->681G). Import commented out in `default.nix`; full write-up + reuse steps in `docs/resize-once.md`.
 - **The ESP fills up** as generations accumulate (each initrd ~65MB); prune the system profile (`nix-env --profile /nix/var/nix/profiles/system --delete-generations +N`) to keep the 548M ESP bootable.
 
+## Web fetching (context safety)
+
+`fetch` returns the **entire page** into the conversation with no size cap —
+a single large fetch can overflow the model's context window, killing the
+agent thread with no way to resume it. Follow this order:
+
+1. `fetch` is fine only for small, known endpoints (API/JSON, short pages).
+2. For unknown or potentially large pages, download with the terminal and
+   inspect surgically:
+   `curl -sL <url> -o /tmp/page.html` → then `grep` or `read_file` (which
+   outlines large files) for just the parts you need.
+3. If content must appear inline, bound it:
+   `curl -sL <url> | head -c 20000` (or the terminal's `head_lines` /
+   `tail_lines` parameters).
+4. Never return multi-megabyte content into the conversation.
+
 ## Workflow conventions
 
 - Do not run heavy builds unless the task requires it; the user applies Nix
