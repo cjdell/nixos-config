@@ -46,6 +46,9 @@
       extraConfig = ''
         # SSE streaming litellm -> llama-swap -> llama.cpp must not be buffered
         proxy_buffering off;
+        # Long generations / model loads can exceed the 60s default read timeout.
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
       '';
     };
 

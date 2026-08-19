@@ -114,6 +114,11 @@ in
         # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
         # VRAM on the next request with a matching prompt prefix (verified working on
         # the Vulkan backend: a 1243-token prefix reused ~1240 tokens, 16s -> 1.9s).
+        # Sized to hold the ~21 GiB prompt state of the 100k+ token requests the
+        # 256K-context agent harness sends: at the 8192 default the LCP cache logged
+        # "prompt state size ... exceeds cache size limit, skipping", so every turn
+        # re-prefilled the whole context (~5 min, longer than the client's 300 s
+        # stream idle timeout). 32 GiB fits one such state with headroom (93 GiB RAM).
         #
         # `-ctk q8_0 -ctv q8_0` quantizes the KV cache: halves the VRAM/RAM footprint
         # of the context (12 GiB -> 6 GiB at 128K for REAP) with near-lossless quality.
@@ -139,8 +144,13 @@ in
           exec ${llama-cpp-vulkan}/bin/llama-server "$@"
         '';
 
-        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-        llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 8192 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        # `--sse-ping-interval 10`: while the stream is silent (i.e. during long
+        # prompt processing), emit an SSE comment ping every 10 s so streaming
+        # clients with first-token idle timeouts don't give up. Comment lines are
+        # invisible to SSE parsers. Default is 30 s; the pi-ai harness dies at 300 s
+        # of silence, which a 100k+ token prefill exceeds.
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";
 
@@ -411,12 +421,27 @@ in
           proxyPass = "http://127.0.0.1:8081";
           recommendedProxySettings = true;
           proxyWebsockets = true;
+          extraConfig = ''
+            # LLM generations, model loads, and long prefills before the first
+            # token routinely exceed nginx's 60s default read timeout.
+            # OpenAI-style SSE must also stream through un-buffered or clients
+            # see no tokens until the buffer fills and time out on their own.
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            proxy_buffering off;
+          '';
         };
 
         locations."/mcp" = {
           proxyPass = "http://127.0.0.1:8082/mcp";
           recommendedProxySettings = true;
           proxyWebsockets = true;
+          extraConfig = ''
+            # Container tool calls can run long; don't let nginx time out.
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            proxy_buffering off;
+          '';
         };
 
         locations."/logs" = {
@@ -483,6 +508,9 @@ in
           proxyPass = "http://127.0.0.1:9001";
           extraConfig = ''
             rewrite ^/recallium/?(.*)$ /$1 break;
+            # LLM-backed UI requests can take minutes.
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
           '';
           recommendedProxySettings = true;
           proxyWebsockets = true;
@@ -517,6 +545,13 @@ in
             if ($request_method = OPTIONS) {
               return 204;
             }
+
+            # MCP tool calls run the local LLM; memory ops can exceed the 60s
+            # default, and Streamable HTTP responses are SSE and must not be
+            # buffered (else clients wait on the first event).
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            proxy_buffering off;
           '';
         };
       };
