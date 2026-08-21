@@ -508,12 +508,42 @@ in
           proxyPass = "http://127.0.0.1:9001";
           extraConfig = ''
             rewrite ^/recallium/?(.*)$ /$1 break;
+            # The Recallium UI is an Express app that redirects its root to a
+            # *relative* /ui path. Rewrite those relative Locations back under
+            # the /recallium prefix, otherwise the browser follows the first
+            # hop to /ui and lands on llama-swap (nginx's "/" location).
+            proxy_redirect / /recallium/;
+            # The app's HTML/JS also emit *absolute* /ui/... references
+            # (asset tags, chunk URLs, images, the router basename) which the
+            # proxy_redirect above does NOT touch (headers only). Rewrite those
+            # in the response body back under /recallium, else the browser
+            # requests /ui/... and hits llama-swap's UI instead.
+            sub_filter_once off;
+            sub_filter_types text/html text/css application/javascript;
+            sub_filter /ui/ /recallium/ui/;
+            sub_filter '"/ui"' '"/recallium/ui"';
             # LLM-backed UI requests can take minutes.
             proxy_read_timeout 600s;
             proxy_send_timeout 600s;
           '';
           recommendedProxySettings = true;
           proxyWebsockets = true;
+        };
+
+        # The Recallium UI derives its API base URL from the page's origin
+        # (apiUrl = protocol + "//" + window.location.host in its bundle), so
+        # when served via this host it calls http://192.168.49.50/api/...
+        # llama-swap 404s on /api (its API is /v1) so this can't shadow
+        # anything; forward to the container's UI port, which serves the same
+        # API as the 8001 port.
+        locations."/api/" = {
+          proxyPass = "http://127.0.0.1:9001";
+          recommendedProxySettings = true;
+          extraConfig = ''
+            # LLM-backed UI requests can take minutes.
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+          '';
         };
 
         # Recallium MCP endpoint (MCP clients: http://192.168.49.50/recallium-mcp)

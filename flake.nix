@@ -96,6 +96,43 @@
         zed-editor = zed.packages.${system}.default;
       };
 
+      # ddcci-driver (out-of-tree DDC/CI module) fails to compile against Linux
+      # 7.2: the kernel removed the strncpy declaration from <linux/string.h>
+      # (only strscpy remains), so ddcci.c's five strncpy() calls fail as
+      # implicit-declaration errors under GCC 15. Migrate them to strscpy()
+      # (identical output for these sysfs show() functions, return value
+      # unused) and add the explicit <linux/string.h> include. Applies to every
+      # linuxPackages* attrset (hosts use both the default and
+      # linuxPackages_latest). Done via the postPatch hook (not patchPhase) so
+      # nixpkgs' prePatch Makefile substitute still runs; inline sed instead of
+      # a patch file keeps the flake source free of new files (flake paths must
+      # be tracked by git, and the tree is often dirty).
+      ddcci-driver-overlay =
+        final: prev:
+        let
+          patchDdcci =
+            pkg:
+            pkg.overrideAttrs (old: {
+              postPatch = (old.postPatch or "") + ''
+                sed -i 's/strncpy(/strscpy(/g' ddcci/ddcci.c
+                sed -i '\|#include <linux/slab.h>|a #include <linux/string.h>' ddcci/ddcci.c
+              '';
+            });
+          patchSet = set: set // { ddcci-driver = patchDdcci set.ddcci-driver; };
+        in
+        builtins.mapAttrs (
+          name: value:
+          if builtins.isAttrs value && value ? ddcci-driver then
+            # linuxPackages attrsets are extensible; `//` would orphan our
+            # override from future extends, so prefer extend when available.
+            if value ? extend then
+              value.extend (_: super: { ddcci-driver = patchDdcci super.ddcci-driver; })
+            else
+              patchSet value
+          else
+            value
+        ) prev;
+
       # Build a pkgs set from a given nixpkgs input (shared package config).
       mkPkgs =
         nixpkgs:
@@ -115,7 +152,10 @@
           };
           # Bleeding-edge zed-editor (source build tracking main) instead of the
           # prebuilt release binary that nixpkgs' zed-editor packages.
-          overlays = [ zed-editor-overlay ];
+          overlays = [
+            zed-editor-overlay
+            ddcci-driver-overlay
+          ];
         };
 
       # Stable pkgs used by the legacy machines below.
