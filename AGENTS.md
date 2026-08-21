@@ -105,6 +105,13 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
 - **nginx** (from `netboot.nix` + `ai.nix`) exposing all of it on port 80
   - `server_name 192.168.49.50` → `/` → 8081, `/logs` → 8083, `/mcp` → 8082
   - the app is reachable at `http://192.168.49.50/logs/`
+  - `/api/...` is SPLIT: llama-swap's own management endpoints (`/api/events`,
+    `/api/performance`, `/api/version`, `/api/models/unload[/<name>]`,
+    `/api/captures/<id>`) have explicit locations → 8081 (its UI, served from
+    `/`, calls them same-origin); everything else under `/api/` is the
+    Recallium UI REST catch-all → 9001. Don't remove the explicit locations —
+    they were added after the Recallium `/api/` catch-all shadowed the
+    llama-swap UI's `/api/events` SSE stream.
 
 ## llama-log-viewer
 

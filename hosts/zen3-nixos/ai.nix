@@ -530,12 +530,54 @@ in
           proxyWebsockets = true;
         };
 
+        # llama-swap's own management API. Its UI is served from the "/"
+        # location (8081) and calls these same-origin /api/... endpoints, so
+        # they must be carved out of the /api/ catch-all below — otherwise
+        # nginx's longest-prefix match sends them to Recallium, which 404s
+        # (that is what broke the UI's /api/events stream). Paths verified
+        # from the llama-swap UI bundle: /api/events (SSE), /api/performance,
+        # /api/version, /api/models/unload[/<name>], /api/captures/<id>.
+        # If a future llama-swap version adds /api/ endpoints, list them here
+        # or the UI will silently 404 via the Recallium catch-all.
+        locations."= /api/events" = {
+          proxyPass = "http://127.0.0.1:8081";
+          recommendedProxySettings = true;
+          extraConfig = ''
+            # Long-lived SSE stream: unbuffered, don't time out while idle.
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            proxy_buffering off;
+          '';
+        };
+
+        locations."= /api/version" = {
+          proxyPass = "http://127.0.0.1:8081";
+          recommendedProxySettings = true;
+        };
+
+        locations."= /api/performance" = {
+          proxyPass = "http://127.0.0.1:8081";
+          recommendedProxySettings = true;
+        };
+
+        # Prefix match: covers /api/models/unload and /api/models/unload/<name>.
+        locations."/api/models/unload" = {
+          proxyPass = "http://127.0.0.1:8081";
+          recommendedProxySettings = true;
+        };
+
+        locations."/api/captures/" = {
+          proxyPass = "http://127.0.0.1:8081";
+          recommendedProxySettings = true;
+        };
+
         # The Recallium UI derives its API base URL from the page's origin
         # (apiUrl = protocol + "//" + window.location.host in its bundle), so
         # when served via this host it calls http://192.168.49.50/api/...
-        # llama-swap 404s on /api (its API is /v1) so this can't shadow
-        # anything; forward to the container's UI port, which serves the same
-        # API as the 8001 port.
+        # Catch-all for the Recallium REST API: its UI uses /api/memories,
+        # /api/projects, /api/setup, /api/providers, /api/documents — none of
+        # which collide with the llama-swap paths carved out above. Forward to
+        # the container's UI port, which serves the same API as the 8001 port.
         locations."/api/" = {
           proxyPass = "http://127.0.0.1:9001";
           recommendedProxySettings = true;
