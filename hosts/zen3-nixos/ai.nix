@@ -149,7 +149,7 @@ in
         # clients with first-token idle timeouts don't give up. Comment lines are
         # invisible to SSE parsers. Default is 30 s; the pi-ai harness dies at 300 s
         # of silence, which a 100k+ token prefill exceeds.
-        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (320 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
         llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";
