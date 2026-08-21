@@ -97,9 +97,10 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
   Vulkan0, `--models-max 1` = one resident model, no GTT spill) and `vega`
   (Vega 8 iGPU, pinned to `1002:1638`, also Vulkan0 in its own process;
   GTT-backed, up to 4 small models). See the first bullet under “Known gotchas”
-  for why the indices needed pinning. Both run `-cram 8192`: idle-slot KV cache
-  in system RAM, restored to VRAM on matching prompt prefixes (verified on
-  Vulkan).
+  for why the indices needed pinning. Both routers keep the idle-slot KV RAM
+  prompt cache (`r9700` `-cram 65536`, `vega` `-cram 32768`) + `--cache-reuse 256`
+  (KV-shift reuse for trimmed/rolling contexts): restored to VRAM on matching
+  prompt prefixes (verified on Vulkan).
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
 - **nginx** (from `netboot.nix` + `ai.nix`) exposing all of it on port 80

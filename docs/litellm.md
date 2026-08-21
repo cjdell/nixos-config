@@ -91,11 +91,27 @@ spawned by llama-swap as the `r9700` and `vega` entries (`hosts/zen3-nixos/ai.ni
 
 ## Context persistence: KV cache in system RAM
 
-`-cram 8192` (MiB) is on both routers: idle-slot KV is saved to system RAM and
-restored to VRAM on the next request with a matching prompt prefix
-(`--cache-idle-slots` is enabled by default when `-cram` is set). **Verified on
-the Vulkan backend (2026-08-16):** a 1243-token prompt restored ~1240 of its
-tokens from RAM and evaluated only the new tail — 16.4 s → 1.9 s per request.
+The RAM prompt cache (`-cram`) is the warm-start mechanism for agentic
+workloads: idle-slot KV is saved to system RAM and restored to VRAM on the next
+request with a matching prompt prefix (`--cache-idle-slots` is enabled by
+default when `-cram` is set). **Verified on the Vulkan backend (2026-08-16):** a
+1243-token prompt restored ~1240 of its tokens from RAM and evaluated only the
+new tail — 16.4 s → 1.9 s per request.
+
+Current values (2026-08-21):
+
+- **r9700: `-cram 65536` + `--cache-reuse 256`** — the 32 GiB cap was observed
+  MAXED by the pi-ai harness (llama-server RSS ~26.5 GiB, LRU evicting warm
+  agent contexts), so it's doubled to 64 GiB: ~13 × 100k-token contexts stay
+  warm at q8_0 (vs ~6). LRU + the bad_alloc fallback (limit auto-shrinks to
+  40 %) bound the risk.
+- **vega: `-cram 32768` + `--cache-reuse 256`** — its cache rarely fills
+  (small models, small per-token KV).
+- **`--cache-reuse 256`** (both) enables KV-shifting chunk reuse: runs of
+  ≥256 tokens found in a new prompt at a *shifted* position (rolling-window
+  contexts that trim history from the front, reordered segments) get shifted
+  into place instead of re-evaluated. Auto-disabled with a warning on contexts
+  that can't shift (SWA/hybrid/recurrent).
 
 Implications for agentic workflows:
 
@@ -104,15 +120,18 @@ Implications for agentic workflows:
   not re-evaluate the whole history.
 - The RAM cache dies with the model process, so it does **not** survive a model
   swap (the R9700's `--models-max 1` unloads the current model when a different
-  one is requested).
+  one is requested) or a server restart.
 - `--slot-save-path` (explicit disk save/restore of a slot's KV via
   `POST /slots/{id}?action=save` / `restore` with `{"filename": ...}`) restores
   KV across restarts (1243 tokens in ~12 ms in testing), but this build still
   forces a full re-process of the next OpenAI-style request ("lack of cache
-  data"), so it buys nothing yet for the stateless chat API. Revisit when
+data"), so it buys nothing yet for the stateless chat API. Revisit when
   upstream wires restored KV into prompt reuse.
-- Tuning: `--cache-reuse N` sets the minimum chunk size to attempt reuse;
-  `-cram -1` removes the MiB cap (73 GB RAM free here).
+- Tuning gotcha: `-cram -1` removes the *MiB* cap, but the per-cache **token**
+  cap (= `--ctx-size`, 320K on the r9700) still binds — that's ~15.7 GiB of
+  REAP q8_0 states, SMALLER than the explicit 64 GiB cap. Keep an explicit MiB
+  value; `--cache-reuse N` lowers/raises the minimum chunk size for the
+  KV-shift path (default 0 = disabled).
 
 ## Adding things
 

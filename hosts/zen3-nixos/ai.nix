@@ -114,16 +114,34 @@ in
         # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
         # VRAM on the next request with a matching prompt prefix (verified working on
         # the Vulkan backend: a 1243-token prefix reused ~1240 tokens, 16s -> 1.9s).
-        # Sized to hold the ~21 GiB prompt state of the 100k+ token requests the
-        # 256K-context agent harness sends: at the 8192 default the LCP cache logged
-        # "prompt state size ... exceeds cache size limit, skipping", so every turn
-        # re-prefilled the whole context (~5 min, longer than the client's 300 s
-        # stream idle timeout). 32 GiB fits one such state with headroom (93 GiB RAM).
+        # This is THE warm-start mechanism for the agent harness: at the old 8192
+        # default the LCP cache logged "prompt state size ... exceeds cache size
+        # limit, skipping", so every turn re-prefilled the whole context (~5 min,
+        # longer than the client's 300 s stream idle timeout). 32 GiB was then
+        # observed MAXED by the pi-ai harness (llama-server RSS sat at ~26.5 GiB,
+        # LRU already evicting warm agent contexts), so it's doubled to 64 GiB:
+        # ~13 x 100k-token contexts stay warm at q8_0 (vs ~6 before) - a returning
+        # sub-agent's next turn skips its prefill entirely. Bounded and safe: LRU
+        # evicts the oldest states first, and if a state alloc ever fails the cache
+        # limit auto-shrinks to 40% of current size instead of OOMing (93 GiB RAM).
+        # NOTE: do NOT switch to `-cram -1` here - that only removes the MiB cap,
+        # the per-cache token cap (= --ctx-size) still binds, which is SMALLER.
+        #
+        # `--cache-reuse 256` enables KV-shifting chunk reuse: runs of >=256 tokens
+        # that appear in a new prompt at a SHIFTED position (rolling-window contexts
+        # that trim history from the front, reordered segments, ...) are shifted into
+        # place instead of re-evaluated. Prefix reuse above already covers the common
+        # "same system prompt + growing history" case; this covers the rest. Only
+        # applies on shift-capable contexts (auto-disabled with a warning otherwise).
         #
         # `-ctk q8_0 -ctv q8_0` quantizes the KV cache: halves the VRAM/RAM footprint
         # of the context (12 GiB -> 6 GiB at 128K for REAP) with near-lossless quality.
         # The `-cram` RAM cache checkpoints store raw KV at the cache dtype, so it
         # shrinks too. f16 was the previous (default) cache type.
+        #
+        # Flash attention: NOT set explicitly - `-fa auto` (the default) probes the
+        # backend and the Vulkan backend supports GGML_OP_FLASH_ATTN_EXT (incl. q8_0
+        # KV), so it resolves to enabled. Explicit `-fa on` would skip the probe.
         #
         # `--models-preset` (mtpPresets below) enables `draft-mtp` speculative
         # decoding PER MODEL: the model's built-in MTP module drafts tokens, the
@@ -149,8 +167,8 @@ in
         # clients with first-token idle timeouts don't give up. Comment lines are
         # invisible to SSE parsers. Default is 30 s; the pi-ai harness dies at 300 s
         # of silence, which a 100k+ token prefill exceeds.
-        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (320 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-        llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (320 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";
 
