@@ -114,6 +114,44 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
     they were added after the Recallium `/api/` catch-all shadowed the
     llama-swap UI's `/api/events` SSE stream.
 
+## Pi 5 netboot (aarch64, live)
+
+A headless Raspberry Pi 5 (MAC `98:fe:54:18:17:e9`, no SD card) network-boots
+NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md`.
+
+- **Build = build machine, not manual copies:** the MacBookAir
+  (`cjdell@192.168.49.191`, NixOS config in `/home/cjdell/nixos-config/` there,
+  rebuild with `just switch` in that dir — `--impure` required) is a Nix build
+  machine for zen3: `nix.buildMachines` in `hosts/zen3-nixos/default.nix` (root
+  key `/root/.ssh/id_ed25519` authorized on the MacBook, `cjdell` in its
+  `nix.trustedUsers`, `supportedFeatures = [ "big-parallel" ]` — without it the
+  linux-rpi kernel drv is kept local and fails with "platform mismatch").
+  So on zen3: `nix build --impure path:pi5#packages.aarch64-linux.pi5-netboot
+  -o <dir>` evaluates locally, builds aarch64 on the MacBook, and the result
+  lands in zen3's own store — which IS `/exports/nix-store`, the NFS export the
+  Pi mounts. **No rsync / manual store copy anymore.**
+- **Deploy:** `sudo ./scripts/deploy-pi5.sh <dir> [--reboot]` (copies initrd +
+  Image into `/etc/tftp/e9cf02dc/`, writes `cmdline.txt` with the new toplevel
+  hash, `--reboot` power-cycles via the HA relay — see
+  `scripts/pi5-powercycle.sh`). The Pi has a static lease at **192.168.49.92**
+  (router dnsmasq `dhcp-host=set:pi5,98:fe:54:18:17:e9,192.168.49.92,pi5,1h`
+  + `dhcp-boot=tag:pi5,pi5,192.168.49.50` in
+  hosts/grafton-router/networking/dns.nix — note the dhcp-host field order:
+  `set:<tag>` BEFORE the IP, hostname AFTER it). It
+  regenerates its SSH host keys every boot (tmpfs root) — expect host-key
+  warnings, or pin them in the pi5 flake (`services.openssh` host keys).
+- **TFTP server = the NixOS `tftpd` unit** (`hosts/zen3-nixos/netboot.nix`),
+  `in.tftpd -l -s -a 192.168.49.50:69 /etc/tftp`. The `-s` is mandatory:
+  without it the directory arg is only an allow-list prefix and relative
+  requests fail with "Only absolute filenames allowed" (the eeprom + iPXE send
+  relative names). An earlier ad-hoc python `pi5-tftpd` unit was deleted by a
+  NixOS reactivation (NixOS removes unit files it doesn't own) — don't run
+  ad-hoc TFTP servers on this host; use the unit.
+- Boot flow: eeprom TFTP-fetches `e9cf02dc/{config.txt,dtb,cmdline.txt,Image,
+  initrd,armstub8-2712.bin}` → kernel + initrd (networkd DHCP, NFSv4 store
+  mount, systemd) → `pi5` over SSH. `armstub8-2712.bin` is the TF-A rpi5 build
+  (bl31.bin) — see pi5-blog.md.
+
 ## llama-log-viewer
 
 `llama-log-viewer/` is a **zero-dependency Rust** app (stdlib only — no crates
@@ -311,6 +349,17 @@ agent thread with no way to resume it. Follow this order:
 
 ## Workflow conventions
 
+- **Prefer helper scripts over inline one-liners for repeated/complex operations**
+  (HA API calls, multi-step deploys, TFTP testing, …). Keep them in `scripts/`
+  (committed) or `/tmp/` (scratch), make them idempotent, and give every
+  network call a `timeout`. Existing: `scripts/deploy-pi5.sh` (deploy a
+  pi5-netboot build to the TFTP root, `--reboot` to power-cycle),
+  `scripts/pi5-powercycle.sh` (HA relay: default full cycle, `--off`/`--on`).
+  Do not paste HA tokens/curls inline in agent sessions — call the script.
+- **Set timeouts on everything that talks to the network** (`timeout N cmd`);
+  bare `ssh`/`curl`/`ping` to a flaky or dead host will stall the session.
+  Never `pgrep -f`/`pkill -f` with a pattern that matches your own shell's
+  command line (it self-matches and loops).
 - Do not run heavy builds unless the task requires it; the user applies Nix
   config themselves when they prefer.
 - If you DO apply a config (with permission), always finish with

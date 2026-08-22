@@ -79,7 +79,11 @@ in
         Restart = "always";
         RestartSec = 5;
         Type = "exec";
-        ExecStart = "${pkgs.tftp-hpa}/bin/in.tftpd -l -a 192.168.49.50:69 -P /run/tftpd.pid /etc/tftp";
+        # -s (secure) chroots to /etc/tftp so relative requests (the RPi 5
+        # eeprom, iPXE) resolve inside the tftp root; without it the
+        # directory arg is only an allow-list prefix and relative requests
+        # are rejected with "Only absolute filenames allowed".
+        ExecStart = "${pkgs.tftp-hpa}/bin/in.tftpd -l -s -a 192.168.49.50:69 -P /run/tftpd.pid /etc/tftp";
         TimeoutStopSec = 20;
         PIDFile = "/run/tftpd.pid";
       };

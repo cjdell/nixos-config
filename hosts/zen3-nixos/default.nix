@@ -1,6 +1,7 @@
 { home-manager, ... }:
 
 [
+  ../../common/amdgpu.nix
   ../../common/desktop.nix
   ../../common/nfs.nix
   ../../common/nosleep.nix
@@ -31,6 +32,29 @@
     ];
 
     system.autoRollback.enable = true;
+
+    # Build aarch64-linux (Raspberry Pi 5 netboot, pi5/ flake) on the
+    # MacBookAir instead of cross-building: `nix build path:pi5#...` on this
+    # host evaluates here and dispatches aarch64-linux drv to the MacBook,
+    # copying results back into this store (which is the NFS-exported
+    # /exports/nix-store the Pi boots from). The daemon (root) SSHes to the
+    # MacBook as cjdell; the key below is authorized there, and cjdell is in
+    # trusted-users in the MacBook's /home/cjdell/nixos-config/configuration.nix.
+    nix = {
+      distributedBuilds = true;
+      buildMachines = [
+        {
+          hostName = "cjdell@192.168.49.191";
+          systems = [ "aarch64-linux" ];
+          maxJobs = 4;
+          sshKey = "/root/.ssh/id_ed25519";
+          # The linux-rpi kernel drv requires the big-parallel system feature;
+          # without advertising it nix keeps that drv local and fails with a
+          # platform mismatch. The MacBook's nix.conf has big-parallel.
+          supportedFeatures = [ "big-parallel" ];
+        }
+      ];
+    };
 
     # Let the alderlake-thinkpad use this machine as a remote Nix build machine
     # (matches the sshKey configured in hosts/alderlake-thinkpad/default.nix).
