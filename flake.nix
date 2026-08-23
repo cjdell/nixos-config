@@ -49,8 +49,10 @@
     };
     # stew675's RDNA performance fork (HIP/CUDA backend only): RDNA4 WMMA
     # flash-attn, gfx1201 mmvq decode, fused MoE/SSM kernels, adaptive MTP.
-    # Used for the R9700 router in hosts/zen3-nixos/ai.nix (vega/rx580 stay
-    # on the upstream Vulkan build).
+    # Previously used for the R9700 router (hosts/zen3-nixos/ai/llama-swap.nix);
+    # the router moved to the upstream Vulkan build (2026-08-23) because MTP
+    # draft acceptance was 0 on the HIP fork. Kept as an input for reference /
+    # easy re-enable; nothing references it while unbuilt (lazy).
     llama-cpp-rdna = {
       url = "github:stew675/llama.cpp/rdna-boosts";
       inputs.nixpkgs.follows = "nixpkgs";
