@@ -95,10 +95,11 @@ in
         # immune to enumeration/boot-VGA changes:
         #   1002:7551 = Radeon AI PRO R9700 (Navi 48, discrete, 32 GiB)
         #   1002:1638 = Cezanne Vega 8 iGPU
+        #   1002:67df = Radeon RX 580 (Polaris, discrete, 4 GiB)
         # XDG_DATA_DIRS is required for the loader to discover the implicit layer
         # manifest under /run/opengl-driver/share/vulkan/implicit_layer.d.
         #
-        # Two llama.cpp router instances (llama-server --models-dir), one per GPU:
+        # Three llama.cpp router instances (llama-server --models-dir), one per GPU:
         #
         #   r9700 (Radeon R9700 32 GB)  -> the big models. `--models-max 1`
         #     pins residency to a single model: the router unloads the current one
@@ -107,9 +108,13 @@ in
         #   vega (Vega 8 iGPU, GTT-backed) -> the small/fast research
         #     sub-agent models. GTT overflow is fine here, so up to `--models-max 4`
         #     models can stay resident.
+        #   rx580 (Radeon RX 580 4 GB) -> small models that fit in 4 GB, running
+        #     fully in GDDR5 (~50 tok/s on a 2.6 B, faster than the Vega).
+        #     `--models-max 1`: the 4 GB is a hard VRAM limit (no GTT headroom), so
+        #     only one model stays resident at a time.
         #
-        # Both wrappers exec llama-server with the layer exposing a single device,
-        # so both routers use `-dev Vulkan0` (the pinned GPU).
+        # All wrappers exec llama-server with the layer exposing a single device,
+        # so all routers use `-dev Vulkan0` (the pinned GPU).
         #
         # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
         # VRAM on the next request with a matching prompt prefix (verified working on
@@ -162,6 +167,12 @@ in
           exec ${llama-cpp-vulkan}/bin/llama-server "$@"
         '';
 
+        llama-rx580 = pkgs.writeShellScript "llama-rx580" ''
+          export XDG_DATA_DIRS=/run/opengl-driver/share
+          export MESA_VK_DEVICE_SELECT=1002:67df!
+          exec ${llama-cpp-vulkan}/bin/llama-server "$@"
+        '';
+
         # `--sse-ping-interval 10`: while the stream is silent (i.e. during long
         # prompt processing), emit an SSE comment ping every 10 s so streaming
         # clients with first-token idle timeouts don't give up. Comment lines are
@@ -169,6 +180,11 @@ in
         # of silence, which a 100k+ token prefill exceeds.
         llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
         llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+
+        # rx580: small models fully in 4 GB GDDR5. --models-max 1 because the 4 GB
+        # is a hard VRAM limit (no GTT headroom); -cram 16384 keeps idle-slot KV
+        # warm in system RAM.
+        llamaCmdRx580 = "${llama-rx580} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 8 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 16384 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (128 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         modelsPath = "/home/cjdell/Models";
 
@@ -206,9 +222,13 @@ in
             # vega  = Vega 8 iGPU (device-select pinned to 1002:1638, also Vulkan0
             #         in its own process; GTT-backed): small research sub-agent
             #         models, up to 4 resident.
+            # rx580 = Radeon RX 580 4 GB (device-select pinned to 1002:67df, also
+            #         Vulkan0 in its own process): small models that fit in 4 GB,
+            #         1 resident (hard VRAM limit).
             #
             # litellm routes: scouting -> /upstream/vega/v1, everything else
-            # -> /upstream/r9700/v1 (see litellm.yaml).
+            # -> /upstream/r9700/v1 (see litellm.yaml). Add an rx580 route there if
+            # you want litellm to send small-model traffic to it.
             "r9700" = {
               cmd = llamaCmdR9700;
             };
@@ -216,22 +236,27 @@ in
             "vega" = {
               cmd = llamaCmdVega;
             };
+
+            "rx580" = {
+              cmd = llamaCmdRx580;
+            };
           };
 
-          # Run BOTH routers in parallel. llama-swap's default is one model at a
-          # time: without a matrix/groups it would evict whichever router is
-          # running whenever the other entry is requested, killing the other
-          # GPU's instance. Declaring them co-resident (`r & v`) means llama-swap
-          # only starts the requested entry on first use and then keeps both
+          # Run all three routers in parallel. llama-swap's default is one model
+          # at a time: without a matrix/groups it would evict whichever router is
+          # running whenever another entry is requested, killing that GPU's
+          # instance. Declaring them co-resident (`r & v & x`) means llama-swap
+          # only starts the requested entry on first use and then keeps all three
           # llama-server router processes up side by side — each GPU serves its
           # own model pool independently.
           matrix = {
             vars = {
               r = "r9700";
               v = "vega";
+              x = "rx580";
             };
             sets = {
-              gpus = "r & v";
+              gpus = "r & v & x";
             };
           };
         };
