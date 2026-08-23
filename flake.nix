@@ -47,6 +47,14 @@
       url = "github:ggml-org/llama.cpp";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # stew675's RDNA performance fork (HIP/CUDA backend only): RDNA4 WMMA
+    # flash-attn, gfx1201 mmvq decode, fused MoE/SSM kernels, adaptive MTP.
+    # Used for the R9700 router in hosts/zen3-nixos/ai.nix (vega/rx580 stay
+    # on the upstream Vulkan build).
+    llama-cpp-rdna = {
+      url = "github:stew675/llama.cpp/rdna-boosts";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     llama-cpp-uma = {
       url = "git+file:///home/cjdell/Projects/llama.cpp";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -78,6 +86,7 @@
       plasma-manager,
       stylix,
       llama-cpp,
+      llama-cpp-rdna,
       llama-cpp-uma,
       disko,
       disko-zfs,

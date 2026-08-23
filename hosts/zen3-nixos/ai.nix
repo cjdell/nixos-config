@@ -74,7 +74,10 @@ in
     wantedBy = [ "multi-user.target" ];
 
     environment = {
-      HSA_OVERRIDE_GFX_VERSION = "9.0.0";
+      # No HSA_OVERRIDE_GFX_VERSION: the r9700 router now runs a native gfx1201
+      # HIP build (ROCm 7.2.3 supports RDNA4); an override (the old "9.0.0")
+      # would make the HIP loader look for e.g. gfx90a code objects that a
+      # gfx1201-only build doesn't contain. It was inert for the Vulkan builds.
       # GGML_VK_LOG_SUBMISSIONS = "1";
       # GGML_VK_SERIALIZE_SUBMISSIONS = "1";
     };
@@ -82,6 +85,27 @@ in
     serviceConfig =
       let
         llama-cpp-vulkan = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
+
+        # stew675/llama.cpp `rdna-boosts` fork (HIP/CUDA backend only): RDNA4
+        # WMMA flash-attn, gfx1201 mmvq decode tables, fused MoE/SSM kernels,
+        # adaptive MTP. rocmGpuTargets narrows the hipcc build to the R9700's
+        # ISA (gfx1201) — the full gpuTargets list (16 archs) is much slower.
+        # Note: the fork's package.nix takes rocmGpuTargets as a
+        # `;`-separated string (unlike nixpkgs' llama-cpp which takes a list).
+        # The fork's package.nix also leaves LLAMA_BUILD_TESTS at the cmake
+        # default ON; tests are irrelevant for the router and their parallel
+        # compile spiked memory enough to ICE gcc on test-jinja.cpp (GGC crash).
+        llama-cpp-rdna-hip =
+          let
+            fork-rocm =
+              (specialArgs.inputs.llama-cpp-rdna.packages.${pkgs.stdenv.hostPlatform.system}.rocm).override
+                {
+                  rocmGpuTargets = "gfx1201";
+                };
+          in
+          fork-rocm.overrideAttrs (old: {
+            cmakeFlags = old.cmakeFlags ++ [ "-DLLAMA_BUILD_TESTS=OFF" ];
+          });
 
         # Pin each router to its physical GPU via mesa's device-select layer
         # (VK_LAYER_MESA_device_select) instead of relying on llama.cpp's
@@ -113,8 +137,10 @@ in
         #     `--models-max 1`: the 4 GB is a hard VRAM limit (no GTT headroom), so
         #     only one model stays resident at a time.
         #
-        # All wrappers exec llama-server with the layer exposing a single device,
-        # so all routers use `-dev Vulkan0` (the pinned GPU).
+        # The r9700 wrapper execs the HIP fork build, pinned to the R9700 via
+        # HIP_VISIBLE_DEVICES=0 (its HIP device name is ROCm0). The vega/rx580
+        # wrappers use the mesa device-select layer so their pinned GPU is
+        # Vulkan0.
         #
         # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
         # VRAM on the next request with a matching prompt prefix (verified working on
@@ -155,10 +181,14 @@ in
         # acceptance via the spec_decode_* counters on /metrics.
         # The layer is discoverable via XDG_DATA_DIRS; the `!` makes the pinned
         # device the only one exposed (so its ggml name is always Vulkan0).
+        # r9700: HIP device 0 is the R9700 (gfx1201, the first GPU agent in
+        # ROCr enumeration, see rocminfo; the Vega 8 gfx90c is agent 1, and the
+        # RX 580 gfx803 is not ROCm-7-supported). HIP_VISIBLE_DEVICES hides the
+        # other agents so the R9700 is always ROCm0 (llama.cpp's HIP backend
+        # names devices ROCmN, verified via llama-server --list-devices).
         llama-r9700 = pkgs.writeShellScript "llama-r9700" ''
-          export XDG_DATA_DIRS=/run/opengl-driver/share
-          export MESA_VK_DEVICE_SELECT=1002:7551!
-          exec ${llama-cpp-vulkan}/bin/llama-server "$@"
+          export HIP_VISIBLE_DEVICES=0
+          exec ${llama-cpp-rdna-hip}/bin/llama-server "$@"
         '';
 
         llama-vega = pkgs.writeShellScript "llama-vega" ''
@@ -178,7 +208,7 @@ in
         # clients with first-token idle timeouts don't give up. Comment lines are
         # invisible to SSE parsers. Default is 30 s; the pi-ai harness dies at 300 s
         # of silence, which a 100k+ token prefill exceeds.
-        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev ROCm0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
         llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         # rx580: small models fully in 4 GB GDDR5. --models-max 1 because the 4 GB
@@ -216,9 +246,9 @@ in
             # per GPU; each spawns its own llama.cpp router (llama-server
             # --models-dir) auto-loading GGUFs from /home/cjdell/Models on demand.
             #
-            # r9700 = Radeon R9700 32 GB (device-select pinned to 1002:7551, so it
-            #         is Vulkan0): the big models. --models-max 1 keeps ONE model
-            #         resident at a time (no GTT spill).
+            # r9700 = Radeon R9700 32 GB (HIP build, HIP_VISIBLE_DEVICES=0 pins
+            #         it to the R9700 = ROCm0): the big models. --models-max 1
+            #         keeps ONE model resident at a time (no GTT spill).
             # vega  = Vega 8 iGPU (device-select pinned to 1002:1638, also Vulkan0
             #         in its own process; GTT-backed): small research sub-agent
             #         models, up to 4 resident.

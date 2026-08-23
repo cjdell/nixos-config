@@ -199,6 +199,24 @@
     },
     "flake-parts_4": {
       "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib_4"
+      },
+      "locked": {
+        "lastModified": 1785627969,
+        "narHash": "sha256-4dtXQk/NMePegK/nWp5NSeuZKLATItOq61lpEvmXqGw=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "427bf4bd9435fdf21321c8cc628c24efc14c0f7a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "flake-parts_5": {
+      "inputs": {
         "nixpkgs-lib": [
           "stylix",
           "nixpkgs"
@@ -218,9 +236,9 @@
         "type": "github"
       }
     },
-    "flake-parts_5": {
+    "flake-parts_6": {
       "inputs": {
-        "nixpkgs-lib": "nixpkgs-lib_4"
+        "nixpkgs-lib": "nixpkgs-lib_5"
       },
       "locked": {
         "lastModified": 1769996383,
@@ -350,9 +368,31 @@
         "type": "github"
       }
     },
-    "llama-cpp-uma": {
+    "llama-cpp-rdna": {
       "inputs": {
         "flake-parts": "flake-parts_3",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1787148409,
+        "narHash": "sha256-OfLlEqrcxIxL3R3AuUcZaZPwjHYe0R40C2I9ibiHL7Y=",
+        "owner": "stew675",
+        "repo": "llama.cpp",
+        "rev": "7a845b7098cf381253f8fddeaf5d2c8062f65f46",
+        "type": "github"
+      },
+      "original": {
+        "owner": "stew675",
+        "ref": "rdna-boosts",
+        "repo": "llama.cpp",
+        "type": "github"
+      }
+    },
+    "llama-cpp-uma": {
+      "inputs": {
+        "flake-parts": "flake-parts_4",
         "nixpkgs": [
           "nixpkgs"
         ]
@@ -471,6 +511,21 @@
     },
     "nixpkgs-lib_4": {
       "locked": {
+        "lastModified": 1785031560,
+        "narHash": "sha256-OmshNvn2vupOFpYinLUu+1Dnpu4n7Q5N3ggGVNHpkUI=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "0e79af5e3d4dcfcd676ab5ba3f95d2e3352e078c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib_5": {
+      "locked": {
         "lastModified": 1769909678,
         "narHash": "sha256-cBEymOf4/o3FD5AZnzC3J9hLbiZ+QDT/KDuyHXVJOpM=",
         "owner": "nix-community",
@@ -587,6 +642,7 @@
         "home-manager": "home-manager",
         "home-manager-unstable": "home-manager-unstable",
         "llama-cpp": "llama-cpp",
+        "llama-cpp-rdna": "llama-cpp-rdna",
         "llama-cpp-uma": "llama-cpp-uma",
         "nixos-hardware": "nixos-hardware",
         "nixos-utils": "nixos-utils",
@@ -646,7 +702,7 @@
         "base16-helix": "base16-helix",
         "base16-vim": "base16-vim",
         "firefox-gnome-theme": "firefox-gnome-theme",
-        "flake-parts": "flake-parts_4",
+        "flake-parts": "flake-parts_5",
         "gnome-shell": "gnome-shell",
         "nixpkgs": [
           "nixpkgs"
@@ -770,7 +826,7 @@
     "zed": {
       "inputs": {
         "crane": "crane",
-        "flake-parts": "flake-parts_5",
+        "flake-parts": "flake-parts_6",
         "nixpkgs": "nixpkgs_3",
         "rust-overlay": "rust-overlay"
       },
