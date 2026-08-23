@@ -153,7 +153,7 @@ behavior.
 
 If we want "GTT by default, VRAM held by the hot model, no swapping":
 
-1. `hosts/zen3-nixos/ai.nix`, llama-swap `environment`:
+1. `hosts/zen3-nixos/ai/llama-swap.nix`, llama-swap `environment`:
    ```nix
    GGML_VK_ALLOW_SYSMEM_FALLBACK = "1";
    ```

@@ -65,7 +65,7 @@ a browser.
 ## Model residency & swapping (two GPUs, since the R9700)
 
 Each GPU runs its own llama.cpp router instance (`llama-server --models-dir`),
-spawned by llama-swap as the `r9700` and `vega` entries (`hosts/zen3-nixos/ai.nix`):
+spawned by llama-swap as the `r9700` and `vega` entries (`hosts/zen3-nixos/ai/llama-swap.nix`):
 
 | llama-swap entry | GPU | Resident models | litellm groups |
 | --- | --- | --- | --- |
@@ -83,7 +83,7 @@ spawned by llama-swap as the `r9700` and `vega` entries (`hosts/zen3-nixos/ai.ni
 - **True cross-GPU concurrency:** e.g. Recallium's `coding` chat on the R9700
   while a scouting pass runs on the Vega.
 - **The two routers are kept co-resident via llama-swap's `matrix`** (set
-  `gpus: "r & v"` in `hosts/zen3-nixos/ai.nix`). Without it llama-swap only
+  `gpus: "r & v"` in `hosts/zen3-nixos/ai/llama-swap.nix`). Without it llama-swap only
   runs **one model at a time** and would kill the other GPU's router on every
   request (verified live 2026-08-16: with no matrix, requesting `r9700`
   evicted the running `vega` router). Within each GPU, llama.cpp's router
@@ -166,11 +166,11 @@ deployments in a group.
   (17 GB models take a while); the R9700 router unloads/reloads models for
   concurrent requests to different big-model groups, so requests may queue.
 - The master key is plaintext in `litellm.yaml` (this host has no sops, same
-  as `DB_PASSWORD`/`VAULT_PASSPHRASE` in `ai.nix`). Rotate it if needed.
+  as `DB_PASSWORD`/`VAULT_PASSPHRASE` in `hosts/zen3-nixos/ai/recallium.nix`). Rotate it if needed.
 - `LFM2.5-2.6B-Q8_0` is deliberately **not** in any group (PGLoops on JSON
   prompts — see AGENTS.md).
 - Multi-file GGUFs (e.g. `Laguna-S-2.1-UD-IQ4_NL`) aren't mapped yet; their
-  router naming differs, and the ROCm cmd is commented out in `ai.nix`.
+  router naming differs, and the ROCm cmd is commented out in `hosts/zen3-nixos/ai/llama-swap.nix`.
 - Recallium still uses the Ollama API via `ollama-bridge` (port 11434) — litellm
   doesn't speak Ollama's API, so they coexist. New agents should use litellm.
 - Debug: `journalctl -u litellm -f`. The CLI is on PATH

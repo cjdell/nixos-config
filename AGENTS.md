@@ -91,7 +91,7 @@ sudo nixos-rebuild switch --impure --flake .
 This is the machine the repo lives on (`192.168.49.50`). It runs:
 
 - **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). Three
-  llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai.nix`),
+  llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai/llama-swap.nix`),
   kept co-resident by a llama-swap `matrix` so neither evicts the other:
   `r9700` (Radeon R9700 32 GB, **ROCm/HIP build of the `stew675/llama.cpp`
   `rdna-boosts` fork** — `llama-cpp-rdna` flake input, compiled for `gfx1201`
@@ -107,7 +107,9 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
   prompt prefixes.
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
-- **nginx** (from `netboot.nix` + `ai.nix`) exposing all of it on port 80
+- **nginx** (from `netboot.nix` + the `hosts/zen3-nixos/ai/` service modules —
+  each service file owns its reverse-proxy locations and subdomain vhost)
+  exposing all of it on port 80
   - `server_name 192.168.49.50` → `/` → 8081, `/logs` → 8083, `/mcp` → 8082
   - the app is reachable at `http://192.168.49.50/logs/`
   - `/api/...` is SPLIT: llama-swap's own management endpoints (`/api/events`,
@@ -117,6 +119,36 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
     Recallium UI REST catch-all → 9001. Don't remove the explicit locations —
     they were added after the Recallium `/api/` catch-all shadowed the
     llama-swap UI's `/api/events` SSE stream.
+  - **Public HTTPS: `*.ai.chrisdell.info`** (DNS wildcard → this box's IPv6
+    `2a02:8010:6680:49::50`). The wildcard fallback vhost in
+    `hosts/zen3-nixos/tls.nix` serves the exact same locations as the
+    `192.168.49.50` vhost (it references them via `config`) with `forceSSL`
+    (80→443 redirect) for the apex and any name without a dedicated subdomain.
+    Each AI service ALSO has its own subdomain vhost (defined in its own file
+    under `hosts/zen3-nixos/ai/`, cert via `useACMEHost = "ai.chrisdell.info"`,
+    exact server_name wins over the wildcard alias):
+    - `llama.ai.chrisdell.info` → llama-swap UI + management API (root)
+    - `llm.ai.chrisdell.info` → OpenAI-compatible endpoint for
+      `config.ai.recalliumGpu` (`/chat/completions`, `/models`, …)
+    - `logs.ai.chrisdell.info` → llama-log-viewer
+    - `mcp.ai.chrisdell.info` → diamcp (`/mcp`)
+    - `sd.ai.chrisdell.info` → SD web UI (root), `/sd-api/`+`/sdapi/`+`/v1/`
+      API, `/sd-status/`
+    - `recallium.ai.chrisdell.info` → Recallium UI + REST (root, no sub_filter)
+    - `recallium-mcp.ai.chrisdell.info` → Recallium MCP (CORS handled by nginx)
+    The cert is issued and
+    renewed **locally** by `security.acme` (DNS-01 via Route 53, same Let's
+    Encrypt account `me@chrisdell.info` as the router — account key copied to
+    `/var/lib/acme/.lego/accounts/`) covering `ai.chrisdell.info` +
+    `*.ai.chrisdell.info` into `/var/lib/acme/ai.chrisdell.info/`; the renew
+    timer handles expiry and the generated postrun reloads nginx. AWS creds
+    for lego are sops-encrypted in `secrets/zen3-ai.yaml` (force-added to git
+    — sops-nix needs the file in the flake source; age key:
+    `/var/lib/sops-nix/key.txt`, the shared key also on grafton-router —
+    back it up, the config can't build without it). ⚠️ This puts the whole service set — incl. the unauthenticated
+    Recallium REST API (`/api/`), log viewer (`/logs`), SD API (`/sd-api/`) and
+    the LLM endpoints (`/recallium-llm/`, `llm.ai.chrisdell.info`) — on the
+    public internet.
 
 ## Pi 5 netboot (aarch64, live)
 
@@ -173,7 +205,7 @@ into the binary via `include_str!`.
 Rebuild + deploy on `zen3-nixos` (used successfully in the past):
 
 ```sh
-# the nix package is built from this dir by hosts/zen3-nixos/ai.nix
+# the nix package is built from this dir by hosts/zen3-nixos/ai/llama-log-viewer.nix
 # (pkgs.rustPlatform.buildRustPackage with cargoLock.lockFile)
 sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 sudo nixos-confirm
@@ -182,7 +214,7 @@ sudo nixos-confirm
 ## stable-diffusion-cpp (SDXL on the R9700)
 
 `stable-diffusion-cpp` is installed on zen3-nixos as a **Vulkan build** — the
-nixpkgs default is CPU-only (`SD_VULKAN=OFF`), so `hosts/zen3-nixos/ai.nix`
+nixpkgs default is CPU-only (`SD_VULKAN=OFF`), so `hosts/zen3-nixos/ai/sd-gate.nix`
 uses `(stable-diffusion-cpp.override { vulkanSupport = true; })`. The binaries
 are `sd-cli` and `sd-server` (upstream renamed from `sd`).
 
@@ -221,7 +253,7 @@ the same cap.
 VRAM is at a premium (the R9700 also hosts llama-swap's resident coding
 model), so SDXL is **not** kept resident:
 
-- **systemd service `sd-gate`** (`hosts/zen3-nixos/ai.nix`; zero-dep Rust app
+- **systemd service `sd-gate`** (`hosts/zen3-nixos/ai/sd-gate.nix`; zero-dep Rust app
   in `sd-gate/`): always listens on `127.0.0.1:8084` (nginx's `/sd-api`
   target). On the **first connection** it checks free VRAM (`amd-smi metric
   -m --json`): if < `--min-vram-gib 10` (i.e. the llama-swap LLM is
@@ -233,20 +265,24 @@ model), so SDXL is **not** kept resident:
   the last request it kills `sd-server` → VRAM freed**; the next request
   loads it back (a few seconds with a warm page cache). Lifecycle in
   `journalctl -u sd-gate`.
-- **Status page:** `http://192.168.49.50/sd-status/` (JSON at
+- **Status page:** `http://192.168.49.50/sd-status/` or
+  `https://sd.ai.chrisdell.info/sd-status/` (JSON at
   `/sd-status/status`) — state, sd-server pid/times, idle-unload countdown,
   VRAM, and **active clients** (remote IP from nginx's `X-Forwarded-For`,
   request, age, phase): the reason the model is running and not shut down.
   Served by the gate on `127.0.0.1:8086`; the status listener never spawns
   the server.
-- **Web UI:** `http://192.168.49.50/sd/` (static files in `sd-webui/`,
+- **Web UI:** `http://192.168.49.50/sd/` or `https://sd.ai.chrisdell.info/`
+  (static files in `sd-webui/`,
   copied into the store via `runCommandLocal` so nginx can serve them). The
   UI pings `/sd-api/v1/models` on load and every 30 s (2 s while the server
   is down/loading, status pill shows “loading model…”), so opening the page
   wakes the model and a closed tab lets it idle-unload after ~2 min.
-- **API:** `http://192.168.49.50/sd-api/…` proxies to 8084 (the gate; it
+- **API:** `http://192.168.49.50/sd-api/…` or
+  `https://sd.ai.chrisdell.info/{sd-api,sdapi,v1}/…` proxies to 8084 (the
+  gate; it
   forwards to 8085, spawning sd-server if needed) with the `/sd-api` prefix
-  stripped. The UI uses the A1111-style `POST /sd-api/sdapi/v1/txt2img` (full
+  stripped on the `/sd-api/` paths. The UI uses the A1111-style `POST /sd-api/sdapi/v1/txt2img` (full
   param control: steps/cfg/seed/sampler/negative_prompt); note the
   OpenAI-style `/v1/images/generations` on this build **ignores** steps/cfg/seed
   and only honors prompt/n/size.
@@ -268,15 +304,20 @@ memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs
 on the **local llama.cpp** (no cloud), currently on the **RX 580** via an nginx
 proxy. Full usage docs: `docs/recallium.md`.
 
-- **UI:** `http://192.168.49.50:9001` or `http://192.168.49.50/recallium/`
-- **MCP:** `http://192.168.49.50/recallium-mcp` (Streamable HTTP, protocol 2025-11-25)
-- **REST:** `http://127.0.0.1:8001/api/...`; Postgres on `127.0.0.1:5433`
+- **UI:** `http://192.168.49.50:9001`, `http://192.168.49.50/recallium/` or
+  `https://recallium.ai.chrisdell.info/`
+- **MCP:** `http://192.168.49.50/recallium-mcp` or
+  `https://recallium-mcp.ai.chrisdell.info/` (Streamable HTTP, protocol
+  2025-11-25)
+- **REST:** `http://127.0.0.1:8001/api/...` or
+  `https://recallium.ai.chrisdell.info/api/...`; Postgres on `127.0.0.1:5433`
   (user `recallium` / `recallium_password`, db `recallium_memories`)
 - **Chain:** container (OpenAI provider, fixed `base_url`
   `http://host.containers.internal/recallium-llm`) → nginx proxy → llama-swap
-  `/upstream/<gpu>/v1` where `<gpu>` is the **`recalliumGpu` binding in
-  `hosts/zen3-nixos/ai.nix`** (currently `rx580`) → llama.cpp. Switching GPU =
-  edit that one string + `nixos-rebuild switch` (see docs/recallium.md). The
+  `/upstream/<gpu>/v1` where `<gpu>` is the **`config.ai.recalliumGpu` option
+  in `hosts/zen3-nixos/ai/default.nix`** (currently `rx580`) → llama.cpp.
+  Switching GPU =
+  edit that one option + `nixos-rebuild switch` (see docs/recallium.md). The
   old `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it.
 - **Active model:** `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai
   provider account id 3, `llm_provider_configs`). Model names are GGUF
@@ -308,7 +349,7 @@ Operational essentials:
   paths to `/run/opengl-driver/share`) reorders Vulkan devices so the
   **boot-VGA (console) GPU comes first** when `MESA_VK_DEVICE_SELECT` is unset.
   The R9700 drives no screens — the console lives on the iGPU — so `-dev
-  Vulkan0` used to silently mean the Vega. Fix in `hosts/zen3-nixos/ai.nix`:
+  Vulkan0` used to silently mean the Vega. Fix in `hosts/zen3-nixos/ai/llama-swap.nix`:
   the **r9700 wrapper** now runs the HIP fork build with
   `HIP_VISIBLE_DEVICES=0` (the R9700 is the first ROCr GPU agent per
   `rocminfo`, so it is `ROCm0`; the Vega 8 gfx90c is agent 1 and the RX 580
@@ -386,6 +427,7 @@ agent thread with no way to resume it. Follow this order:
   config themselves when they prefer.
 - If you DO apply a config (with permission), always finish with
   `sudo nixos-confirm` on autoRollback hosts.
-- The repo often has uncommitted/staged changes (e.g. `ai.nix`, `default.nix`)
+- The repo often has uncommitted/staged changes (e.g. `hosts/zen3-nixos/ai/`,
+  `default.nix`)
   plus untracked scratch files (`dump.txt`, `logs.txt`, `ppp.sh`, `result*`).
   Leave them alone unless the task is about them.

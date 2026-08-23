@@ -5,7 +5,7 @@
 > instances pinned one-per-GPU (`r9700` = Vulkan0, `vega` = Vulkan1) behind
 > llama-swap, exactly the Plan 3 architecture below but with the R9700 in the
 > RTX slot. `r9700` runs `--models-max 1` (one resident model, no GTT spill);
-> `vega` runs the small models. See `hosts/zen3-nixos/ai.nix` and
+> `vega` runs the small models. See `hosts/zen3-nixos/ai/llama-swap.nix` and
 > `docs/litellm.md` "Model residency & swapping". The split-mode analysis
 > (Plan 1/2) below still applies if you ever want one model across both GPUs.
 
@@ -192,7 +192,7 @@ Verified on this machine (2026-08-14, binary grep of the GGUFs):
   `blk.64.nextn.*` (the non-MTP twin has none).
 - But it is a **dense** 27B (no `expert_count` keys) on the `qwen35` arch. Dense 27B
   reads ~all 16.5 GB of weights per token: at the Vega's ~50 GB/s that's ~3 tok/s, and
-  MTP's ~2× lands at ~5–6 tok/s. It's commented out in `ai.nix` for a reason — the
+  MTP's ~2× lands at ~5–6 tok/s. It's commented out in `hosts/zen3-nixos/ai/llama-swap.nix` for a reason — the
   Vega only shines on A3B-class MoE.
 - To actually benefit on the Vega you'd want an **A3B-MoE MTP GGUF** (e.g.
   `ggml-org/Qwen3.6-35B-A3B-MTP-GGUF` or an Unsloth MTP pack, ~21 GB). Realistic gain
@@ -278,7 +278,7 @@ bandwidth partitioning.
 
 1. **Vega stability at long context:** your own `vulkan-crash.md` documents `DeviceLost`
    (amdgpu ring timeout) at ~50–60 K context. The `amdgpu.lockup_timeout=10000` kernel
-   param in `ai.nix` is the existing mitigation. Moving ~⅓ of the per-layer work off the
+   param in `hosts/zen3-nixos/ai/default.nix` is the existing mitigation. Moving ~⅓ of the per-layer work off the
    Vega may reduce lockup pressure, but don't expect a fix.
 2. **llvmpipe is enumerated.** `vulkaninfo` shows a software device (llvmpipe). After
    installing the 2060, always pass `-dev` explicitly so neither the GPU list nor auto-fit
@@ -297,7 +297,7 @@ bandwidth partitioning.
    for this). Your llama workloads keep it busy, so likely a non-issue.
 7. **KV sizing:** 262 K context at default f16 KV ≈ 0.5–1 GB per model — fine on either
    GPU. `-ctk q8_0 -ctv q8_0` halves it but is incompatible with future `-sm tensor`.
-8. **autoRollback:** this report changes nothing; if you later edit `hosts/zen3-nixos/ai.nix`
+8. **autoRollback:** this report changes nothing; if you later edit `hosts/zen3-nixos/ai/`
    and rebuild, remember `sudo nixos-confirm` afterwards.
 
 ---

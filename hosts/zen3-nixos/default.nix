@@ -11,7 +11,9 @@
 
   ((import ../../common/folding-at-home.nix) "amd")
 
-  ./ai.nix
+  ./ai
+  # ACME (Route 53 DNS-01) + nginx TLS vhost for *.ai.chrisdell.info
+  ./tls.nix
   ./litellm.nix
   ./open-webui.nix
   ./hardware-configuration.nix

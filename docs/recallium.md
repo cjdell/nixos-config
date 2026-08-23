@@ -29,7 +29,7 @@ flowchart LR
 - **LLM endpoint** — the container's OpenAI provider (account id 3) has a fixed
   `base_url` of `http://host.containers.internal/recallium-llm`. nginx strips
   the prefix and proxies to the llama-swap router of the GPU selected by the
-  `recalliumGpu` binding at the top of `hosts/zen3-nixos/ai.nix` (currently
+  `config.ai.recalliumGpu` option in `hosts/zen3-nixos/ai/default.nix` (currently
   `rx580`). Switching GPU = edit that one string + rebuild; no DB changes.
 - **Model routing** — llama-swap auto-loads a GGUF by basename from
   `/home/cjdell/Models`. The model name stored in Recallium must be the GGUF
@@ -47,7 +47,7 @@ flowchart LR
 | --- | --- |
 | LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx proxy → llama-swap) |
 | LLM model | `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai provider account id 3) |
-| LLM GPU | RX 580 — set by `recalliumGpu` in `hosts/zen3-nixos/ai.nix` |
+| LLM GPU | RX 580 — set by `config.ai.recalliumGpu` in `hosts/zen3-nixos/ai/default.nix` |
 | Embedding | `nomic-ai/nomic-embed-text-v1.5` (local, 768-dim, config id 1) |
 | Ports | 8001→:8000 MCP · 9001→:9000 UI · 5433→:5432 Postgres |
 
@@ -200,10 +200,10 @@ curl -s "http://127.0.0.1:8001/api/memories/search?query=model+that+emits+JSON&p
 The container's OpenAI `base_url` (provider account id 3) is fixed at
 `http://host.containers.internal/recallium-llm`. nginx strips the prefix and
 proxies to the llama-swap router of the GPU selected by the `recalliumGpu`
-binding at the top of `hosts/zen3-nixos/ai.nix`:
+option in `hosts/zen3-nixos/ai/default.nix`:
 
 ```sh
-# edit recalliumGpu = "rx580" | "r9700" | "vega" in ai.nix, then:
+# edit config.ai.recalliumGpu ("rx580" | "r9700" | "vega") in ai/default.nix, then:
 sudo nixos-rebuild switch --impure --flake . --max-jobs 1
 sudo nixos-confirm   # autoRollback host — mandatory
 ```

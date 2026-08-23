@@ -27,7 +27,7 @@ so it fits in VRAM.
 
 Board: Gigabyte B550 AORUS ELITE V2 (AM4, Cezanne APU). All three GPUs run
 separate llama.cpp router instances under llama-swap (`llamaCmdR9700/Vega/Rx580`
-in `hosts/zen3-nixos/ai.nix`), sharing `/home/cjdell/Models`; each is pinned to
+in `hosts/zen3-nixos/ai/llama-swap.nix`), sharing `/home/cjdell/Models`; each is pinned to
 its physical GPU by vendor/device ID (`MESA_VK_DEVICE_SELECT=1002:67df!` for the
 RX580).
 
@@ -121,7 +121,7 @@ Qwen3-4B geometry (read from GGUF header): 36 layers × 8 KV heads × 128 dim �
      config 1004 deactivated)
    - `llm_failover_priority` row repointed at config 1002
 4. Restarted the `recallium` container.
-5. `ai.nix`: added the **`recalliumGpu`** binding (currently `rx580`) and an
+5. `ai/default.nix`: added the **`recalliumGpu`** option (currently `rx580`) and an
    nginx location `/recallium-llm/` that rewrites the prefix away and proxies
    to `http://127.0.0.1:8081/upstream/${recalliumGpu}/v1`. Switching GPUs is
    now: edit `recalliumGpu` (`rx580` | `r9700` | `vega`) + `nixos-rebuild
@@ -154,7 +154,7 @@ switch Recallium's model; you must repoint/insert the failover row too.
      slot to Gen3 x4 (4 GB/s, 8× current); reseat / force Gen3 in BIOS for
      even Gen3 x2 (2 GB/s, 4×).
 3. **The real fix: shrink the rx580 router's KV so it fits in VRAM.** Change
-   `--ctx-size 131072` → `--ctx-size 16384` in `llamaCmdRx580` (ai.nix): KV
+   `--ctx-size 131072` → `--ctx-size 16384` in `llamaCmdRx580` (hosts/zen3-nixos/ai/llama-swap.nix): KV
    drops from ~9.6 GiB to ~1.2 GB, fits in VRAM, **zero GTT reads → decode
    becomes GPU-bound and independent of the weak PCIe link**. Recallium never
    exceeds ~2K tokens, so 16K is ample. Expected decode gain (to be A/B'd).
