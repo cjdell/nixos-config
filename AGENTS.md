@@ -265,20 +265,22 @@ model), so SDXL is **not** kept resident:
 
 Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a
 memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs
-on the **local llama.cpp via the ollama-bridge** (no cloud). Full usage docs:
-`docs/recallium.md`.
+on the **local llama.cpp** (no cloud), currently on the **RX 580** via an nginx
+proxy. Full usage docs: `docs/recallium.md`.
 
 - **UI:** `http://192.168.49.50:9001` or `http://192.168.49.50/recallium/`
 - **MCP:** `http://192.168.49.50/recallium-mcp` (Streamable HTTP, protocol 2025-11-25)
 - **REST:** `http://127.0.0.1:8001/api/...`; Postgres on `127.0.0.1:5433`
   (user `recallium` / `recallium_password`, db `recallium_memories`)
-- **Chain:** container → `ollama-bridge` (`:11434`, systemd) → llama-swap
-  `/upstream/r9700/v1` (the R9700 router; Recallium's coding model lives
-  there) → llama.cpp. Container reaches the host via
-  `host.containers.internal:11434`.
-- **Active model:** `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M` (config id 7,
-  `llm_provider_configs`). Model names are GGUF basenames auto-loaded by
-  llama-swap from `/home/cjdell/Models`.
+- **Chain:** container (OpenAI provider, fixed `base_url`
+  `http://host.containers.internal/recallium-llm`) → nginx proxy → llama-swap
+  `/upstream/<gpu>/v1` where `<gpu>` is the **`recalliumGpu` binding in
+  `hosts/zen3-nixos/ai.nix`** (currently `rx580`) → llama.cpp. Switching GPU =
+  edit that one string + `nixos-rebuild switch` (see docs/recallium.md). The
+  old `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it.
+- **Active model:** `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai
+  provider account id 3, `llm_provider_configs`). Model names are GGUF
+  basenames auto-loaded by llama-swap from `/home/cjdell/Models`.
 
 Operational essentials:
 
@@ -286,7 +288,10 @@ Operational essentials:
   the row is still created; read it back via `GET /api/memories/{id}`.
 - There is **no API to change the LLM model** — edit `llm_provider_configs` in
   Postgres directly, then `sudo podman restart recallium` (see docs/recallium.md
-  for the exact SQL).
+  for the exact SQL). **Gotcha:** `active_llm_config_id` in `/api/setup/status`
+  reads the first ACTIVE row of `llm_failover_priority`, NOT
+  `llm_provider_configs.is_active` — repoint that row too or the status (and
+  routing) won't change.
 - **Zombie generations:** if a model is slow/looping, Recallium's 120 s client
   timeout disconnects but llama.cpp keeps generating forever. Kill with
   `curl -X POST http://127.0.0.1:8081/api/models/unload` (or `/unload/<name>`).

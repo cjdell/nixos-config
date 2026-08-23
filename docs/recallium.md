@@ -19,20 +19,23 @@ APIs involved.
 flowchart LR
     Agent[IDE agent / chat client<br/>Cursor, Claude, opencode, Zed] -->|MCP over HTTP| Nginx[nginx :80<br/>/recallium-mcp]
     Nginx --> MCP[Recallium container<br/>MCP server :8000]
-    MCP -->|Ollama API| Bridge[ollama-bridge<br/>systemd, :11434]
-    Bridge -->|OpenAI API| Swap[llama-swap :8081<br/>/upstream/r9700/v1]
-    Swap --> CPP[llama.cpp llama-server<br/>R9700 32 GB, Vulkan0]
+    MCP -->|OpenAI API| Nginx2[nginx :80<br/>/recallium-llm]
+    Nginx2 -->|proxy| Swap[llama-swap :8081<br/>/upstream/rx580/v1]
+    Swap --> CPP[llama.cpp llama-server<br/>RX 580 4 GB, Vulkan]
     MCP --> PG[(Postgres 17<br/>in container :5432)]
     MCP --> UI[Web UI :9000]
 ```
 
-- **`ollama-bridge`** — in-repo Rust app (`ollama-bridge/`, packaged in
-  `hosts/zen3-nixos/ai.nix`). Translates Ollama's `/api/chat`, `/api/generate`,
-  `/api/tags` → llama-swap's OpenAI endpoint. Listens on `0.0.0.0:11434` so the
-  rootful podman container can reach it via `host.containers.internal:11434`.
+- **LLM endpoint** — the container's OpenAI provider (account id 3) has a fixed
+  `base_url` of `http://host.containers.internal/recallium-llm`. nginx strips
+  the prefix and proxies to the llama-swap router of the GPU selected by the
+  `recalliumGpu` binding at the top of `hosts/zen3-nixos/ai.nix` (currently
+  `rx580`). Switching GPU = edit that one string + rebuild; no DB changes.
 - **Model routing** — llama-swap auto-loads a GGUF by basename from
   `/home/cjdell/Models`. The model name stored in Recallium must be the GGUF
-  basename without `.gguf` (e.g. `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M`).
+  basename without `.gguf` (e.g. `Qwen3-4B-Instruct-2507-Q4_K_M`). The same
+  basename is loadable on every router (shared dir), so the model follows the
+  selected GPU.
 - **Embeddings** — fully offline `nomic-ai/nomic-embed-text-v1.5` (baked into
   the image, embedding config id 1). No external calls ever.
 - **Volumes** — `/var/lib/recallium/{data,wal,documents,secrets}` (tmpfiles,
@@ -42,12 +45,13 @@ flowchart LR
 
 | Thing | Value |
 | --- | --- |
-| LLM provider | ollama → `http://host.containers.internal:11434` (the bridge) |
-| LLM model | `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M` (config id 7) |
+| LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx proxy → llama-swap) |
+| LLM model | `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai provider account id 3) |
+| LLM GPU | RX 580 — set by `recalliumGpu` in `hosts/zen3-nixos/ai.nix` |
 | Embedding | `nomic-ai/nomic-embed-text-v1.5` (local, 768-dim, config id 1) |
 | Ports | 8001→:8000 MCP · 9001→:9000 UI · 5433→:5432 Postgres |
 
-`GET /api/setup/status` shows `completed: true, active_llm_config_id: 7`.
+`GET /api/setup/status` shows `completed: true, active_llm_config_id: 1002`.
 
 ---
 
@@ -120,7 +124,7 @@ curl -s http://127.0.0.1:8001/api/memories/<id>
 ```
 
 `processing_status` goes `pending → processing → complete` in ~30 s (first call
-after idle is slower — the 15 GB model must load). On completion the row has a
+after idle is slower — the 2.5 GB model must load). On completion the row has a
 markdown `summary` (bold `**Type: Topic**` header) and `smart_tags`.
 
 ### 4. Search
@@ -191,6 +195,25 @@ curl -s "http://127.0.0.1:8001/api/memories/search?query=model+that+emits+JSON&p
 
 ## Admin / operations
 
+### Switching the LLM GPU (Nix, no DB changes)
+
+The container's OpenAI `base_url` (provider account id 3) is fixed at
+`http://host.containers.internal/recallium-llm`. nginx strips the prefix and
+proxies to the llama-swap router of the GPU selected by the `recalliumGpu`
+binding at the top of `hosts/zen3-nixos/ai.nix`:
+
+```sh
+# edit recalliumGpu = "rx580" | "r9700" | "vega" in ai.nix, then:
+sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+sudo nixos-confirm   # autoRollback host — mandatory
+```
+
+No DB edits and no container restart needed: the proxy points at a new router
+and the same model basename (available on every router via the shared
+`/home/cjdell/Models` dir) loads there on the next LLM call. To also move back
+onto a bigger model, change the model as below (the failover-priority note
+applies).
+
 ### Changing the LLM model
 
 There is **no API for this** (`PUT /api/providers/llm/{id}` only edits
@@ -207,12 +230,19 @@ INSERT INTO llm_models (provider_name, model_name, input_cost_per_1k, output_cos
                         supports_streaming, supports_function_calling, supports_json_mode,
                         max_context_tokens, max_output_tokens, daily_free_limit, is_free_tier,
                         provider_account_id)
-VALUES ('ollama', 'NEW-BASENAME', 0, 0, true, true, false, 128000, 4096, NULL, false, 1)
+VALUES ('openai', 'NEW-BASENAME', 0, 0, true, true, false, 128000, 4096, NULL, false, 3)
 RETURNING id;
 
--- 2. Point the active config (id 7) at it
-UPDATE llm_provider_configs SET model_id = <new_id>, health_status = NULL, health_error = NULL
-WHERE id = 7;
+-- 2. Point the active config (id 1002) at it, and deactivate the old one
+UPDATE llm_provider_configs SET is_active = false WHERE is_active = true;
+UPDATE llm_provider_configs SET model_id = <new_id>, health_status = NULL,
+       health_error = NULL, is_active = true
+WHERE id = 1002;
+
+-- 3. IMPORTANT: active_llm_config_id is NOT read from is_active — it is the
+--    first ACTIVE row of llm_failover_priority ordered by priority_order.
+--    Repoint that row at the config you activated above:
+UPDATE llm_failover_priority SET llm_config_id = 1002 WHERE llm_config_id = 1004;
 ```
 
 Then restart so the provider cache picks it up (data lives in volumes, safe):
@@ -222,12 +252,13 @@ sudo podman restart recallium
 ```
 
 Sanity-test a candidate model before switching it into Recallium (the metadata
-prompt lives at `/tmp/recallium_prompt.txt` if you need it):
+prompt lives at `/tmp/recallium_prompt.txt` if you need it) — through the
+proxy, not the legacy ollama bridge:
 
 ```sh
-curl -s --max-time 300 -X POST http://127.0.0.1:11434/api/generate \
+curl -s --max-time 300 -X POST http://127.0.0.1/recallium-llm/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"<BASENAME>","prompt":"<full metadata prompt>","stream":false,"options":{"num_predict":700,"temperature":0.1}}'
+  -d '{"model":"<BASENAME>","messages":[{"role":"system","content":"<full metadata prompt>"},{"role":"user","content":"CONTENT: test\n\nPROJECT: test\nTYPE: learning"}],"stream":false,"max_tokens":700,"temperature":0.1}'
 ```
 
 ### Restarting / logs

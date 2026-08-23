@@ -7,6 +7,15 @@
 }:
 
 let
+  # Which GPU serves Recallium's LLM calls. Change this to switch the target
+  # WITHOUT touching the Recallium DB: its base_url stays fixed at
+  # http://host.containers.internal/recallium-llm -> nginx -> this GPU
+  # (see locations."/recallium-llm/" below). Then `nixos-rebuild switch`.
+  #   "r9700" -> the big R9700 (HIP, 32 GB)  [original setup]
+  #   "rx580" -> the RX 580 (4 GB, Vulkan)   [current: Qwen3-4B-Instruct-2507]
+  #   "vega"  -> the Vega 8 iGPU (GTT-backed)
+  recalliumGpu = "rx580";
+
   llama-log-viewer = pkgs.rustPlatform.buildRustPackage {
     pname = "llama-log-viewer";
     version = "0.1.0";
@@ -35,9 +44,10 @@ let
   sd-webui = pkgs.runCommandLocal "sd-webui" { src = ../../sd-webui; } "cp -r $src $out";
 
   # Ollama-compatible API bridge in front of llama-swap's OpenAI endpoint.
-  # Recallium (and other Ollama-only clients) talk to this on port 11434;
-  # it translates to llama-swap's `/upstream/r9700/v1` OpenAI API (the R9700
-  # router, which serves Recallium's coding model).
+  # LEGACY: Recallium no longer uses this — it talks OpenAI directly to the
+  # /recallium-llm nginx proxy (see recalliumGpu above). Kept for any
+  # Ollama-only client still hitting port 11434; translates Ollama ->
+  # llama-swap's OpenAI API.
   ollama-bridge = pkgs.rustPlatform.buildRustPackage {
     pname = "ollama-bridge";
     version = "0.1.0";
@@ -601,6 +611,23 @@ in
           '';
           recommendedProxySettings = true;
           proxyWebsockets = true;
+        };
+
+        # Stable LLM endpoint for Recallium's OpenAI provider (container's
+        # base_url in llm_provider_accounts id 3 is fixed at
+        # http://host.containers.internal/recallium-llm). The prefix is
+        # stripped and the call is proxied to the llama-swap router of the GPU
+        # selected by the `recalliumGpu` binding at the top of this file.
+        # Switching GPUs = edit `recalliumGpu` + rebuild; no DB changes needed.
+        locations."/recallium-llm/" = {
+          proxyPass = "http://127.0.0.1:8081";
+          extraConfig = ''
+            rewrite ^/recallium-llm/?(.*)$ /upstream/${recalliumGpu}/v1/$1 break;
+            # LLM calls can take minutes (model load, long generations).
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+          '';
+          recommendedProxySettings = true;
         };
 
         # llama-swap's own management API. Its UI is served from the "/"
