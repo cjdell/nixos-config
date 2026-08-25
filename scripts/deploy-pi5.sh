@@ -19,7 +19,9 @@ REBOOT="${2:-}"
 [ "$(id -u)" = 0 ] || { echo "error: must run as root (writes /etc/tftp)" >&2; exit 1; }
 
 # Toplevel store path base name (e.g. abcd123...-nixos-system-pi5-...)
-T=$(ls "$BUILD/nixStore/nix-store" | grep -m1 'nixos-system-pi5' \
+# NB: no `grep -m1` here — under `set -o pipefail` the early-exiting grep
+# SIGPIPEs ls and makes the pipeline fail intermittently on larger stores.
+T=$(ls "$BUILD/nixStore/nix-store" | grep 'nixos-system-pi5' | head -n1 \
   || { echo "error: no nixos-system-pi5 toplevel in $BUILD/nixStore/nix-store" >&2; exit 1; })
 
 TFTP=/etc/tftp/e9cf02dc

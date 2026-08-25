@@ -25,7 +25,10 @@ let
   nfsServer = "192.168.49.50";
 in
 {
-  imports = [ (modulesPath + "/profiles/base.nix") ];
+  imports = [
+    (modulesPath + "/profiles/base.nix")
+    ./gc-node.nix
+  ];
 
   networking.hostName = "pi5";
   networking.useDHCP = lib.mkForce true;
@@ -37,7 +40,15 @@ in
   # The Pi 5 GbE sits behind the RP1 (PCIe); the driver stack must be in the
   # initrd so the (post-boot) network comes up for NFS.
   boot.initrd = {
-    availableKernelModules = [ "macb" "rp1" "pcie-brcmstb" "clk-rp1" "nfs" "nfsv4" "sunrpc" ];
+    availableKernelModules = [
+      "macb"
+      "rp1"
+      "pcie-brcmstb"
+      "clk-rp1"
+      "nfs"
+      "nfsv4"
+      "sunrpc"
+    ];
 
     # The linux-rpi kernel does not build the tpm-crb module; the default
     # systemd initrd enables TPM2 (which needs tpm-crb) and the
@@ -60,7 +71,10 @@ in
       };
     };
 
-    supportedFilesystems = [ "nfs" "nfsv4" ];
+    supportedFilesystems = [
+      "nfs"
+      "nfsv4"
+    ];
 
     systemd = {
       initrdBin = [
@@ -109,9 +123,42 @@ in
     neededForBoot = true;
   };
 
+  # The Pi 5 root is tmpfs, so /etc/ssh regenerates host keys on every boot
+  # and the host identity changes each reboot. Pin the committed ed25519 key
+  # (the same one already used by the initrd SSH) so the host key is stable.
+  #
+  # NB: sshd cannot use the key straight from the store — store files are
+  # 0444, and OpenSSH 10.x refuses world-readable private keys
+  # ("WARNING: UNPROTECTED PRIVATE KEY FILE! ... too open"). So the sshd
+  # preStart copies the committed key to /var/lib/sshd with 0600 before sshd
+  # starts (tmpfs, recreated on every boot). Client side: ssh-keygen -R on
+  # the machine once, then no more "Host key verification failed" after
+  # reboots.
   services.openssh = {
     enable = true;
     settings.PermitRootLogin = "yes";
+    hostKeys = [
+      {
+        path = "/var/lib/sshd/ssh_host_ed25519_key";
+        type = "ed25519";
+      }
+    ];
+  };
+
+  systemd.services.sshd.preStart = ''
+    mkdir -p /var/lib/sshd
+    ${pkgs.coreutils}/bin/install -m 0600 -o root -g root \
+      ${./ssh_host_ed25519_key} /var/lib/sshd/ssh_host_ed25519_key
+  '';
+
+  # gc-business worker node (see gc-node.nix for all options). The Pi is
+  # stateless (tmpfs root), so the enrollment token is lost on every boot:
+  # set services.gcNode.joinCode for first-time enrollment each boot.
+  # Currently pointed at the demo gc-server on zen3 (192.168.49.50:9002).
+  services.gcNode = {
+    enable = true;
+    joinCode = "QE5-2AA";
+    grpcAddr = "192.168.49.50:9002"; # IP literal = plaintext
   };
 
   users.users.root = {

@@ -1,0 +1,60 @@
+# Demo gc-server config for the Pi 5 worker (see pi5/ops-notes.md §8).
+# Ports avoid collisions on zen3: 9001 = Recallium, 8081 = llama-swap.
+# Used by scripts/update-pi5-node.sh for auto-enrollment; start the server
+# with the gc-server repo's start-server-demo.sh + GC_SERVER_CONFIG pointing
+# here (needs go + tinygo via `nix shell` and the ssh insteadOf rule for
+# github.com/gc-business modules — see ops-notes.md §8).
+server:
+  http_addr: ":8089"
+  grpc_addr: ":9002"
+
+storage:
+  data_dir: "./.gc-server-data-pi5-demo"
+
+demo:
+  qr_join_enabled: true
+  join_token: "6703ab9b125139bbf01f8fea6fe0c022"
+  allow_mobile_jobs: true
+  allow_on_battery: true
+  require_foreground: true
+  allow_visible_background_mobile_jobs: true
+  max_mobile_job_timeout: 15m
+  workload:
+    enabled: true
+    autostart: true
+    dispatch_interval: 2s
+    timeout: 5s
+
+business:
+  enabled: true
+  admin_http_addr: "127.0.0.1:8090"
+
+managed_local_nodes:
+  enabled: true
+  desired_count: 1
+  max_count: 2
+  node_binary: "../gc-node/bin/darwin/gc-node-arm64"
+  work_dir: "./.gc-server-data-pi5-demo/managed-nodes"
+  grpc_addr: "127.0.0.1:9002"
+  autostart: false
+
+control:
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+  processing_heartbeat_interval: 2s
+  processing_heartbeat_timeout: 6s
+  processing_disconnect_grace: 1s
+  mobile_processing_disconnect_grace: 5s
+
+features:
+  enable_task_leases: true
+  enable_heartbeats: true
+  enable_lease_renewal: true
+  enable_progress_reporting: true
+
+cluster:
+  mode: "standalone"
+
+log:
+  level: "info"
+  format: "text"
