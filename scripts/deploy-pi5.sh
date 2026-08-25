@@ -4,8 +4,10 @@
 #
 # Usage: sudo deploy-pi5.sh /path/to/pi5-netboot-build-dir [--reboot]
 #
-# The build dir is the output of:
-#   nix build --impure path:pi5#packages.aarch64-linux.pi5-netboot -o <dir>
+# The build dir is the output of (the pi5 flake lives in gc-rust-node):
+#   sudo nix build --impure \
+#     path:/home/cjdell/Projects/gc-business/gc-rust-node#packages.aarch64-linux.pi5-netboot \
+#     -o <dir>
 # (evaluated here, built on the MacBookAir via nix.buildMachines; the store
 # closure lands in this host's /nix/store, which IS the NFS export the Pi
 # mounts, so nothing else to copy.)

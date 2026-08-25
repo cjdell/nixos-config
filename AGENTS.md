@@ -162,10 +162,15 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   key `/root/.ssh/id_ed25519` authorized on the MacBook, `cjdell` in its
   `nix.trustedUsers`, `supportedFeatures = [ "big-parallel" ]` — without it the
   linux-rpi kernel drv is kept local and fails with "platform mismatch").
-  So on zen3: `nix build --impure path:pi5#packages.aarch64-linux.pi5-netboot
-  -o <dir>` evaluates locally, builds aarch64 on the MacBook, and the result
-  lands in zen3's own store — which IS `/exports/nix-store`, the NFS export the
-  Pi mounts. **No rsync / manual store copy anymore.**
+  The Pi's NixOS config lives in the gc-rust-node repo
+  (`~/Projects/gc-business/gc-rust-node`, pi5/ + the `nixosSystem` in its
+  `flake.nix`). So on zen3: `sudo nix build --impure
+  path:/home/cjdell/Projects/gc-business/gc-rust-node#packages.aarch64-linux.pi5-netboot
+  -o <dir>` (root so store paths are root-owned, see
+  `~/Projects/gc-business/gc-rust-node/pi5/ops-notes.md` §2) evaluates
+  locally, builds aarch64 on the MacBook, and the result lands in zen3's own
+  store — which IS `/exports/nix-store`, the NFS export the Pi mounts.
+  **No rsync / manual store copy anymore.**
 - **Deploy:** `sudo ./scripts/deploy-pi5.sh <dir> [--reboot]` (copies initrd +
   Image into `/etc/tftp/e9cf02dc/`, writes `cmdline.txt` with the new toplevel
   hash, `--reboot` power-cycles via the HA relay — see
@@ -175,7 +180,8 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   hosts/grafton-router/networking/dns.nix — note the dhcp-host field order:
   `set:<tag>` BEFORE the IP, hostname AFTER it). It
   regenerates its SSH host keys every boot (tmpfs root) — expect host-key
-  warnings, or pin them in the pi5 flake (`services.openssh` host keys).
+  warnings, or pin them in the pi5 flake (`services.openssh` host keys) at
+  `~/Projects/gc-business/gc-rust-node/pi5/configuration.nix`.
 - **TFTP server = the NixOS `tftpd` unit** (`hosts/zen3-nixos/netboot.nix`),
   `in.tftpd -l -s -a 192.168.49.50:69 /etc/tftp`. The `-s` is mandatory:
   without it the directory arg is only an allow-list prefix and relative

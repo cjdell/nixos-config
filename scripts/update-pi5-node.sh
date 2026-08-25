@@ -2,8 +2,9 @@
 # update-pi5-node.sh — end-to-end gc-node update for the Raspberry Pi 5:
 #
 #   1. pull the gc-rust-node source (tolerates a dirty tree / shallow clone)
-#   2. re-lock the `path:` flake input (it is frozen at the locked narHash —
-#      see pi5/ops-notes.md §4)
+#      — the Pi's NixOS config now lives in that repo (pi5/)
+#   2. (no re-lock needed: the pi5 system is part of the gc-rust-node flake,
+#      so the `path:` build below picks up fresh source automatically)
 #   3. enroll a fresh single-use join code (the Pi is stateless: token lives
 #      on tmpfs and every reboot needs a new code) and write it into
 #      pi5/configuration.nix
@@ -25,9 +26,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-PI5_DIR="$REPO_ROOT/pi5"
 NODE_DIR="${GC_RUST_NODE_DIR:-$HOME/Projects/gc-business/gc-rust-node}"
+# The Pi 5 NixOS config moved into the gc-rust-node repo (pi5/), alongside
+# the Rust node the flake builds.
+PI5_DIR="$NODE_DIR/pi5"
 GC_SERVER_DIR="${GC_SERVER_DIR:-$HOME/Projects/gc-business/gc-server}"
 SERVER_CONFIG="${GC_SERVER_CONFIG:-$PI5_DIR/gc-server-demo.yaml}"
 PI_HOST="pi5.grafton.lan"
@@ -76,9 +78,11 @@ if [ "$DO_UPDATE" = 1 ]; then
   fi
 fi
 
-# --- 2. re-lock the path input ----------------------------------------------
-echo "==> re-locking the gc-rust-node flake input"
-(cd "$PI5_DIR" && timeout 300 nix flake lock --update-input gc-rust-node)
+# --- 2. (no re-lock needed) ------------------------------------------------
+# The pi5 system is part of the gc-rust-node flake, so building `path:$NODE_DIR`
+# below copies the current source — there is no frozen path-input narHash to
+# refresh (old layout: pi5/ was a separate flake with gc-rust-node as a
+# `path:` input; see pi5/ops-notes.md §4).
 
 # --- 3. enrollment code (single-use; needed for the new boot) ---------------
 if [ -z "$JOIN_CODE" ]; then
@@ -113,7 +117,7 @@ fi
 # `nix build -o` creates a symlink and refuses an existing directory.
 rm -rf "$BUILD_DIR"
 echo "==> building pi5-netboot -> $BUILD_DIR"
-sudo nix build --impure "path:$PI5_DIR#packages.aarch64-linux.pi5-netboot" -o "$BUILD_DIR"
+sudo nix build --impure "path:$NODE_DIR#packages.aarch64-linux.pi5-netboot" -o "$BUILD_DIR"
 
 EXPECTED_T="$(ls -d "$BUILD_DIR"/nixStore/nix-store/*nixos-system-pi5* 2>/dev/null | head -n1 || true)"
 EXPECTED_T="$(basename "$EXPECTED_T")"

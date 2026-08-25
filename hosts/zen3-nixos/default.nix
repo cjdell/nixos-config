@@ -35,9 +35,10 @@
 
     system.autoRollback.enable = true;
 
-    # Build aarch64-linux (Raspberry Pi 5 netboot, pi5/ flake) on the
-    # MacBookAir instead of cross-building: `nix build path:pi5#...` on this
-    # host evaluates here and dispatches aarch64-linux drv to the MacBook,
+    # Build aarch64-linux (Raspberry Pi 5 netboot — flake now lives in
+    # ~/Projects/gc-business/gc-rust-node) on the MacBookAir instead of
+    # cross-building: `nix build path:/home/cjdell/Projects/gc-business/gc-rust-node#...`
+    # on this host evaluates here and dispatches aarch64-linux drv to the MacBook,
     # copying results back into this store (which is the NFS-exported
     # /exports/nix-store the Pi boots from). The daemon (root) SSHes to the
     # MacBook as cjdell; the key below is authorized there, and cjdell is in
