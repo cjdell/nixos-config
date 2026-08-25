@@ -18,6 +18,9 @@
   ./open-webui.nix
   ./hardware-configuration.nix
   ./netboot.nix
+  # The RPi 5 netboot bundle (bind-mounts the gc-rust-node pi5-netboot output
+  # at /etc/tftp/e9cf02dc — the eeprom boot files are part of this system now).
+  ./pi5-netboot.nix
 
   # One-time root partition resize (completed 2026-08-14: / 181G->250G,
   # /home 750G->681G). Left in the tree, commented out, for reference and

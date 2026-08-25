@@ -155,6 +155,15 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
 A headless Raspberry Pi 5 (MAC `98:fe:54:18:17:e9`, no SD card) network-boots
 NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md`.
 
+- **The Pi's boot files are part of this system now** (`hosts/zen3-nixos/pi5-netboot.nix`):
+  the `gc-rust-node` flake input (path input, refresh with
+  `nix flake lock --update-input gc-rust-node`) builds the complete eeprom boot
+  dir — `config.txt`, `dtb`, `armstub8-2712.bin` (TF-A rpi5), `Image`,
+  `initrd`, `cmdline.txt` (derived from `boot.kernelParams`) and the NFS store
+  dir — as its `packages.aarch64-linux.pi5-netboot`, and this host bind-mounts
+  it at `/etc/tftp/e9cf02dc`. **Deploying a Pi update == `nixos-rebuild switch`
+  on this host** (+ `sudo nixos-confirm`, autoRollback is on) + a Pi
+  power-cycle. No runtime copies into /etc/tftp.
 - **Build = build machine, not manual copies:** the MacBookAir
   (`cjdell@192.168.49.191`, NixOS config in `/home/cjdell/nixos-config/` there,
   rebuild with `just switch` in that dir — `--impure` required) is a Nix build
@@ -164,17 +173,15 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   linux-rpi kernel drv is kept local and fails with "platform mismatch").
   The Pi's NixOS config lives in the gc-rust-node repo
   (`~/Projects/gc-business/gc-rust-node`, pi5/ + the `nixosSystem` in its
-  `flake.nix`). So on zen3: `sudo nix build --impure
-  path:/home/cjdell/Projects/gc-business/gc-rust-node#packages.aarch64-linux.pi5-netboot
-  -o <dir>` (root so store paths are root-owned, see
-  `~/Projects/gc-business/gc-rust-node/pi5/ops-notes.md` §2) evaluates
-  locally, builds aarch64 on the MacBook, and the result lands in zen3's own
-  store — which IS `/exports/nix-store`, the NFS export the Pi mounts.
-  **No rsync / manual store copy anymore.**
-- **Deploy:** `sudo ./scripts/deploy-pi5.sh <dir> [--reboot]` (copies initrd +
-  Image into `/etc/tftp/e9cf02dc/`, writes `cmdline.txt` with the new toplevel
-  hash, `--reboot` power-cycles via the HA relay — see
-  `scripts/pi5-powercycle.sh`). The Pi has a static lease at **192.168.49.92**
+  `flake.nix`); it builds with its own nixpkgs pin (does NOT follow this
+  flake's nixpkgs — the Pi keeps its tested toolchain). aarch64 drvs are
+  dispatched to the MacBook and land in zen3's own store — which IS
+  `/exports/nix-store`, the NFS export the Pi mounts.
+  **No rsync / manual store copy.**
+- **Deploy:** `./scripts/update-pi5-node.sh` (enroll fresh join code → re-lock
+  the gc-rust-node input → `nixos-rebuild switch` → `nixos-confirm` →
+  power-cycle via the HA relay — `scripts/pi5-powercycle.sh` → verify
+  gc-node/sshd/toplevel/cmdline). The Pi has a static lease at **192.168.49.92**
   (router dnsmasq `dhcp-host=set:pi5,98:fe:54:18:17:e9,192.168.49.92,pi5,1h`
   + `dhcp-boot=tag:pi5,pi5,192.168.49.50` in
   hosts/grafton-router/networking/dns.nix — note the dhcp-host field order:
@@ -192,7 +199,8 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
 - Boot flow: eeprom TFTP-fetches `e9cf02dc/{config.txt,dtb,cmdline.txt,Image,
   initrd,armstub8-2712.bin}` → kernel + initrd (networkd DHCP, NFSv4 store
   mount, systemd) → `pi5` over SSH. `armstub8-2712.bin` is the TF-A rpi5 build
-  (bl31.bin) — see pi5-blog.md.
+  (bl31.bin) — built from source in the gc-rust-node flake (`pi5Armstub`,
+  v2.15.0) — see pi5-blog.md.
 
 ## llama-log-viewer
 
@@ -421,8 +429,9 @@ agent thread with no way to resume it. Follow this order:
 - **Prefer helper scripts over inline one-liners for repeated/complex operations**
   (HA API calls, multi-step deploys, TFTP testing, …). Keep them in `scripts/`
   (committed) or `/tmp/` (scratch), make them idempotent, and give every
-  network call a `timeout`. Existing: `scripts/deploy-pi5.sh` (deploy a
-  pi5-netboot build to the TFTP root, `--reboot` to power-cycle),
+  network call a `timeout`. Existing: `scripts/update-pi5-node.sh` (enroll a
+  join code, re-lock the gc-rust-node input, `nixos-rebuild switch` +
+  `nixos-confirm`, power-cycle the Pi, verify),
   `scripts/pi5-powercycle.sh` (HA relay: default full cycle, `--off`/`--on`).
   Do not paste HA tokens/curls inline in agent sessions — call the script.
 - **Set timeouts on everything that talks to the network** (`timeout N cmd`);

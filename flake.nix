@@ -21,6 +21,16 @@
       # url = "git+file:///home/cjdell/Projects/nixos-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The Raspberry Pi 5 netboot flake (Pi NixOS config + the gc-node worker it
+    # runs). hosts/zen3-nixos/pi5-netboot.nix bind-mounts its pi5-netboot
+    # package at /etc/tftp/e9cf02dc. A `path:` input freezes at the locked
+    # narHash — after editing that repo, refresh with:
+    #   nix flake lock --update-input gc-rust-node
+    # NB: does NOT follow this flake's nixpkgs — the Pi keeps its own tested
+    # pin (gc-rust-node/flake.lock), and zen3 just references the built drv.
+    gc-rust-node = {
+      url = "path:/home/cjdell/Projects/gc-business/gc-rust-node";
+    };
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -82,6 +92,7 @@
       nixpkgs-unstable,
       nixos-hardware,
       nixos-utils,
+      gc-rust-node,
       sops-nix,
       home-manager,
       home-manager-unstable,
