@@ -185,6 +185,8 @@ in
           spec-type = draft-mtp
           [Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M]
           spec-type = draft-mtp
+          [Tiel-Coder-35B-A3B-GGUF-MTP]
+          spec-type = draft-mtp
         '';
 
         # Native Nix structure representing the YAML config
