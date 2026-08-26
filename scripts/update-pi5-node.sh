@@ -19,7 +19,7 @@
 #      (path inputs freeze at the locked narHash — see pi5/ops-notes.md §4)
 #   4. rebuild zen3 as root: sudo nixos-rebuild switch (builds the new
 #      pi5-netboot on the MacBookAir, bind-mounts it into /etc/tftp)
-#   5. sudo nixos-confirm (autoRollback is enabled on zen3!)
+#   5. sudo nixos-confirm if present (autoRollback is enabled on zen3!)
 #   6. power-cycle the Pi via the HA relay
 #   7. wait for ssh and verify gc-node / sshd / toplevel
 #
@@ -141,8 +141,11 @@ if [ "$DO_REBUILD" = 1 ]; then
   sudo exportfs -ra 2>/dev/null || true
 
   # --- 5. confirm (autoRollback is enabled!) -------------------------------------
-  echo "==> sudo nixos-confirm"
-  sudo nixos-confirm
+  # nixos-confirm may be absent (autoRollback temporarily disabled): skip quietly
+  if command -v nixos-confirm >/dev/null 2>&1; then
+    echo "==> sudo nixos-confirm"
+    sudo nixos-confirm
+  fi
 else
   echo "skipping nixos-rebuild (--no-rebuild)"
 fi
