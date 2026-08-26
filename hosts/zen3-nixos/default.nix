@@ -19,8 +19,10 @@
   ./hardware-configuration.nix
   ./netboot.nix
   # The RPi 5 netboot bundle (bind-mounts the gc-rust-node pi5-netboot output
-  # at /etc/tftp/e9cf02dc — the eeprom boot files are part of this system now).
+  # at /etc/tftp/e9cf02dc — the eeprom boot files are part of this system now;
+  # deployment values live in ./pi5-deploy.nix).
   ./pi5-netboot.nix
+  ./pi5-deploy.nix
 
   # One-time root partition resize (completed 2026-08-14: / 181G->250G,
   # /home 750G->681G). Left in the tree, commented out, for reference and
@@ -42,9 +44,10 @@
     # ~/Projects/gc-business/gc-rust-node) on the MacBookAir instead of
     # cross-building: `nix build path:/home/cjdell/Projects/gc-business/gc-rust-node#...`
     # on this host evaluates here and dispatches aarch64-linux drv to the MacBook,
-    # copying results back into this store (which is the NFS-exported
-    # /exports/nix-store the Pi boots from). The daemon (root) SSHes to the
-    # MacBook as cjdell; the key below is authorized there, and cjdell is in
+    # copying results back into this store (build inputs for the pi5-netboot
+    # bundle; the Pi itself boots the bundle's snapshot served over NFS at
+    # /exports/nix-store — see ./pi5-netboot.nix). The daemon (root) SSHes to
+    # the MacBook as cjdell; the key below is authorized there, and cjdell is in
     # trusted-users in the MacBook's /home/cjdell/nixos-config/configuration.nix.
     nix = {
       distributedBuilds = true;

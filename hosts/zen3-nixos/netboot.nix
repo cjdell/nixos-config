@@ -140,6 +140,12 @@ in
 
   services.nfs.server = {
     enable = true;
+    # /exports is the NFSv4 pseudo-root (fsid=0). /exports/nix-store is the
+    # Pi 5's store snapshot (the gc-rust-node pi5-netboot bundle's
+    # nixStore/nix-store, bind-mounted in ./pi5-netboot.nix — NOT this host's
+    # own /nix/store). `nohide` exposes it in the NFSv4 namespace at
+    # :/nix-store, which is what the Pi mounts (pi5/configuration.nix in the
+    # gc-rust-node repo).
     exports = ''
       /exports                          192.168.49.0/24(rw,fsid=0,no_subtree_check)
       /exports/nix-store                192.168.49.0/24(ro,nohide,insecure,no_subtree_check,async,no_auth_nlm)
@@ -154,11 +160,8 @@ in
   #   options = [ "bind" ];
   # };
 
-  fileSystems."/exports/nix-store" = {
-    device = "/nix/store";
-    fsType = "bind";
-    options = [ "bind" ];
-  };
+  # (The Pi 5's /exports/nix-store bind mount lives in ./pi5-netboot.nix —
+  # it serves the bundle's store snapshot, not this host's /nix/store.)
 
   # Just to pin the system so it doesn't get garbaged collected
   fileSystems."/pxe-sys-toplevel" = {

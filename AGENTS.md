@@ -159,9 +159,16 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   the `gc-rust-node` flake input (path input, refresh with
   `nix flake lock --update-input gc-rust-node`) builds the complete eeprom boot
   dir — `config.txt`, `dtb`, `armstub8-2712.bin` (TF-A rpi5), `Image`,
-  `initrd`, `cmdline.txt` (derived from `boot.kernelParams`) and the NFS store
-  dir — as its `packages.aarch64-linux.pi5-netboot`, and this host bind-mounts
-  it at `/etc/tftp/e9cf02dc`. **Deploying a Pi update == `nixos-rebuild switch`
+  `initrd`, `cmdline.txt` (derived from `boot.kernelParams`) **plus the Pi's
+  Nix store snapshot** (`nixStore/`, the full toplevel closure +
+  `nix-path-registration`) — via its parameterized `lib.mkPi5Netboot`, fed
+  with this host's deployment values (`services.pi5Netboot.*` in
+  `hosts/zen3-nixos/pi5-deploy.nix` — the gc-rust-node repo itself contains
+  no IPs or join codes). This
+  host bind-mounts the bundle at `/etc/tftp/e9cf02dc` (eeprom boot dir, TFTP)
+  and its `nixStore/nix-store` at `/exports/nix-store` (the Pi's NFS store).
+  **The store served to the Pi is the bundle's snapshot — NOT this host's live
+  `/nix/store`.** **Deploying a Pi update == `nixos-rebuild switch`
   on this host** (+ `sudo nixos-confirm`, autoRollback is on) + a Pi
   power-cycle. No runtime copies into /etc/tftp.
 - **Build = build machine, not manual copies:** the MacBookAir
@@ -175,13 +182,17 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   (`~/Projects/gc-business/gc-rust-node`, pi5/ + the `nixosSystem` in its
   `flake.nix`); it builds with its own nixpkgs pin (does NOT follow this
   flake's nixpkgs — the Pi keeps its tested toolchain). aarch64 drvs are
-  dispatched to the MacBook and land in zen3's own store — which IS
-  `/exports/nix-store`, the NFS export the Pi mounts.
+  dispatched to the MacBook and land in zen3's own store as build inputs; the
+  Pi boots the bundle's store snapshot (see above), so it is decoupled from
+  zen3's live store and GC.
   **No rsync / manual store copy.**
-- **Deploy:** `./scripts/update-pi5-node.sh` (enroll fresh join code → re-lock
+- **Deploy:** `./scripts/update-pi5-node.sh` (enroll fresh join code into
+  `hosts/zen3-nixos/pi5-deploy.nix` → re-lock
   the gc-rust-node input → `nixos-rebuild switch` → `nixos-confirm` →
   power-cycle via the HA relay — `scripts/pi5-powercycle.sh` → verify
-  gc-node/sshd/toplevel/cmdline). The Pi has a static lease at **192.168.49.92**
+  gc-node/sshd/toplevel/cmdline). Note the switch may exit 4 because the NFS
+  export pins the old store bind mount — the script tolerates it and
+  re-mounts + re-exports the new bundle itself. The Pi has a static lease at **192.168.49.92**
   (router dnsmasq `dhcp-host=set:pi5,98:fe:54:18:17:e9,192.168.49.92,pi5,1h`
   + `dhcp-boot=tag:pi5,pi5,192.168.49.50` in
   hosts/grafton-router/networking/dns.nix — note the dhcp-host field order:
@@ -198,7 +209,8 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   ad-hoc TFTP servers on this host; use the unit.
 - Boot flow: eeprom TFTP-fetches `e9cf02dc/{config.txt,dtb,cmdline.txt,Image,
   initrd,armstub8-2712.bin}` → kernel + initrd (networkd DHCP, NFSv4 store
-  mount, systemd) → `pi5` over SSH. `armstub8-2712.bin` is the TF-A rpi5 build
+  mount from the bundle's snapshot, systemd) → `pi5` over SSH.
+  `armstub8-2712.bin` is the TF-A rpi5 build
   (bl31.bin) — built from source in the gc-rust-node flake (`pi5Armstub`,
   v2.15.0) — see pi5-blog.md.
 

@@ -3,15 +3,18 @@
 #
 # The Pi's netboot files are now PART of the zen3-nixos system: the flake
 # input gc-rust-node builds the pi5-netboot bundle (complete eeprom boot dir +
-# NFS store), and hosts/zen3-nixos/pi5-netboot.nix bind-mounts it at
-# /etc/tftp/e9cf02dc. Deploying a Pi update therefore == a nixos-rebuild
-# switch on zen3, followed by a power-cycle. This script drives the whole loop:
+# store snapshot), and hosts/zen3-nixos/pi5-netboot.nix bind-mounts it at
+# /etc/tftp/e9cf02dc (TFTP boot dir) and its nixStore/nix-store at
+# /exports/nix-store (the Pi's NFS store — NOT this host's /nix/store).
+# Deploying a Pi update therefore == a nixos-rebuild switch on zen3,
+# followed by a power-cycle. This script drives the whole loop:
 #
 #   1. pull the gc-rust-node source (tolerates a dirty tree / shallow clone)
 #      — the Pi's NixOS config lives in that repo (pi5/)
 #   2. enroll a fresh single-use join code (the Pi is stateless: token lives
 #      on tmpfs and every reboot needs a new code) and write it into
-#      gc-rust-node/pi5/configuration.nix
+#      hosts/zen3-nixos/pi5-deploy.nix (the deployment values are passed to
+#      gc-rust-node's lib.mkPi5Netboot — that repo contains no join codes)
 #   3. re-lock the `gc-rust-node` path input in this repo's flake.lock
 #      (path inputs freeze at the locked narHash — see pi5/ops-notes.md §4)
 #   4. rebuild zen3 as root: sudo nixos-rebuild switch (builds the new
@@ -106,8 +109,8 @@ if [ -z "$JOIN_CODE" ]; then
 fi
 
 if [ -n "$JOIN_CODE" ]; then
-  echo "==> setting joinCode=$JOIN_CODE in gc-rust-node/pi5/configuration.nix"
-  sed -i "s|joinCode = \"[^\"]*\"|joinCode = \"$JOIN_CODE\"|" "$NODE_DIR/pi5/configuration.nix"
+  echo "==> setting joinCode=$JOIN_CODE in hosts/zen3-nixos/pi5-deploy.nix"
+  sed -i "s|joinCode = \"[^\"]*\"|joinCode = \"$JOIN_CODE\"|" "$REPO_ROOT/hosts/zen3-nixos/pi5-deploy.nix"
 fi
 
 # --- 3. re-lock the path input ---------------------------------------------------
@@ -117,7 +120,23 @@ echo "==> re-locking the gc-rust-node flake input"
 # --- 4. rebuild zen3 (the Pi's boot files ARE this system now) -------------------
 if [ "$DO_REBUILD" = 1 ]; then
   echo "==> nixos-rebuild switch on this host (--impure --flake .)"
-  sudo nixos-rebuild switch --impure --flake "$REPO_ROOT"
+  # The NFS export keeps the previous /exports/nix-store bind mount busy, so
+  # switch-to-configuration can't restart that unit (exit 4). Tolerate it and
+  # fix the mount up below.
+  if ! sudo nixos-rebuild switch --impure --flake "$REPO_ROOT"; then
+    echo "warning: nixos-rebuild exited non-zero (expected if only the" >&2
+    echo "         store-export mount restart failed on a busy bind)" >&2
+  fi
+
+  # Detach the old export + ALL stacked mount layers (a failed restart
+  # leaves the previous bundle mounted underneath) and bind the NEW bundle's
+  # snapshot, then re-export. (The running Pi keeps its NFS session; it is
+  # power-cycled below anyway.)
+  sudo exportfs -u /exports/nix-store 2>/dev/null || true
+  for _ in 1 2 3 4; do sudo umount -l /exports/nix-store 2>/dev/null || break; done
+  sudo systemctl restart 'exports-nix\x2dstore.mount' 2>/dev/null \
+    || sudo mount /exports/nix-store
+  sudo exportfs -ra 2>/dev/null || true
 
   # --- 5. confirm (autoRollback is enabled!) -------------------------------------
   echo "==> sudo nixos-confirm"
@@ -136,6 +155,15 @@ if [ -n "$NETBOOT_DEV" ]; then
   EXPECTED_T="$(basename "$EXPECTED_T")"
   [ -n "$EXPECTED_T" ] && echo "    toplevel: $EXPECTED_T" \
     || echo "warning: bundle not built yet ($NETBOOT_DEV)" >&2
+
+  # The store export must now serve the NEW bundle (the switch couldn't
+  # restart the mount on a busy bind; the fixup above did).
+  MOUNT_SRC="$(findmnt -n -o SOURCE /exports/nix-store 2>/dev/null || true)"
+  case "$MOUNT_SRC" in
+    *"$NETBOOT_DEV"*) : ;;
+    "") echo "FAIL: /exports/nix-store is not mounted" >&2; exit 1 ;;
+    *) echo "FAIL: /exports/nix-store serves $MOUNT_SRC (expected the new bundle)" >&2; exit 1 ;;
+  esac
 else
   EXPECTED_T=""
   echo "warning: could not evaluate the pi5-netboot mount source" >&2
