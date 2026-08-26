@@ -38,7 +38,7 @@
       nodejs
     ];
 
-    system.autoRollback.enable = true;
+    # system.autoRollback.enable = true;
 
     # Build aarch64-linux (Raspberry Pi 5 netboot — flake now lives in
     # ~/Projects/gc-business/gc-rust-node) on the MacBookAir instead of
