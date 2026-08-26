@@ -190,9 +190,10 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   `hosts/zen3-nixos/pi5-deploy.nix` → re-lock
   the gc-rust-node input → `nixos-rebuild switch` → `nixos-confirm` →
   power-cycle via the HA relay — `scripts/pi5-powercycle.sh` → verify
-  gc-node/sshd/toplevel/cmdline). Note the switch may exit 4 because the NFS
-  export pins the old store bind mount — the script tolerates it and
-  re-mounts + re-exports the new bundle itself. The Pi has a static lease at **192.168.49.92**
+  gc-node/sshd/toplevel/cmdline). The `/exports` NFS root is exported with
+  `crossmnt` (no `/exports/nix-store` sub-export — an export entry would pin
+  the bind mount), so the switch replaces the store bind cleanly; the
+  script's remount block remains as belt-and-braces. The Pi has a static lease at **192.168.49.92**
   (router dnsmasq `dhcp-host=set:pi5,98:fe:54:18:17:e9,192.168.49.92,pi5,1h`
   + `dhcp-boot=tag:pi5,pi5,192.168.49.50` in
   hosts/grafton-router/networking/dns.nix — note the dhcp-host field order:

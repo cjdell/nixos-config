@@ -140,15 +140,21 @@ in
 
   services.nfs.server = {
     enable = true;
-    # /exports is the NFSv4 pseudo-root (fsid=0). /exports/nix-store is the
-    # Pi 5's store snapshot (the gc-rust-node pi5-netboot bundle's
-    # nixStore/nix-store, bind-mounted in ./pi5-netboot.nix — NOT this host's
-    # own /nix/store). `nohide` exposes it in the NFSv4 namespace at
-    # :/nix-store, which is what the Pi mounts (pi5/configuration.nix in the
-    # gc-rust-node repo).
+    # /exports is the NFSv4 pseudo-root (fsid=0). The Pi 5's store snapshot
+    # (the gc-rust-node pi5-netboot bundle's nixStore/nix-store, bind-mounted
+    # at /exports/nix-store in ./pi5-netboot.nix — NOT this host's own
+    # /nix/store) is exposed in the NFSv4 namespace at :/nix-store — what the
+    # Pi mounts (pi5/configuration.nix in the gc-rust-node repo).
+    #
+    # Deliberately NO separate /exports/nix-store export line: an export
+    # entry pins the bind mount, so switch-to-configuration couldn't unmount
+    # the old bundle to bind the new one ("Failed to restart
+    # exports-nix\x2dstore.mount", switch exits 4). With `crossmnt` on the
+    # fsid=0 root the server follows the CURRENT mount at lookup time — the
+    # switch can replace the bind cleanly and every fresh NFS session sees
+    # the new bundle with no re-export dance.
     exports = ''
-      /exports                          192.168.49.0/24(rw,fsid=0,no_subtree_check)
-      /exports/nix-store                192.168.49.0/24(ro,nohide,insecure,no_subtree_check,async,no_auth_nlm)
+      /exports  192.168.49.0/24(ro,fsid=0,crossmnt,insecure,no_subtree_check,async,no_auth_nlm)
       # /exports/pxe-server-squashfs      192.168.49.0/24(ro,nohide,insecure,no_subtree_check)
       # /exports/pxe-server-nix-store     192.168.49.0/24(ro,nohide,insecure,no_subtree_check)
     '';

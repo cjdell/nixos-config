@@ -120,16 +120,18 @@ echo "==> re-locking the gc-rust-node flake input"
 # --- 4. rebuild zen3 (the Pi's boot files ARE this system now) -------------------
 if [ "$DO_REBUILD" = 1 ]; then
   echo "==> nixos-rebuild switch on this host (--impure --flake .)"
-  # The NFS export keeps the previous /exports/nix-store bind mount busy, so
-  # switch-to-configuration can't restart that unit (exit 4). Tolerate it and
-  # fix the mount up below.
+  # The /exports root is exported with crossmnt (no /exports/nix-store
+  # sub-export), so switch-to-configuration can replace the store bind mount
+  # itself. Keep the tolerance as belt-and-braces (e.g. the old config is
+  # still deployed, or the store is genuinely busy mid-boot).
   if ! sudo nixos-rebuild switch --impure --flake "$REPO_ROOT"; then
     echo "warning: nixos-rebuild exited non-zero (expected if only the" >&2
     echo "         store-export mount restart failed on a busy bind)" >&2
   fi
 
-  # Detach the old export + ALL stacked mount layers (a failed restart
-  # leaves the previous bundle mounted underneath) and bind the NEW bundle's
+  # Safety net for when the switch above still couldn't replace the bind
+  # (old config deployed, or a client holds the mount busy): drop any stale
+  # sub-export, lazily detach the old bundle's layers, bind the NEW bundle's
   # snapshot, then re-export. (The running Pi keeps its NFS session; it is
   # power-cycled below anyway.)
   sudo exportfs -u /exports/nix-store 2>/dev/null || true

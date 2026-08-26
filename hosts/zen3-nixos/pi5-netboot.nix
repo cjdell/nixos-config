@@ -19,10 +19,21 @@
 # `nix-store --load-db`. Both bind sources are GC-pinned: the fstab carries
 # the literal store path and lives in the system generation's closure.
 #
+# The NFS export (netboot.nix) is the fsid=0 /exports root with `crossmnt` —
+# deliberately NO /exports/nix-store sub-export: an export entry would pin
+# this bind mount and make `nixos-rebuild switch` fail to restart it
+# ("Failed to restart exports-nix\x2dstore.mount", exit 4).
+#
 # Deploying a Pi update therefore == `nixos-rebuild switch` on this host
 # (autoRollback is on, so finish with `sudo nixos-confirm`) followed by a Pi
 # power-cycle — scripts/update-pi5-node.sh does the whole loop.
-{ lib, pkgs, inputs, config, ... }:
+{
+  lib,
+  pkgs,
+  inputs,
+  config,
+  ...
+}:
 
 let
   pi5Netboot = inputs.gc-rust-node.lib.mkPi5Netboot {
