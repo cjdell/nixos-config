@@ -102,9 +102,16 @@ in
         # observed MAXED by the pi-ai harness (llama-server RSS sat at ~26.5 GiB,
         # LRU already evicting warm agent contexts), so it's doubled to 64 GiB:
         # ~13 x 100k-token contexts stay warm at q8_0 (vs ~6 before) - a returning
-        # sub-agent's next turn skips its prefill entirely. Bounded and safe: LRU
-        # evicts the oldest states first, and if a state alloc ever fails the cache
-        # limit auto-shrinks to 40% of current size instead of OOMing (93 GiB RAM).
+        # sub-agent's next turn skips its prefill entirely. LRU evicts the oldest
+        # states first, and if a state alloc ever fails, llama.cpp auto-shrinks the
+        # cache to 40% of its current size — but that only protects the cache's OWN
+        # allocation, NOT the system: at 64 GiB the r9700 server sat at ~64.5 GB
+        # anon RSS and, with no swap on this box, the machine global-OOM'd
+        # llama-server 4x in 5 days (Aug 24/27/28) whenever a second model load (or
+        # any other big allocation) came along. Mitigated by `zramSwap` in
+        # hosts/zen3-nixos/default.nix: the kernel swaps cold cache pages to
+        # compressed RAM under pressure instead of killing — the cache still uses
+        # all free RAM, it just yields when the system needs it.
         # NOTE: do NOT switch to `-cram -1` here - that only removes the MiB cap,
         # the per-cache token cap (= --ctx-size) still binds, which is SMALLER.
         #

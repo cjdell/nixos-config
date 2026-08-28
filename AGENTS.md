@@ -25,10 +25,12 @@ Formatting: `./format.sh` runs `nixfmt` over all `.nix` files.
 
 ## Critical: auto-rollback + `nixos-confirm` (READ THIS FIRST)
 
-`system.autoRollback.enable = true` is set on **multiple hosts**, including
-`zen3-nixos` (`hosts/zen3-nixos/default.nix`) and `N100-NAS`
-(`hosts/N100-NAS/default.nix`). It comes from the `nixos-utils` flake input
-(`github:cjdell/nixos-utils`, module `nixos-utils.nixosModules.rollback`).
+`system.autoRollback.enable = true` is set on **N100-NAS**
+(`hosts/N100-NAS/default.nix`). It is currently **commented out (disabled) on
+zen3-nixos** (`hosts/zen3-nixos/default.nix` — no `auto-rollback.*` units on
+this live system; re-enable the line to bring the guard back). The module
+comes from the `nixos-utils` flake input (`github:cjdell/nixos-utils`, module
+`nixos-utils.nixosModules.rollback`).
 
 How it works:
 
@@ -92,19 +94,41 @@ This is the machine the repo lives on (`192.168.49.50`). It runs:
 
 - **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). Three
   llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai/llama-swap.nix`),
-  kept co-resident by a llama-swap `matrix` so neither evicts the other:
-  `r9700` (Radeon R9700 32 GB, **ROCm/HIP build of the `stew675/llama.cpp`
-  `rdna-boosts` fork** — `llama-cpp-rdna` flake input, compiled for `gfx1201`
-  only; pinned via `HIP_VISIBLE_DEVICES=0` so it is `ROCm0`; `--models-max 1`
-  = one resident model, no GTT spill), `vega` (Vega 8 iGPU, upstream Vulkan
-  build pinned via `MESA_VK_DEVICE_SELECT=1002:1638!`; GTT-backed, up to 4
-  small models) and `rx580` (RX 580 4 GB, Vulkan, 1 resident). The r9700 HIP
-  fork beats the Vulkan build on prefill (+11-22%) but is slower on batch-1
-  decode (-2% dense, -30% MoE — HIP per-op overhead; see
-  `bench-results/r9700/`). All three routers keep the idle-slot KV RAM prompt
-  cache (`r9700` `-cram 65536`, `vega` `-cram 32768`) + `--cache-reuse 256`
-  (KV-shift reuse for trimmed/rolling contexts): restored to VRAM on matching
-  prompt prefixes.
+  kept co-resident by a llama-swap `matrix` so neither evicts the other. **All
+  three run the upstream Vulkan build** (`llama-cpp-vulkan` flake input), each
+  pinned to its physical GPU via `MESA_VK_DEVICE_SELECT` with a trailing `!`
+  (exposes only that device, so it's always `Vulkan0`):
+  `r9700` = `1002:7551!` (Radeon R9700 32 GB — the big models, `--models-max 1`
+  = one resident model, no GTT spill), `vega` = `1002:1638!` (Vega 8 iGPU,
+  GTT-backed, `--models-max 4` small research sub-agent models), `rx580` =
+  `1002:67df!` (RX 580 4 GB, `--models-max 1`, small models fully in GDDR5,
+  ~50 tok/s on a 2.6B). The `rdna-boosts` HIP fork (`llama-cpp-rdna` flake
+  input) was the r9700 build until **2026-08-23**, then dropped: MTP
+  speculative decoding showed **zero draft acceptance on the HIP build**
+  (spec_decode counters stayed 0) while the Vulkan build's MTP works (35/35
+  drafts accepted in the LM Studio trial). The fork was faster on prefill
+  (+11-22%) but slower on batch-1 decode (-2% dense, -30% MoE; see
+  `bench-results/r9700/`); the input stays in flake.nix for
+  reference/benchmarking. All three routers keep the idle-slot KV RAM prompt
+  cache (`r9700` `-cram 65536`, `vega` `-cram 32768`, `rx580` `-cram 16384`
+  — MiB caps) + `--cache-reuse 256` (KV-shift reuse) + `-ctk/-ctv q8_0`
+  (quantized KV): restored to VRAM on matching prompt prefixes.
+  ⚠️ **The `-cram` cache can OOM the box — see the RAM bullet below.**
+- **RAM: the `-cram` prompt cache has OOM'd this box.** The r9700's 64 GiB
+  RAM cache grows to ~64 GB anon RSS under sustained pi-ai use (the 450 KB
+  per-call prompts in `llama-logs/`). Without swap the kernel has nothing to
+  reclaim once the cache is full, and a second concurrent model load (or any
+  big allocation) triggers a **global OOM that kills llama-server** — happened
+  4× in 5 days (Aug 24/27/28×2, always the r9700 model server at 54–64 GB
+  RSS). llama.cpp's cache auto-shrink-to-40% only fires when the cache's OWN
+  allocation fails; it does **not** yield memory when other processes need it.
+  Approaching-OOM symptom: Recallium's rx580 route 502s after exactly 10 min
+  on a 10-min cadence (even a 2.4 GB model load can't make progress) while
+  r9700 keeps serving. **Mitigation: `zramSwap` in
+  `hosts/zen3-nixos/default.nix`** — the kernel swaps cold cache pages to
+  compressed RAM under pressure instead of killing, and the full cache still
+  lives in free RAM when there is any. Don't remove the zram without a
+  replacement cushion.
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
 - **nginx** (from `netboot.nix` + the `hosts/zen3-nixos/ai/` service modules —
@@ -191,9 +215,14 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   the gc-rust-node input → `nixos-rebuild switch` → `nixos-confirm` →
   power-cycle via the HA relay — `scripts/pi5-powercycle.sh` → verify
   gc-node/sshd/toplevel/cmdline). The `/exports` NFS root is exported with
-  `crossmnt` (no `/exports/nix-store` sub-export — an export entry would pin
-  the bind mount), so the switch replaces the store bind cleanly; the
-  script's remount block remains as belt-and-braces. The Pi has a static lease at **192.168.49.92**
+  `crossmnt` PLUS an explicit `nohide` `/exports/nix-store` sub-export (in
+  `hosts/zen3-nixos/netboot.nix`): without the sub-export the crossed entry
+  shares the parent's fsid=0, and a client mounting `:/nix-store` gets an
+  ambiguous file handle (`fileid changed` / `Stale file handle` in the
+  initrd — stage-2 never comes up). The sub-export pins the bind mount, so a
+  switch's restart of `exports-nix\x2dstore.mount` can fail (exit 4) — the
+  script tolerates that, detects the stale mount, and fixes it (lazy-umount,
+  remount, full `exportfs -ua; exportfs -a`). The Pi has a static lease at **192.168.49.92**
   (router dnsmasq `dhcp-host=set:pi5,98:fe:54:18:17:e9,192.168.49.92,pi5,1h`
   + `dhcp-boot=tag:pi5,pi5,192.168.49.50` in
   hosts/grafton-router/networking/dns.nix — note the dhcp-host field order:
@@ -251,8 +280,8 @@ are `sd-cli` and `sd-server` (upstream renamed from `sd`).
   `stabilityai/stable-diffusion-xl-base-1.0`).
 - Vulkan device numbering: sd-gate pins sd-server to the R9700 with the same
   device-select layer env (`MESA_VK_DEVICE_SELECT=1002:7551!`), so `vulkan0` =
-  R9700 and the Vega is not visible to it. Same for the vega/rx580 llama-swap
-  routers (the r9700 router itself is HIP-pinned, see the gotchas section).
+  R9700 and the Vega is not visible to it. Same for all three llama-swap
+  routers (see the gotchas section).
 
 Working test command (1024×1024 SDXL, ~24 s for 30 steps on the R9700):
 
@@ -370,27 +399,26 @@ Operational essentials:
 
 ## Known gotchas on this host
 
-- **GPU pinning (r9700 is HIP, vega/rx580 are Vulkan).** The mesa
+- **GPU pinning (all three routers are Vulkan now).** The mesa
   device-select layer (`VK_LAYER_MESA_device_select`, an implicit layer
   auto-loaded by every Vulkan app because NixOS patches the loader's search
   paths to `/run/opengl-driver/share`) reorders Vulkan devices so the
   **boot-VGA (console) GPU comes first** when `MESA_VK_DEVICE_SELECT` is unset.
   The R9700 drives no screens — the console lives on the iGPU — so `-dev
   Vulkan0` used to silently mean the Vega. Fix in `hosts/zen3-nixos/ai/llama-swap.nix`:
-  the **r9700 wrapper** now runs the HIP fork build with
-  `HIP_VISIBLE_DEVICES=0` (the R9700 is the first ROCr GPU agent per
-  `rocminfo`, so it is `ROCm0`; the Vega 8 gfx90c is agent 1 and the RX 580
-  gfx803 is not ROCm-7-supported). The **vega/rx580 wrappers** (and sd-gate's
-  spawned sd-server) set `XDG_DATA_DIRS=/run/opengl-driver/share` and
-  `MESA_VK_DEVICE_SELECT=1002:1638!` / `1002:67df!` — the trailing `!`
-  exposes only that device, so `-dev Vulkan0` always means the pinned GPU.
-  Don't "simplify" this back to plain indices, and don't reintroduce
-  `HSA_OVERRIDE_GFX_VERSION` (removed: the gfx1201 HIP build is native — an
-  override would make the loader look for nonexistent code objects).
+  every router wrapper — r9700, vega, rx580 (and sd-gate's spawned sd-server)
+  — sets `XDG_DATA_DIRS=/run/opengl-driver/share` and
+  `MESA_VK_DEVICE_SELECT=1002:7551!` / `1002:1638!` / `1002:67df!`; the
+  trailing `!` exposes only that device, so `-dev Vulkan0` always means the
+  pinned GPU. The HIP-fork era is over (`HIP_VISIBLE_DEVICES`,
+  `HSA_OVERRIDE_GFX_VERSION` are gone — the fork's MTP was dead, see the host
+  section). Don't "simplify" this back to plain indices.
 
-- **Building/benchmarking the r9700 HIP fork.** The `rdna-boosts` fork is the
-  `llama-cpp-rdna` flake input; the router uses its `rocm` package overridden
-  to `rocmGpuTargets = "gfx1201"` + `-DLLAMA_BUILD_TESTS=OFF` (the fork leaves
+- **Building/benchmarking the r9700 HIP fork (historical).** The `rdna-boosts`
+  fork is the `llama-cpp-rdna` flake input; the router no longer uses it
+  (dropped 2026-08-23 — zero MTP draft acceptance), but it stays in flake.nix
+  for benchmarking/easy re-enable. To build it: `rocm` package overridden to
+  `rocmGpuTargets = "gfx1201"` + `-DLLAMA_BUILD_TESTS=OFF` (the fork leaves
   tests at the cmake default ON; parallel test compilation ICEs gcc on
   test-jinja.cpp — GGC crash). `scripts/bench-r9700.sh <tag> <llama-bench>
   [--vulkan|--hip] [models...]` runs the before/after suite (results in

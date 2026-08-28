@@ -129,17 +129,6 @@ if [ "$DO_REBUILD" = 1 ]; then
     echo "         store-export mount restart failed on a busy bind)" >&2
   fi
 
-  # Safety net for when the switch above still couldn't replace the bind
-  # (old config deployed, or a client holds the mount busy): drop any stale
-  # sub-export, lazily detach the old bundle's layers, bind the NEW bundle's
-  # snapshot, then re-export. (The running Pi keeps its NFS session; it is
-  # power-cycled below anyway.)
-  sudo exportfs -u /exports/nix-store 2>/dev/null || true
-  for _ in 1 2 3 4; do sudo umount -l /exports/nix-store 2>/dev/null || break; done
-  sudo systemctl restart 'exports-nix\x2dstore.mount' 2>/dev/null \
-    || sudo mount /exports/nix-store
-  sudo exportfs -ra 2>/dev/null || true
-
   # --- 5. confirm (autoRollback is enabled!) -------------------------------------
   # nixos-confirm may be absent (autoRollback temporarily disabled): skip quietly
   if command -v nixos-confirm >/dev/null 2>&1; then
@@ -161,14 +150,38 @@ if [ -n "$NETBOOT_DEV" ]; then
   [ -n "$EXPECTED_T" ] && echo "    toplevel: $EXPECTED_T" \
     || echo "warning: bundle not built yet ($NETBOOT_DEV)" >&2
 
-  # The store export must now serve the NEW bundle (the switch couldn't
-  # restart the mount on a busy bind; the fixup above did).
+  # The store export must serve the NEW bundle. If the switch already
+  # restarted the bind (it does when it succeeds), LEAVE THE EXPORTS ALONE:
+  # /exports/nix-store is an explicit nohide sub-export (see
+  # hosts/zen3-nixos/netboot.nix) and the exportfs dance below can break it —
+  # the Pi's next boot then NFS-mounts an ambiguous file handle ("fileid
+  # changed" / "Stale file handle" in the initrd; stage-2 never comes up).
+  # Only when the mount is still on the OLD bundle do the belt-and-braces
+  # below run, and they end with a FULL export flush (-ua then -a) so nfsd
+  # forgets the old entry and re-exports the sub-export fresh.
   MOUNT_SRC="$(findmnt -n -o SOURCE /exports/nix-store 2>/dev/null || true)"
   case "$MOUNT_SRC" in
-    *"$NETBOOT_DEV"*) : ;;
-    "") echo "FAIL: /exports/nix-store is not mounted" >&2; exit 1 ;;
-    *) echo "FAIL: /exports/nix-store serves $MOUNT_SRC (expected the new bundle)" >&2; exit 1 ;;
+    *"$NETBOOT_DEV"*) MOUNT_OK=1 ;;
+    *) MOUNT_OK=0 ;;
   esac
+
+  if [ "${MOUNT_OK:-0}" != 1 ]; then
+    echo "warning: /exports/nix-store serves ${MOUNT_SRC:-nothing}; fixing up" >&2
+    sudo exportfs -u /exports/nix-store 2>/dev/null || true
+    for _ in 1 2 3 4; do sudo umount -l /exports/nix-store 2>/dev/null || break; done
+    sudo systemctl restart 'exports-nix\x2dstore.mount' 2>/dev/null \
+      || sudo mount /exports/nix-store
+    # Full flush: -ua drops every export (incl. derived crossmnt entries),
+    # -a re-exports from /etc/exports fresh, so no stale file handles.
+    sudo exportfs -ua >/dev/null 2>&1 || true
+    sudo exportfs -a >/dev/null 2>&1 || true
+    MOUNT_SRC="$(findmnt -n -o SOURCE /exports/nix-store 2>/dev/null || true)"
+    case "$MOUNT_SRC" in
+      *"$NETBOOT_DEV"*) : ;;
+      "") echo "FAIL: /exports/nix-store is not mounted after fixup" >&2; exit 1 ;;
+      *) echo "FAIL: /exports/nix-store serves $MOUNT_SRC after fixup (expected the new bundle)" >&2; exit 1 ;;
+    esac
+  fi
 else
   EXPECTED_T=""
   echo "warning: could not evaluate the pi5-netboot mount source" >&2
@@ -200,11 +213,29 @@ if [ "$OK" != 1 ]; then
 fi
 echo "    ssh port open"
 
+# The Pi's initrd also runs an sshd (boot.initrd.network.ssh) that answers on
+# port 22 BEFORE stage-2 is up — at that point /run/current-system does not
+# exist, the booted sw bin dir has no sed/grep, and gc-node/sshd are not
+# started yet. Wait for stage-2 (signalled by /run/current-system) before
+# running the verification, or the checks below will fail against the initrd.
+STAGE2=0
+for _ in $(seq 1 24); do
+  sleep 5
+  if timeout 10 ssh "${SSH_OPTS[@]}" "root@$PI_HOST" \
+      'test -e /run/current-system' 2>/dev/null; then STAGE2=1; break; fi
+done
+if [ "$STAGE2" != 1 ]; then
+  echo "FAIL: Pi did not reach stage-2 within 2 minutes of ssh coming up" >&2
+  exit 1
+fi
+echo "    stage-2 up"
+
 REMOTE_OUT="$(timeout 40 ssh "${SSH_OPTS[@]}" "root@$PI_HOST" bash -s <<EOF
 echo "sys=\$(readlink -f /run/current-system | sed 's|/nix/store/||')"
 echo "cmdline=\$(tr ' ' '\n' < /proc/cmdline | grep '^init=' | cut -d= -f2)"
 echo "gc-node=\$(systemctl is-active gc-node)"
 echo "sshd=\$(systemctl is-active sshd)"
+echo "gc-status=\$(systemctl is-active gc-status)"
 journalctl -u gc-node --no-pager | grep -E 'Subscribed|Running' | tail -n 1
 EOF
 )"
@@ -214,6 +245,7 @@ CUR_SYS="$(printf '%s\n' "$REMOTE_OUT" | sed -n 's/^sys=//p')"
 CMDLINE_INIT="$(printf '%s\n' "$REMOTE_OUT" | sed -n 's/^cmdline=//p')"
 GC_ACTIVE="$(printf '%s\n' "$REMOTE_OUT" | sed -n 's/^gc-node=//p')"
 SSHD_ACTIVE="$(printf '%s\n' "$REMOTE_OUT" | sed -n 's/^sshd=//p')"
+GCSTATUS_ACTIVE="$(printf '%s\n' "$REMOTE_OUT" | sed -n 's/^gc-status=//p')"
 
 FAIL=0
 if [ -n "$EXPECTED_T" ]; then
@@ -225,6 +257,16 @@ else
 fi
 [ "$GC_ACTIVE" = "active" ] || { echo "FAIL: gc-node is $GC_ACTIVE"; FAIL=1; }
 [ "$SSHD_ACTIVE" = "active" ] || { echo "FAIL: sshd is $SSHD_ACTIVE"; FAIL=1; }
+[ "$GCSTATUS_ACTIVE" = "active" ] || { echo "FAIL: gc-status is $GCSTATUS_ACTIVE"; FAIL=1; }
+
+# The new gc-status web tool (added with the SD-image update): reachable on
+# the Pi's LAN IP from this host (binds 0.0.0.0:8080).
+if timeout 5 curl -fsS "http://$PI_IP:8080/" >/dev/null 2>&1; then
+  echo "gc-status: HTTP 200 at http://$PI_IP:8080/"
+else
+  echo "FAIL: gc-status web UI did not answer on http://$PI_IP:8080/"
+  FAIL=1
+fi
 
 # Server-side sanity check (informational; the demo server may not be running).
 if timeout 5 curl -fsS http://127.0.0.1:8089/healthz >/dev/null 2>&1; then

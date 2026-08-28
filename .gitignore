@@ -3,3 +3,4 @@ junk/
 tmp/
 llama-logs/
 target/
+.gc-server-data-pi5-demo/

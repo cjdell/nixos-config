@@ -38,6 +38,19 @@
       nodejs
     ];
 
+    # zram swap: the llama-swap r9700 RAM prompt cache (`-cram 65536` in
+    # ./ai/llama-swap.nix) grows to ~64 GB of anonymous memory under sustained
+    # pi-ai use. With no swap the kernel has nothing to reclaim, and a second
+    # model load global-OOM'd llama-server 4x in 5 days (Aug 2026). zram lets
+    # the cache keep using all FREE RAM but makes its cold pages reclaimable
+    # under pressure (swapped compressed) instead of killing the process. ~25%
+    # of RAM as a lazily-allocated zstd device; bump if big second loads still
+    # churn, or drop to 12% if you'd rather it eat less when full.
+    zramSwap = {
+      enable = true;
+      memoryPercent = 25;
+    };
+
     # system.autoRollback.enable = true;
 
     # Build aarch64-linux (Raspberry Pi 5 netboot — flake now lives in

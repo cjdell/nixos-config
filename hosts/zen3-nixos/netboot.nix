@@ -146,15 +146,23 @@ in
     # /nix/store) is exposed in the NFSv4 namespace at :/nix-store — what the
     # Pi mounts (pi5/configuration.nix in the gc-rust-node repo).
     #
-    # Deliberately NO separate /exports/nix-store export line: an export
-    # entry pins the bind mount, so switch-to-configuration couldn't unmount
-    # the old bundle to bind the new one ("Failed to restart
-    # exports-nix\x2dstore.mount", switch exits 4). With `crossmnt` on the
-    # fsid=0 root the server follows the CURRENT mount at lookup time — the
-    # switch can replace the bind cleanly and every fresh NFS session sees
-    # the new bundle with no re-export dance.
+    # The /exports/nix-store sub-export (nohide) is REQUIRED: the store bind
+    # lives on the same filesystem as the /exports pseudo-root, so relying on
+    # crossmnt alone makes the crossed entry share fsid=0 with the parent and
+    # a client mounting :/nix-store gets an ambiguous file handle — nfsd
+    # answers the mount with the pseudo-root's fileid, the client compares it
+    # against the crossed root's and bails with "fileid changed" / "Stale
+    # file handle" in the initrd (stage-2 never comes up). Verified
+    # empirically on 2026-08-26: with only the fsid=0 crossmnt export the Pi
+    # (and any client) cannot mount :/nix-store; with the explicit nohide
+    # sub-export (own fsid) it mounts cleanly.
+    #
+    # Trade-off: the sub-export pins the bind mount, so a switch's restart of
+    # exports-nix\x2dstore.mount can fail on a busy bind — scripts/update-pi5-node.sh
+    # handles that (conditional fixup ending in a full `exportfs -ua; exportfs -a`).
     exports = ''
       /exports  192.168.49.0/24(ro,fsid=0,crossmnt,insecure,no_subtree_check,async,no_auth_nlm)
+      /exports/nix-store  192.168.49.0/24(ro,nohide,insecure,no_subtree_check)
       # /exports/pxe-server-squashfs      192.168.49.0/24(ro,nohide,insecure,no_subtree_check)
       # /exports/pxe-server-nix-store     192.168.49.0/24(ro,nohide,insecure,no_subtree_check)
     '';

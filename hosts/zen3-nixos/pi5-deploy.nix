@@ -28,6 +28,6 @@
   config.services.pi5Netboot = {
     nfsServer = "192.168.49.50";
     grpcAddr = "192.168.49.50:9002";
-    joinCode = "JKJ-873"; # update-pi5-node.sh replaces this per deploy
+    joinCode = "ZZ9-3FD"; # update-pi5-node.sh replaces this per deploy
   };
 }
