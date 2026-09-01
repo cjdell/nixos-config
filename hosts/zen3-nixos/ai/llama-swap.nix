@@ -57,7 +57,7 @@ in
 
     serviceConfig =
       let
-        llama-cpp-vulkan = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
+        llama-cpp-vulkan = specialArgs.llamaCppPkgs.vulkan;
 
         # Pin each router to its physical GPU via mesa's device-select layer
         # (VK_LAYER_MESA_device_select) instead of relying on llama.cpp's
@@ -193,6 +193,8 @@ in
           [Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M]
           spec-type = draft-mtp
           [Tiel-Coder-35B-A3B-GGUF-MTP]
+          spec-type = draft-mtp
+          [Dirk-Qwen3.8-27B-UD-Q5_K_XL]
           spec-type = draft-mtp
         '';
 

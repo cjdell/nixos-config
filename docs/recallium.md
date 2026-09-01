@@ -20,8 +20,8 @@ flowchart LR
     Agent[IDE agent / chat client<br/>Cursor, Claude, opencode, Zed] -->|MCP over HTTP| Nginx[nginx :80<br/>/recallium-mcp]
     Nginx --> MCP[Recallium container<br/>MCP server :8000]
     MCP -->|OpenAI API| Nginx2[nginx :80<br/>/recallium-llm]
-    Nginx2 -->|proxy| Swap[llama-swap :8081<br/>/upstream/rx580/v1]
-    Swap --> CPP[llama.cpp llama-server<br/>RX 580 4 GB, Vulkan]
+    Nginx2 -->|proxy| Swap[llama-swap :8081<br/>/upstream/vega/v1]
+    Swap --> CPP[llama.cpp llama-server<br/>Vega 8 iGPU, GTT-backed]
     MCP --> PG[(Postgres 17<br/>in container :5432)]
     MCP --> UI[Web UI :9000]
 ```
@@ -30,7 +30,7 @@ flowchart LR
   `base_url` of `http://host.containers.internal/recallium-llm`. nginx strips
   the prefix and proxies to the llama-swap router of the GPU selected by the
   `config.ai.recalliumGpu` option in `hosts/zen3-nixos/ai/default.nix` (currently
-  `rx580`). Switching GPU = edit that one string + rebuild; no DB changes.
+  `vega`). Switching GPU = edit that one string + rebuild; no DB changes.
 - **Model routing** — llama-swap auto-loads a GGUF by basename from
   `/home/cjdell/Models`. The model name stored in Recallium must be the GGUF
   basename without `.gguf` (e.g. `Qwen3-4B-Instruct-2507-Q4_K_M`). The same
@@ -47,7 +47,7 @@ flowchart LR
 | --- | --- |
 | LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx proxy → llama-swap) |
 | LLM model | `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai provider account id 3) |
-| LLM GPU | RX 580 — set by `config.ai.recalliumGpu` in `hosts/zen3-nixos/ai/default.nix` |
+| LLM GPU | Vega 8 (GTT-backed) — set by `config.ai.recalliumGpu` in `hosts/zen3-nixos/ai/default.nix` |
 | Embedding | `nomic-ai/nomic-embed-text-v1.5` (local, 768-dim, config id 1) |
 | Ports | 8001→:8000 MCP · 9001→:9000 UI · 5433→:5432 Postgres |
 

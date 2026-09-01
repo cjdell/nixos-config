@@ -33,11 +33,11 @@
     # behind llm.ai.chrisdell.info (public LLM endpoint in llama-swap.nix).
     # Then `nixos-rebuild switch`.
     #   "r9700" -> the big R9700 (HIP, 32 GB)  [original setup]
-    #   "rx580" -> the RX 580 (4 GB, Vulkan)   [current: Qwen3-4B-Instruct-2507]
-    #   "vega"  -> the Vega 8 iGPU (GTT-backed)
+    #   "rx580" -> the RX 580 (4 GB, Vulkan)   [former default]
+    #   "vega"  -> the Vega 8 iGPU (GTT-backed) [current: Qwen3-4B-Instruct-2507]
     recalliumGpu = lib.mkOption {
       type = lib.types.str;
-      default = "rx580";
+      default = "vega";
       description = "llama-swap router (r9700|vega|rx580) serving Recallium's LLM calls";
     };
   };

@@ -357,7 +357,7 @@ model), so SDXL is **not** kept resident:
 
 Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a
 memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs
-on the **local llama.cpp** (no cloud), currently on the **RX 580** via an nginx
+on the **local llama.cpp** (no cloud), currently on the **Vega 8 iGPU** via an nginx
 proxy. Full usage docs: `docs/recallium.md`.
 
 - **UI:** `http://192.168.49.50:9001`, `http://192.168.49.50/recallium/` or
@@ -371,7 +371,7 @@ proxy. Full usage docs: `docs/recallium.md`.
 - **Chain:** container (OpenAI provider, fixed `base_url`
   `http://host.containers.internal/recallium-llm`) → nginx proxy → llama-swap
   `/upstream/<gpu>/v1` where `<gpu>` is the **`config.ai.recalliumGpu` option
-  in `hosts/zen3-nixos/ai/default.nix`** (currently `rx580`) → llama.cpp.
+  in `hosts/zen3-nixos/ai/default.nix`** (currently `vega`) → llama.cpp.
   Switching GPU =
   edit that one option + `nixos-rebuild switch` (see docs/recallium.md). The
   old `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it.

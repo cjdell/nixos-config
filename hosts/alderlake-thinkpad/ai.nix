@@ -18,8 +18,8 @@
 
     serviceConfig =
       let
-        llama-cpp-cpu = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        llama-cpp-vulkan = specialArgs.inputs.llama-cpp.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
+        llama-cpp-cpu = specialArgs.llamaCppPkgs.default;
+        llama-cpp-vulkan = specialArgs.llamaCppPkgs.vulkan;
 
         llamaCmdCpu = "${llama-cpp-cpu}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 16 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";
         llamaCmdVulkan = "${llama-cpp-vulkan}/bin/llama-server --host 127.0.0.1 --port \${PORT} -t 12 -ngl all --log-prompts-dir /home/cjdell/nixos-config/llama-logs --verbose -lv 5";

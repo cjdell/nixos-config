@@ -183,6 +183,19 @@
       # Stable pkgs used by the legacy machines below.
       pkgs = mkPkgs nixpkgs;
 
+      # Upstream llama.cpp's flake packages build the FULL test suite by
+      # default: .devops/nix/package.nix never sets LLAMA_BUILD_TESTS, so cmake's
+      # default (ON) compiles ~850 test targets — and parallel test compilation
+      # ICEs GCC on test-jinja.cpp (GGC crash; same failure documented for the
+      # rdna-boosts fork in AGENTS.md). The tests are useless for a server
+      # deployment anyway, so wrap every package with -DLLAMA_BUILD_TESTS=OFF.
+      llamaCppPkgs = builtins.mapAttrs (
+        _: pkg:
+        pkg.overrideAttrs (old: {
+          cmakeFlags = old.cmakeFlags ++ [ "-DLLAMA_BUILD_TESTS=OFF" ];
+        })
+      ) llama-cpp.packages.${system};
+
       # Which nixpkgs each host runs on: hosts listed here opt into unstable,
       # everything else uses the stable `nixpkgs` input.
       nixpkgsFor = host: if host == "alderlake-thinkpad" then nixpkgs-unstable else nixpkgs;
@@ -231,6 +244,7 @@
           ++ (import (./hosts + "/${host}") inputs);
           specialArgs = {
             inherit inputs;
+            inherit llamaCppPkgs;
           };
         };
     in
