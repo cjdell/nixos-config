@@ -6,6 +6,7 @@
 
   ../../common/nosleep.nix
   ../../common/sops.nix
+  ../../common/zfs-status.nix
 
   ./backup-host.nix
   ./containers.nix
@@ -25,6 +26,10 @@
       secrets = {
         tailscale_pre_auth_key = { };
       };
+    };
+
+    services.zfsStatus = {
+      enable = true;
     };
   })
 ]
