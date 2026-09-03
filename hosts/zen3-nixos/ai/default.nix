@@ -10,6 +10,7 @@
 #   ollama-bridge.nix   - legacy Ollama-compatible bridge (no proxy)
 #   recallium.nix       - Recallium container + recallium./recallium-mcp.
 #   diamcp.nix          - diamcp container + mcp. subdomain
+#   alexandria.nix      - Alexandria audiobook container (ROCm on the R9700, port 4200) + alexandria. subdomain
 #
 # The public TLS cert + the wildcard fallback vhost live in ../tls.nix;
 # the subdomain vhosts use `useACMEHost = "ai.chrisdell.info"` to serve that
@@ -17,12 +18,13 @@
 
 {
   imports = [
-    ./diamcp.nix
-    ./llama-log-viewer.nix
+    # ./alexandria.nix
+    # ./diamcp.nix
+    # ./llama-log-viewer.nix
     ./llama-swap.nix
-    ./ollama-bridge.nix
-    ./recallium.nix
-    ./sd-gate.nix
+    # ./ollama-bridge.nix
+    # ./recallium.nix
+    # ./sd-gate.nix
   ];
 
   options.ai = {

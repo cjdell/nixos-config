@@ -14,8 +14,8 @@
   ./ai
   # ACME (Route 53 DNS-01) + nginx TLS vhost for *.ai.chrisdell.info
   ./tls.nix
-  ./litellm.nix
-  ./open-webui.nix
+  # ./litellm.nix
+  # ./open-webui.nix
   ./hardware-configuration.nix
   ./netboot.nix
   # The RPi 5 netboot bundle (bind-mounts the gc-rust-node pi5-netboot output

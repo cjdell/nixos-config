@@ -182,11 +182,11 @@
         "nixpkgs-lib": "nixpkgs-lib_2"
       },
       "locked": {
-        "lastModified": 1787559586,
-        "narHash": "sha256-onL0VLf9vPllmT0H/OlURIU5r5t5WIEl7t4tVNKT0Nw=",
+        "lastModified": 1788306937,
+        "narHash": "sha256-lbrI1UYVpFgKSsyrU9oeF7FHfnu8nLD9ja0ou9f2rxk=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "9d0d87172c374f89da73c1cfe6d81ae62feac1f1",
+        "rev": "f16b25b8c3d2809b87925d0b76652d7821a75c68",
         "type": "github"
       },
       "original": {
@@ -233,6 +233,24 @@
     },
     "flake-parts_5": {
       "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib_5"
+      },
+      "locked": {
+        "lastModified": 1788450739,
+        "narHash": "sha256-glZLQlzIn1fXH6PazR2iUmTo7kzzyYSshrWhLS9TqCU=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "31729ca8cbdb4fa927b34e5f4353e6a83f39e993",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "flake-parts_6": {
+      "inputs": {
         "nixpkgs-lib": [
           "stylix",
           "nixpkgs"
@@ -252,9 +270,9 @@
         "type": "github"
       }
     },
-    "flake-parts_6": {
+    "flake-parts_7": {
       "inputs": {
-        "nixpkgs-lib": "nixpkgs-lib_5"
+        "nixpkgs-lib": "nixpkgs-lib_6"
       },
       "locked": {
         "lastModified": 1769996383,
@@ -388,11 +406,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788212847,
-        "narHash": "sha256-8eVNPFQJz64l2dJJeqYHxKS3njy66gTwI9niuapqSEU=",
+        "lastModified": 1788440670,
+        "narHash": "sha256-RLeQM1RIoLE7hNnt8yYLguiX0qt+xAxVOT4EF5BJLAQ=",
         "owner": "ggml-org",
         "repo": "llama.cpp",
-        "rev": "458681e1d5d4a29a1463c4732e03226cf384b997",
+        "rev": "42f0225fea945b24e92a0ce716e59b7c13e9b819",
         "type": "github"
       },
       "original": {
@@ -442,6 +460,28 @@
       "original": {
         "type": "git",
         "url": "file:///home/cjdell/Projects/llama.cpp"
+      }
+    },
+    "llama-cpp-unsloth": {
+      "inputs": {
+        "flake-parts": "flake-parts_5",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788351357,
+        "narHash": "sha256-6oYvL11DX2eazkXYAc/dicMuTmwANoDYxXpU8EqAAts=",
+        "owner": "unslothai",
+        "repo": "llama.cpp",
+        "rev": "b76199698c863e09b066ed2b7327fd4045d7c353",
+        "type": "github"
+      },
+      "original": {
+        "owner": "unslothai",
+        "repo": "llama.cpp",
+        "rev": "b76199698c863e09b066ed2b7327fd4045d7c353",
+        "type": "github"
       }
     },
     "nixos-hardware": {
@@ -539,11 +579,11 @@
     },
     "nixpkgs-lib_2": {
       "locked": {
-        "lastModified": 1785031560,
-        "narHash": "sha256-OmshNvn2vupOFpYinLUu+1Dnpu4n7Q5N3ggGVNHpkUI=",
+        "lastModified": 1788057806,
+        "narHash": "sha256-DTQSMxzDWmT0zhguthvegnVkn7CFqGCv4IHCzk5ZUpM=",
         "owner": "nix-community",
         "repo": "nixpkgs.lib",
-        "rev": "0e79af5e3d4dcfcd676ab5ba3f95d2e3352e078c",
+        "rev": "596e2e3940e09b2abbeb03f75fa1828c57fcd72c",
         "type": "github"
       },
       "original": {
@@ -583,6 +623,21 @@
       }
     },
     "nixpkgs-lib_5": {
+      "locked": {
+        "lastModified": 1788057806,
+        "narHash": "sha256-DTQSMxzDWmT0zhguthvegnVkn7CFqGCv4IHCzk5ZUpM=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "596e2e3940e09b2abbeb03f75fa1828c57fcd72c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib_6": {
       "locked": {
         "lastModified": 1769909678,
         "narHash": "sha256-cBEymOf4/o3FD5AZnzC3J9hLbiZ+QDT/KDuyHXVJOpM=",
@@ -716,6 +771,7 @@
         "llama-cpp": "llama-cpp",
         "llama-cpp-rdna": "llama-cpp-rdna",
         "llama-cpp-uma": "llama-cpp-uma",
+        "llama-cpp-unsloth": "llama-cpp-unsloth",
         "nixos-hardware": "nixos-hardware_2",
         "nixos-utils": "nixos-utils",
         "nixpkgs": "nixpkgs_3",
@@ -774,7 +830,7 @@
         "base16-helix": "base16-helix",
         "base16-vim": "base16-vim",
         "firefox-gnome-theme": "firefox-gnome-theme",
-        "flake-parts": "flake-parts_5",
+        "flake-parts": "flake-parts_6",
         "gnome-shell": "gnome-shell",
         "nixpkgs": [
           "nixpkgs"
@@ -898,7 +954,7 @@
     "zed": {
       "inputs": {
         "crane": "crane_2",
-        "flake-parts": "flake-parts_6",
+        "flake-parts": "flake-parts_7",
         "nixpkgs": "nixpkgs_4",
         "rust-overlay": "rust-overlay"
       },

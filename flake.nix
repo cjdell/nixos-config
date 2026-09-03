@@ -57,6 +57,23 @@
       url = "github:ggml-org/llama.cpp";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Unsloth's llama.cpp fork for Qwen3.8-Flash-Next MTP. IMPORTANT: the
+    # release tag b10715-mix-86bd2d3 (github.com/unslothai/llama.cpp/releases)
+    # tracks the fork's MASTER tree, which does NOT contain the qwen4exp
+    # architecture at all ("unknown model architecture: 'qwen4exp'" when built
+    # from source — its qwen4exp "follow up fixes" cherry-picks landed without
+    # the base support). The usable source revision is the fork's open PR #144
+    # "MTP for Qwen3.8-Flash-Next" head branch `mtp/qwen4exp-nextn`, commit
+    # b76199698c86… (the HF model card's Option 3: `git fetch origin
+    # pull/144/head:mtp`) — based on upstream 2026-08-31 (662a0b012) with the
+    # qwen4exp base + NextN/MTP draft head + cross-model tensor borrowing.
+    # This is the MTP code that is also on its way to mainline as ggml-org
+    # llama.cpp PR #27836/#28243 (still open upstream, hence the fork).
+    # Only the r9700-flash router uses this build.
+    llama-cpp-unsloth = {
+      url = "github:unslothai/llama.cpp/b76199698c863e09b066ed2b7327fd4045d7c353";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # stew675's RDNA performance fork (HIP/CUDA backend only): RDNA4 WMMA
     # flash-attn, gfx1201 mmvq decode, fused MoE/SSM kernels, adaptive MTP.
     # Previously used for the R9700 router (hosts/zen3-nixos/ai/llama-swap.nix);
@@ -100,6 +117,7 @@
       stylix,
       llama-cpp,
       llama-cpp-rdna,
+      llama-cpp-unsloth,
       llama-cpp-uma,
       disko,
       disko-zfs,
@@ -196,6 +214,16 @@
         })
       ) llama-cpp.packages.${system};
 
+      # Same test-off wrapper for the unsloth fork (see llamaCppPkgs).
+      # Exposed via specialArgs as llamaCppUnslothPkgs and consumed only by
+      # hosts/zen3-nixos/ai/llama-swap.nix (llamaCmdR9700Flash / r9700 router).
+      llamaCppUnslothPkgs = builtins.mapAttrs (
+        _: pkg:
+        pkg.overrideAttrs (old: {
+          cmakeFlags = old.cmakeFlags ++ [ "-DLLAMA_BUILD_TESTS=OFF" ];
+        })
+      ) llama-cpp-unsloth.packages.${system};
+
       # Which nixpkgs each host runs on: hosts listed here opt into unstable,
       # everything else uses the stable `nixpkgs` input.
       nixpkgsFor = host: if host == "alderlake-thinkpad" then nixpkgs-unstable else nixpkgs;
@@ -245,6 +273,7 @@
           specialArgs = {
             inherit inputs;
             inherit llamaCppPkgs;
+            inherit llamaCppUnslothPkgs;
           };
         };
     in
