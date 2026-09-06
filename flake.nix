@@ -115,7 +115,7 @@
       # the 0.8.2 that zed pins lacks). The flake package builds against zed's
       # own pinned nixpkgs and is a single derivation shared by every host.
       zed-editor-overlay = _final: _prev: {
-        zed-editor = zed.packages.${system}.default;
+        # zed-editor = zed.packages.${system}.default;
       };
 
       # ddcci-driver (out-of-tree DDC/CI module) fails to compile against Linux
