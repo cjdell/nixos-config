@@ -200,11 +200,11 @@
         "nixpkgs-lib": "nixpkgs-lib_3"
       },
       "locked": {
-        "lastModified": 1785627969,
-        "narHash": "sha256-4dtXQk/NMePegK/nWp5NSeuZKLATItOq61lpEvmXqGw=",
+        "lastModified": 1788450739,
+        "narHash": "sha256-glZLQlzIn1fXH6PazR2iUmTo7kzzyYSshrWhLS9TqCU=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "427bf4bd9435fdf21321c8cc628c24efc14c0f7a",
+        "rev": "31729ca8cbdb4fa927b34e5f4353e6a83f39e993",
         "type": "github"
       },
       "original": {
@@ -236,11 +236,11 @@
         "nixpkgs-lib": "nixpkgs-lib_5"
       },
       "locked": {
-        "lastModified": 1788450739,
-        "narHash": "sha256-glZLQlzIn1fXH6PazR2iUmTo7kzzyYSshrWhLS9TqCU=",
+        "lastModified": 1785627969,
+        "narHash": "sha256-4dtXQk/NMePegK/nWp5NSeuZKLATItOq61lpEvmXqGw=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "31729ca8cbdb4fa927b34e5f4353e6a83f39e993",
+        "rev": "427bf4bd9435fdf21321c8cc628c24efc14c0f7a",
         "type": "github"
       },
       "original": {
@@ -419,9 +419,30 @@
         "type": "github"
       }
     },
-    "llama-cpp-rdna": {
+    "llama-cpp-mtp": {
       "inputs": {
         "flake-parts": "flake-parts_3",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788459050,
+        "narHash": "sha256-aQ77X3XJVMimuK2HSoAVeNuiUjUxqT/q7iTGHsqmfZE=",
+        "ref": "refs/heads/mtp-merge",
+        "rev": "de2ed7e945a4513b81d1bbab0eb1c785a0400793",
+        "revCount": 1768,
+        "type": "git",
+        "url": "file:///home/cjdell/Projects/llama-mtp"
+      },
+      "original": {
+        "type": "git",
+        "url": "file:///home/cjdell/Projects/llama-mtp"
+      }
+    },
+    "llama-cpp-rdna": {
+      "inputs": {
+        "flake-parts": "flake-parts_4",
         "nixpkgs": [
           "nixpkgs"
         ]
@@ -443,7 +464,7 @@
     },
     "llama-cpp-uma": {
       "inputs": {
-        "flake-parts": "flake-parts_4",
+        "flake-parts": "flake-parts_5",
         "nixpkgs": [
           "nixpkgs"
         ]
@@ -460,28 +481,6 @@
       "original": {
         "type": "git",
         "url": "file:///home/cjdell/Projects/llama.cpp"
-      }
-    },
-    "llama-cpp-unsloth": {
-      "inputs": {
-        "flake-parts": "flake-parts_5",
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1788351357,
-        "narHash": "sha256-6oYvL11DX2eazkXYAc/dicMuTmwANoDYxXpU8EqAAts=",
-        "owner": "unslothai",
-        "repo": "llama.cpp",
-        "rev": "b76199698c863e09b066ed2b7327fd4045d7c353",
-        "type": "github"
-      },
-      "original": {
-        "owner": "unslothai",
-        "repo": "llama.cpp",
-        "rev": "b76199698c863e09b066ed2b7327fd4045d7c353",
-        "type": "github"
       }
     },
     "nixos-hardware": {
@@ -594,11 +593,11 @@
     },
     "nixpkgs-lib_3": {
       "locked": {
-        "lastModified": 1785031560,
-        "narHash": "sha256-OmshNvn2vupOFpYinLUu+1Dnpu4n7Q5N3ggGVNHpkUI=",
+        "lastModified": 1788057806,
+        "narHash": "sha256-DTQSMxzDWmT0zhguthvegnVkn7CFqGCv4IHCzk5ZUpM=",
         "owner": "nix-community",
         "repo": "nixpkgs.lib",
-        "rev": "0e79af5e3d4dcfcd676ab5ba3f95d2e3352e078c",
+        "rev": "596e2e3940e09b2abbeb03f75fa1828c57fcd72c",
         "type": "github"
       },
       "original": {
@@ -624,11 +623,11 @@
     },
     "nixpkgs-lib_5": {
       "locked": {
-        "lastModified": 1788057806,
-        "narHash": "sha256-DTQSMxzDWmT0zhguthvegnVkn7CFqGCv4IHCzk5ZUpM=",
+        "lastModified": 1785031560,
+        "narHash": "sha256-OmshNvn2vupOFpYinLUu+1Dnpu4n7Q5N3ggGVNHpkUI=",
         "owner": "nix-community",
         "repo": "nixpkgs.lib",
-        "rev": "596e2e3940e09b2abbeb03f75fa1828c57fcd72c",
+        "rev": "0e79af5e3d4dcfcd676ab5ba3f95d2e3352e078c",
         "type": "github"
       },
       "original": {
@@ -769,9 +768,9 @@
         "home-manager": "home-manager",
         "home-manager-unstable": "home-manager-unstable",
         "llama-cpp": "llama-cpp",
+        "llama-cpp-mtp": "llama-cpp-mtp",
         "llama-cpp-rdna": "llama-cpp-rdna",
         "llama-cpp-uma": "llama-cpp-uma",
-        "llama-cpp-unsloth": "llama-cpp-unsloth",
         "nixos-hardware": "nixos-hardware_2",
         "nixos-utils": "nixos-utils",
         "nixpkgs": "nixpkgs_3",

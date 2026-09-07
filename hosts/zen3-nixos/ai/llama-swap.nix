@@ -46,8 +46,8 @@ in
 
     environment = {
       # All three routers run a Vulkan build of llama.cpp (llama-cpp-vulkan,
-      # except the r9700 router which uses the unsloth fork — see below). The
-      # r9700 previously ran the stew675/llama.cpp `rdna-boosts` HIP fork;
+      # except the r9700 router which uses the llama-cpp-mtp build — see below).
+      # The r9700 previously ran the stew675/llama.cpp `rdna-boosts` HIP fork;
       # its MTP speculative decoding showed no draft acceptance (spec_decode
       # counters stayed at 0 on the r9700), so it was switched to the Vulkan
       # build, where MTP works (verified 35/35 drafts accepted in the LM Studio
@@ -72,15 +72,15 @@ in
       let
         llama-cpp-vulkan = specialArgs.llamaCppPkgs.vulkan;
 
-        # Unsloth fork (llama-cpp-unsloth flake input, b10715-mix-86bd2d3) for
-        # the r9700 router. REQUIRED for Qwen3.8-Flash-Next MTP: mainline
-        # llama.cpp has no MTP graph for the qwen4exp architecture and no
-        # cross-model draft-head borrowing, so --spec-type draft-mtp on that
-        # model silently does nothing there. The fork adds both
-        # (unslothai/llama.cpp#144; upstream port is ggml-org#28243). Everything
-        # else the fork serves (the Qwen3.8-27B family, etc.) is unaffected —
-        # the fork is upstream b10715 + extras.
-        llama-cpp-unsloth-vulkan = specialArgs.llamaCppUnslothPkgs.vulkan;
+        # llama-cpp-mtp (local repo /home/cjdell/Projects/llama-mtp: upstream
+        # master + the open upstream qwen4exp-MTP PRs #27836/#28097 + a
+        # backport of unsloth #144 tensor borrowing) for the r9700 router.
+        # REQUIRED for Qwen3.8-Flash-Next MTP: mainline llama.cpp has no MTP
+        # graph for the qwen4exp architecture and no cross-model draft-head
+        # borrowing (the shared MTP head needs it), so --spec-type draft-mtp
+        # on that model silently does nothing / fails there. See the input
+        # comment in flake.nix for why not the unsloth fork release.
+        llama-cpp-mtp-vulkan = specialArgs.llamaCppMtpPkgs.vulkan;
 
         # Pin each router to its physical GPU via mesa's device-select layer
         # (VK_LAYER_MESA_device_select) instead of relying on llama.cpp's
@@ -181,12 +181,12 @@ in
           exec ${llama-cpp-vulkan}/bin/llama-server "$@"
         '';
 
-        # Same GPU-pinning wrapper as llama-r9700 but execs the unsloth fork's
-        # llama-server (llama-cpp-unsloth-vulkan) instead of upstream.
+        # Same GPU-pinning wrapper as llama-r9700 but execs the llama-cpp-mtp
+        # build's llama-server (llama-cpp-mtp-vulkan) instead of upstream.
         llama-r9700-flash = pkgs.writeShellScript "llama-r9700-flash" ''
           export XDG_DATA_DIRS=/run/opengl-driver/share
           export MESA_VK_DEVICE_SELECT=1002:7551!
-          exec ${llama-cpp-unsloth-vulkan}/bin/llama-server "$@"
+          exec ${llama-cpp-mtp-vulkan}/bin/llama-server "$@"
         '';
 
         # `--sse-ping-interval 10`: while the stream is silent (i.e. during long
@@ -195,9 +195,9 @@ in
         # invisible to SSE parsers. Default is 30 s; the pi-ai harness dies at 300 s
         # of silence, which a 100k+ token prefill exceeds.
         llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-        # r9700 router running the unsloth fork binary (see llama-r9700-flash)
+        # r9700 router running the llama-cpp-mtp build (see llama-r9700-flash)
         # so Qwen3.8-Flash-Next can use draft-mtp. -ngl all is REQUIRED: the
-        # router otherwise defaults to ngl=0 (CPU only); with the fork + the
+        # router otherwise defaults to ngl=0 (CPU only); with the build + the
         # GGML_VK_ALLOW_SYSMEM_FALLBACK service env, whatever does not fit in
         # the R9700's 32 GiB VRAM spills to GTT instead of failing to load.
         # (A previous iteration appended `-ngl -1 --moe-cache auto --flash-attn`
@@ -239,9 +239,9 @@ in
           # Qwen3.8-Flash-Next (qwen4exp arch) has NO built-in MTP module like
           # the Qwen3 models — its draft head is a SEPARATE GGUF that must be
           # passed via md= (router sidecar auto-discovery does not search the
-          # heads' directory). spec-draft-n-max 2 per the model card; a shared-
-          # head borrows the main model's embeddings/output projection, so it
-          # only works on the unsloth fork build (cross-model borrowing).
+          # heads' directory). spec-draft-n-max 2 per the model card; the
+          # shared- head borrows the main model's embeddings/output projection
+          # (cross-model tensor borrowing in the llama-cpp-mtp build).
           # MTP head: /home/cjdell/mtp-heads/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
           [Qwen3.8-Flash-Next-UD-IQ3_XXS]
           spec-type = draft-mtp
