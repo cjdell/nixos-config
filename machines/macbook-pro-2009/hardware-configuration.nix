@@ -27,21 +27,12 @@
     "usb_storage"
     "sd_mod"
   ];
-  # boot.initrd.kernelModules = [ "amdgpu" ];
+
   boot.kernelModules = [
     "kvm-intel"
     "wl"
   ];
   boot.extraModulePackages = with config.boot.kernelPackages; [ broadcom_sta ];
-
-  # boot.kernelParams = [
-  #   "radeon.cik_support=0"
-  #   "amdgpu.cik_support=1"
-  # ];
-
-  # services.xserver.videoDrivers = [ "amdgpu" ];
-
-  # services.lact.enable = true;s
 
   hardware.graphics =
     let
@@ -58,8 +49,6 @@
         pkgs.mesa.opencl
       ];
     };
-
-  # environment.sessionVariables = { LIBVA_DRIVER_NAME = "iHD"; }; # Force intel-media-driver
 
   # Load nvidia driver for Xorg and Wayland
   # services.xserver.videoDrivers = [ "nvidia" ];
@@ -105,12 +94,12 @@
   # nixpkgs.config.permittedInsecurePackages = "broadcom-sta-6.30.223.271-57-6.16.7";
 
   fileSystems."/" = {
-    device = "/dev/disk/by-label/ROOT";
+    device = "/dev/disk/by-label/root";
     fsType = "ext4";
   };
 
   fileSystems."/boot" = {
-    device = "/dev/disk/by-label/BOOT";
+    device = "/dev/disk/by-uuid/46F1-055C";
     fsType = "vfat";
     options = [
       "fmask=0077"

@@ -30,12 +30,12 @@
         networkConfig.Bridge = "br0";
       };
 
-      "22-br0" = {                                                                                                                                                              
-        matchConfig.Name = "br0";                                                                                                                                               
-        linkConfig.RequiredForOnline = "routable";                                                                                                                              
-        networkConfig.DHCP = "yes";                                                                                                                                             
-        ipv6AcceptRAConfig.DHCPv6Client = "always";                                                                                                                             
-      }; 
+      "22-br0" = {
+        matchConfig.Name = "br0";
+        linkConfig.RequiredForOnline = "routable";
+        networkConfig.DHCP = "yes";
+        ipv6AcceptRAConfig.DHCPv6Client = "always";
+      };
     };
   };
 }

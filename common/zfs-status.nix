@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.services.zfsStatus;
@@ -152,7 +157,10 @@ in
   config = lib.mkIf cfg.enable {
     systemd.services.zfs-status = {
       description = "Minimal ZFS health web status page";
-      after = [ "zfs.target" "network.target" ];
+      after = [
+        "zfs.target"
+        "network.target"
+      ];
       wants = [ "zfs.target" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {

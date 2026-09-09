@@ -175,6 +175,112 @@
             value
         ) prev;
 
+      # broadcom-sta (out-of-tree Broadcom STA wireless module) fails to
+      # compile against Linux 7.2: strncpy() calls in osl_strncpy() (and
+      # osl_debug_malloc(), under BCMDBG_MEM) plus two more in wl_linux.c hit
+      # GCC 15's implicit-function-declaration error, because modern kernels
+      # dropped strncpy from <linux/string.h> — and the kernel no longer
+      # exports the strncpy symbol either, so merely including <string.h>
+      # would compile but fail at modpost. Migrate the calls to strscpy()
+      # (sized_strscpy is exported; the original code NUL-terminates the
+      # destination itself, so the output is identical). The third
+      # strncpy() in wl_linux.c sits under #if __GNUC__ < 8 and is dead
+      # code, so it is left alone. Same linuxPackages attrset handling as
+      # ddcci-driver above; the sed patterns are no-ops (exit 0) on
+      # attrsets whose broadcom_sta predates these lines.
+      # On kernel >= 6.13 the cfg80211 key/station ops also changed shape:
+      # get_station/add_key/del_key/get_key take struct wireless_dev *wdev
+      # instead of struct net_device * (GCC 15 errors on the incompatible
+      # pointer init). A perl script (delivered via writeText so the fix
+      # stays inline — no new flake files; a bash heredoc would not work
+      # because nixfmt re-indents `''` string content, which would break
+      # the column-0 heredoc terminator) migrates the active #if-branch
+      # prototypes/definitions and adds a `dev = wdev->netdev` local at the
+      # top of each body; it dies loudly if any anchor stops matching.
+      broadcom-sta-overlay =
+        final: prev:
+        let
+          hybridFix = final.writeText "broadcom-sta-hybrid-fix.pl" ''
+            #!/usr/bin/env perl
+            # cfg80211 wdev migration for broadcom-sta (kernel >= 6.13):
+            # get_station/add_key/del_key/get_key ops now take struct wireless_dev *wdev
+            # instead of struct net_device *. Update the active #if branch signatures
+            # (prototypes + definitions) and add a local `dev` alias at the top of each
+            # body so the untouched bodies keep working.
+            use strict;
+            use warnings;
+
+            my $file = $ARGV[0] or die "usage: $0 <file>\n";
+            open my $fh, '<', $file or die "cannot read $file: $!\n";
+            my $src = do { local $/; <$fh> };
+            close $fh;
+
+            my $local = "\tstruct net_device *dev = wdev->netdev;\n";
+            my @subs = (
+              # add_key, active (>= 6.1.0) branch: prototype + definition
+              [qr/struct net_device \*dev,(\n\s*int link_id, u8 key_idx, bool pairwise, const u8 \*mac_addr, struct key_params \*params\))/,
+               sub { 'struct wireless_dev *wdev,' . $1 }],
+              # del_key, active branch: prototype + definition
+              [qr/struct net_device \*dev,(\n\s*int link_id, u8 key_idx, bool pairwise, const u8 \*mac_addr\))/,
+               sub { 'struct wireless_dev *wdev,' . $1 }],
+              # get_key, active branch definition: `void *cookie,` on the 2nd line
+              [qr/struct net_device \*dev,(\n\s*int link_id, u8 key_idx, bool pairwise, const u8 \*mac_addr, void \*cookie,)/,
+               sub { 'struct wireless_dev *wdev,' . $1 }],
+              # get_key, active branch prototype: `void *cookie,` on its own 3rd line
+              [qr/(wl_cfg80211_get_key\(struct wiphy \*wiphy, )struct net_device \*dev,(\n\s*int link_id, u8 key_idx, bool pairwise, const u8 \*mac_addr,\n\s*void \*cookie,)/,
+               sub { $1 . 'struct wireless_dev *wdev,' . $2 }],
+              # get_station, active (>= 3.16.0) definition: `const u8 *mac`
+              [qr/struct net_device \*dev,(\n\s*const u8 \*mac, struct station_info \*sinfo\))/,
+               sub { 'struct wireless_dev *wdev,' . $1 }],
+              # get_station, active prototype (single-line params, `const u8 *mac`)
+              [qr/struct net_device \*dev, const u8 \*mac, struct station_info \*sinfo\);/,
+               sub { 'struct wireless_dev *wdev, const u8 *mac, struct station_info *sinfo);' }],
+              # body-local insertions, anchored on unique text
+              [qr/(u8 key_idx, const u8 \*mac_addr, struct key_params \*params\)\n#endif\n)\{\n/,
+               sub { $1 . "{\n$local" }],
+              [qr/\{\n(\tstruct wl_wsec_key key;)/,
+               sub { "{\n$local" . $1 }],
+              [qr/\{\n(\tstruct key_params params;)/,
+               sub { "{\n$local" . $1 }],
+              [qr/(const u8 \*mac, struct station_info \*sinfo\)\n#endif\n)\{\n/,
+               sub { $1 . "{\n$local" }],
+            );
+
+            for my $s (@subs) {
+              my ($re, $fn) = @$s;
+              my $count = ($src =~ s/$re/$fn->()/ge);
+              die "no match for: $re\n" unless $count;
+              print "applied ($count)\n";
+            }
+
+            open my $out, '>', $file or die "cannot write $file: $!\n";
+            print $out $src;
+            close $out;
+            print "wrote $file\n";
+          '';
+          patchBroadcomSta =
+            pkg:
+            pkg.overrideAttrs (old: {
+              postPatch = (old.postPatch or "") + ''
+                sed -i 's/return (strncpy(d, s, n));/strscpy(d, s, n); return (d);/' src/shared/linux_osl.c
+                sed -i 's/strncpy(p->file, basename, BCM_MEM_FILENAME_LEN);/strscpy(p->file, basename, BCM_MEM_FILENAME_LEN);/' src/shared/linux_osl.c
+                sed -i 's/strncpy(dev->name, intf_name, IFNAMSIZ-1);/strscpy(dev->name, intf_name, IFNAMSIZ);/' src/wl/sys/wl_linux.c
+                sed -i 's/strncpy(info->version, EPI_VERSION_STR, sizeof(info->version));/strscpy(info->version, EPI_VERSION_STR, sizeof(info->version));/' src/wl/sys/wl_linux.c
+                perl ${hybridFix} src/wl/sys/wl_cfg80211_hybrid.c
+              '';
+            });
+        in
+        builtins.mapAttrs (
+          name: value:
+          if builtins.isAttrs value && value ? broadcom_sta then
+            if value ? extend then
+              value.extend (_: super: { broadcom_sta = patchBroadcomSta super.broadcom_sta; })
+            else
+              value // { broadcom_sta = patchBroadcomSta value.broadcom_sta; }
+          else
+            value
+        ) prev;
+
       # Build a pkgs set from a given nixpkgs input (shared package config).
       mkPkgs =
         nixpkgs:
@@ -190,6 +296,7 @@
             };
             permittedInsecurePackages = [
               "broadcom-sta-6.30.223.271-59-6.17.7"
+              "broadcom-sta-6.30.223.271-59-7.2.3"
             ];
           };
           # Bleeding-edge zed-editor (source build tracking main) instead of the
@@ -197,6 +304,7 @@
           overlays = [
             zed-editor-overlay
             ddcci-driver-overlay
+            broadcom-sta-overlay
           ];
         };
 
