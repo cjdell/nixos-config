@@ -19,6 +19,7 @@
   ./networking.nix
   ./nfs.nix
   ./postgres.nix
+  ./qbittorrent.nix
   ./samba.nix
   ./scrutiny.nix
   ./tailscale.nix
