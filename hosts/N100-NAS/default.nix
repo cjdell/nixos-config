@@ -9,6 +9,7 @@
   ../../common/sops.nix
 
   ./backup.nix
+  ./container-ui.nix
   ./containers.nix
   ./filebrowser.nix
   ./hardware-configuration.nix
