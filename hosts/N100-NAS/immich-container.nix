@@ -50,7 +50,7 @@ in
     # journalctl -u podman-immich-server -f
     immich-server = {
       hostname = "immich-server";
-      image = "ghcr.io/immich-app/immich-server:v3.0.3";
+      image = "ghcr.io/immich-app/immich-server:v3.2.1";
       autoStart = true;
       ports = [
         "2283:2283"
@@ -82,7 +82,7 @@ in
     # journalctl -u podman-immich-machine-learning -f
     immich-machine-learning = {
       hostname = "immich-machine-learning";
-      image = "ghcr.io/immich-app/immich-machine-learning:v3.0.3";
+      image = "ghcr.io/immich-app/immich-machine-learning:v3.2.1";
       autoStart = true;
       volumes = [
         "/samsung-4tb/ds-photos/immich/model-cache:/cache"
@@ -102,7 +102,7 @@ in
 
     immich-redis = {
       hostname = "immich-redis";
-      image = "docker.io/valkey/valkey:9@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9";
+      image = "docker.io/valkey/valkey:9@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf"; # digest pinned by the v3.2.1 release compose
       autoStart = true;
       extraOptions = [
         "--ip=10.88.0.52"
@@ -112,6 +112,8 @@ in
 
     immich-postgres = {
       hostname = "immich-postgres";
+      # Intentionally newer than the release pin (14-vectorchord0.4.3-pgvectors0.2.0):
+      # the data directory is PG16 and cannot run on the release's PG14 image.
       image = "ghcr.io/immich-app/postgres:16-vectorchord0.5.3-pgvector0.8.1@sha256:971d18060781e929dc3a0b72b02e3f09ba9d146d4c00b2acac81a7ae837bbde5";
       autoStart = true;
       volumes = [
