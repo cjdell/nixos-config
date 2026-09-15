@@ -69,6 +69,10 @@ sudo nixos-rebuild switch --impure --flake .
 ```
 
 - `--impure` is required (config reads the live system, e.g. UIDs).
+- **Deploy locally when you're already on the target host:** check `hostname`
+  first — if it matches the target host name (the `hosts/<name>` directory,
+  e.g. `N100-NAS`), the flake is checked out on this machine, so run the
+  rebuild here. Do not assume the repo lives only on zen3-nixos.
 - **alderlake-thinkpad builds exclusively on zen3-nixos** (`192.168.49.50`):
   `nix.distributedBuilds` + `nix.buildMachines` write `/etc/nix/machines`
   (Nix's default `builders = @/etc/nix/machines` picks it up) and
@@ -90,7 +94,8 @@ sudo nixos-rebuild switch --impure --flake .
 
 ## The live target host: `zen3-nixos`
 
-This is the machine the repo lives on (`192.168.49.50`). It runs:
+The repo lives here (`192.168.49.50`) as on other hosts (e.g. N100-NAS) — check
+`hostname` to see which machine you're on. It runs:
 
 - **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). Three
   llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai/llama-swap.nix`),
