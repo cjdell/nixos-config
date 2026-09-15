@@ -69,6 +69,17 @@ in
     { device = "/swapfile"; }
   ];
 
+  disko.zfs = {
+    enable = true;
+
+    settings = {
+      datasets = {
+        # Apple Time Machine destination, served via Samba (see samba.nix)
+        "sas-24tb/ds-backup" = { };
+      };
+    };
+  };
+
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
   hardware.cpu.intel.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;
 }

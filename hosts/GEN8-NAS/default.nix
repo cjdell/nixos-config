@@ -1,7 +1,8 @@
-{ sops-nix, ... }:
+{ sops-nix, disko-zfs, ... }:
 
 [
   sops-nix.nixosModules.sops
+  disko-zfs.nixosModules.default
 
   ../../common/nosleep.nix
   ../../common/sops.nix

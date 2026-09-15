@@ -62,17 +62,20 @@
         "force user" = "cjdell";
         "force group" = "users";
       };
-      # "Backup" = {
-      #   "path" = "/sas-24tb/ds-backup";
-      #   "browseable" = "yes";
-      #   "read only" = "no";
-      #   "guest ok" = "no";
-      #   "create mask" = "0664";
-      #   "directory mask" = "0775";
-      #   "force user" = "cjdell";
-      #   "force group" = "users";
-      #   "fruit:time machine" = "yes";
-      # };
+      "Backup" = {
+        "path" = "/sas-24tb/ds-backup";
+        "browseable" = "yes";
+        "read only" = "no";
+        "guest ok" = "no";
+        "create mask" = "0664";
+        "directory mask" = "0775";
+        "force user" = "cjdell";
+        "force group" = "users";
+        # Apple Time Machine over SMB (client must authenticate)
+        "fruit:time machine" = "yes";
+        # Uncomment to cap the size Time Machine reports/uses on this share
+        # "fruit:time machine max size" = "10T";
+      };
     };
   };
 
