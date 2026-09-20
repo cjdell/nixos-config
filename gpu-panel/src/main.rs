@@ -773,6 +773,13 @@ fn thermal_load(path: &str) -> Option<Thermal> {
     let mut t = Thermal::default();
     t.apply_json(&j);
     t.enabled = j.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    // `active` is runtime state and is not part of the saved config, so it has
+    // to be re-armed here. Without this the thermal thread's
+    // `if !enabled || !active { continue }` guard skips forever after every
+    // restart: the panel reports the loop as armed, `/api/thermal` keeps
+    // `enabled: true, active: false, writes: 0`, and the fan stays on the
+    // firmware default (the shutdown path already reset the OD curve).
+    t.active = t.enabled;
     Some(t)
 }
 
@@ -1677,7 +1684,11 @@ fn main() {
     let history_cap = ((history_secs * 1000) / interval_ms.max(1)) as usize;
     let thermal = thermal_load(&state_path).unwrap_or_default();
     if thermal.enabled {
-        log("restoring armed PID thermal controller from saved state");
+        log(&format!(
+            "restoring armed PID thermal controller from saved state (target {} C on {} temp)",
+            fnum(thermal.target),
+            thermal.source
+        ));
     }
 
     let handler = on_signal as *const () as usize;

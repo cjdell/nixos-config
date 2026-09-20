@@ -76,7 +76,11 @@ Set a target (“max”) temperature; the loop adjusts fan duty to hold it.
 - **Control handoff**: arming disables LACT fan control; stopping (or
   SIGTERM/SIGINT) writes `r` to `fan_curve`, returning the fan to PMFW.
 - Armed state + settings persist to `--state` (`/var/lib/gpu-panel/thermal.json`)
-  and are re-applied on restart.
+  and are re-applied on restart. The saved file holds the *configuration* only
+  (`enabled`, target, source, gains, `duty_min`/`duty_max`, `interval_ms`); the
+  runtime flags (`active`, integral, last write) are rebuilt on load, and
+  `active` is re-armed from `enabled` so an armed loop really resumes rather
+  than sitting in the `enabled && !active` "starting…" state forever.
 
 ### Gotchas
 
