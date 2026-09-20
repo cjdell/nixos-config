@@ -1,0 +1,11 @@
+[package]
+name = "gpu-panel"
+version = "0.1.0"
+edition = "2021"
+description = "GPU telemetry + control web panel (native sysfs reads, LACT daemon for clock/power/fan writes)"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

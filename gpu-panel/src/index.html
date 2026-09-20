@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpu-panel — R9700</title>
+<link rel="icon" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>gpu<span>-panel</span></h1>
+  <span class="badge" id="lact">daemon: …</span>
+  <span class="badge" id="stream">stream: …</span>
+  <span class="spacer"></span>
+  <span id="updated">–</span>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<div class="layout">
+  <section>
+    <div class="legend">
+      <span><i style="background:#38bdf8"></i>power</span>
+      <span><i style="background:#f87171"></i>temperature</span>
+      <span><i style="background:#a78bfa"></i>clocks</span>
+      <span><i style="background:#4ade80"></i>utilisation / fan</span>
+    </div>
+    <div class="charts" id="charts"></div>
+  </section>
+
+  <aside>
+    <div class="card" id="pidCard">
+      <h2>PID thermal loop <span class="hint" id="pidState">off</span></h2>
+      <div class="body">
+        <div class="hint">Closed-loop fan control: the panel watches the selected
+          sensor and drives fan duty to hold <b>target temperature</b>, overwriting
+          LACT's fan control while armed.</div>
+        <div class="row"><label>target / max temp</label><span class="val" id="pidTargetVal">–</span></div>
+        <input type="range" id="pidTarget" min="25" max="100" step="1" value="85">
+        <div class="row">
+          <label for="pidSource">feedback sensor</label>
+          <select id="pidSource">
+            <option value="edge">edge</option>
+            <option value="junction">hotspot</option>
+            <option value="mem">memory</option>
+          </select>
+        </div>
+        <div class="row"><label>P (kp)</label><input type="number" id="pidKp" step="0.5" min="0" max="50"></div>
+        <div class="row"><label>I (ki)</label><input type="number" id="pidKi" step="0.1" min="0" max="10"></div>
+        <div class="row"><label>D (kd)</label><input type="number" id="pidKd" step="0.5" min="0" max="50"></div>
+        <div class="row"><label>min duty %</label><input type="number" id="pidMinDuty" step="1" min="0" max="100"></div>
+        <div class="row"><label>update ms</label><input type="number" id="pidInterval" step="50" min="250" max="10000"></div>
+        <div class="live" id="pidLive">
+          <div><span>measured</span><b id="pidMeasured">–</b></div>
+          <div><span>error</span><b id="pidError">–</b></div>
+          <div><span>duty</span><b id="pidDuty">–</b></div>
+          <div><span>curve centre</span><b id="pidCenter">–</b></div>
+          <div><span>writes</span><b id="pidWrites">–</b></div>
+        </div>
+        <button class="primary wide" id="pidArm">Arm PID loop</button>
+        <button class="wide" id="pidStop">Stop (return fan to firmware)</button>
+      </div>
+    </div>
+
+    <div class="card" id="fanCard">
+      <h2>Fan (LACT) <span class="hint" id="fanState"></span></h2>
+      <div class="body" id="fanCardBody">
+        <div class="row">
+          <label for="fanEnabled">managed by panel</label>
+          <input type="checkbox" id="fanEnabled">
+        </div>
+        <div class="seg" id="fanMode">
+          <button data-mode="curve">curve</button>
+          <button data-mode="static">static</button>
+        </div>
+        <div id="staticWrap" class="hidden">
+          <div class="row"><label>static speed</label><span class="val" id="staticVal">100%</span></div>
+          <input type="range" id="staticSpeed" min="0" max="100" step="1" value="100">
+        </div>
+        <div id="curveWrap">
+          <div class="row"><label>curve (temp → speed)</label><span class="hint">5 points</span></div>
+          <div class="curve" id="curve"></div>
+        </div>
+        <div class="row"><label>target temp °C</label><input type="number" id="targetTemperature"></div>
+        <div class="row"><label>min pwm %</label><input type="number" id="minimumPwm"></div>
+        <div class="row"><label>acoustic target rpm</label><input type="number" id="acousticTarget"></div>
+        <div class="row"><label>acoustic limit rpm</label><input type="number" id="acousticLimit"></div>
+        <button class="primary wide" id="applyFan">Apply fan</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Power</h2>
+      <div class="body">
+        <div class="row"><label>power cap</label><span class="val" id="capVal">–</span></div>
+        <input type="range" id="powerCap" min="0" max="100" step="1">
+        <div class="row"><label>range</label><span class="hint" id="capRange">–</span></div>
+        <div class="row"><label for="resetCap">reset to default</label><input type="checkbox" id="resetCap"></div>
+        <button class="primary wide" id="applyPower">Apply power cap</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Performance</h2>
+      <div class="body">
+        <div class="row">
+          <label for="perfLevel">level</label>
+          <select id="perfLevel">
+            <option value="auto">auto</option>
+            <option value="low">low</option>
+            <option value="high">high</option>
+            <option value="manual">manual</option>
+          </select>
+        </div>
+        <button class="primary wide" id="applyPerf">Apply level</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Clocks &amp; voltage</h2>
+      <div class="body">
+        <div class="row"><label>GPU clock offset</label><span class="val" id="sclkVal">–</span></div>
+        <input type="range" id="sclkOffset" min="0" max="100" step="1">
+        <div class="row"><label>voltage offset</label><span class="val" id="voltVal">–</span></div>
+        <input type="range" id="voltOffset" min="0" max="100" step="1">
+        <div class="row"><label>VRAM min MHz</label><input type="number" id="mclkMin"></div>
+        <div class="row"><label>VRAM max MHz</label><input type="number" id="mclkMax"></div>
+        <div class="hint" id="clkHint"></div>
+        <button class="primary wide" id="applyClocks">Apply clocks</button>
+        <button class="danger wide" id="resetClocks">Reset clocks to defaults</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Safety</h2>
+      <div class="body">
+        <div class="hint">LACT reverts any unconfirmed change after ~5 s. “Apply” buttons commit
+          immediately; use this if something lands badly.</div>
+        <button class="wide" id="revert">Revert unconfirmed change</button>
+        <div class="msg" id="msg"></div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

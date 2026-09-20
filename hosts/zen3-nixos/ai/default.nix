@@ -11,6 +11,7 @@
 #   recallium.nix       - Recallium container + recallium./recallium-mcp.
 #   diamcp.nix          - diamcp container + mcp. subdomain
 #   alexandria.nix      - Alexandria audiobook container (ROCm on the R9700, port 4200) + alexandria. subdomain
+#   gpu-panel.nix       - GPU telemetry/overdrive/PID-fan web panel + gpu. subdomain
 #
 # The public TLS cert + the wildcard fallback vhost live in ../tls.nix;
 # the subdomain vhosts use `useACMEHost = "ai.chrisdell.info"` to serve that
@@ -20,6 +21,7 @@
   imports = [
     # ./alexandria.nix
     # ./diamcp.nix
+    ./gpu-panel.nix
     # ./llama-log-viewer.nix
     ./llama-swap.nix
     # ./ollama-bridge.nix
