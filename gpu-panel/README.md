@@ -48,17 +48,29 @@ browser ──HTTP/SSE──> gpu-panel ──read──> /sys/bus/pci/devices/<
 Set a target (“max”) temperature; the loop adjusts fan duty to hold it.
 
 - **Feedback source** is selectable: `edge`, `junction` (hotspot) or `mem`.
+  **`junction` is the default and the only sensor the loop can truly
+  regulate**: the SMU evaluates the overdrive curve against the hotspot, and
+  under load the hotspot runs ~25–30 °C hotter than `edge` (and ~10 °C hotter
+  than `mem`). Regulating `edge` means the loop sees “3 °C below target” and
+  holds minimum duty while the junction climbs to 100 °C+.
+- **Hotspot safety floor**: independently of the selected sensor the duty is
+  max-selected against a ramp from `duty_min` at 90 °C to `duty_max` at
+  100 °C, so a cool `edge`/`mem` reading can never starve the fan while the
+  junction is near its limit. The guard can only add duty, never remove it.
 - **Output**: a 5-point SMU overdrive curve, not a flat duty. The curve is
   centred at `target + (hotspot − source)` (the firmware evaluates the curve
   against the *hotspot* sensor) with `duty` at the centre, less below it, and
-  a ramp to 100% above it. So the PID has authority near the setpoint while
-  the firmware keeps a proportional response of its own — if this process
-  dies with the fan low, the GPU still cools itself as temperature rises.
+  a ramp to 100% above it. The two anchors above the centre are spread over
+  the remaining range up to the 100 °C axis end so they cannot collapse onto
+  each other. So the PID has authority near the setpoint while the firmware
+  keeps a proportional response of its own — if this process dies with the fan
+  low, the GPU still cools itself as temperature rises.
 - **Gains**: `kp` (%/°C), `ki` (%/°C·s, clamped anti-windup), `kd` (%/°C/s,
-  derivative on measurement). Defaults `4 / 0.4 / 1.5`.
-- **Safety**: `measured ≥ 100 °C` forces full duty; `duty_min` defaults to the
-  firmware's minimum PWM (~25%); a rising curve is always written, never a
-  flat one.
+  derivative on measurement). Defaults `4 / 0.4 / 1.5`. The integral term is
+  capped at the output span, so a saturated loop unwinds in seconds.
+- **Safety**: `measured ≥ 100 °C` **or `hotspot ≥ 100 °C`** forces full duty;
+  `duty_min` defaults to the firmware's minimum PWM (~25%); a rising curve is
+  always written, never a flat one.
 - **Change detection**: the curve is only rewritten when duty moves ≥1% or the
   centre ≥0.5 °C, so a settled loop stops touching the SMU.
 - **Control handoff**: arming disables LACT fan control; stopping (or

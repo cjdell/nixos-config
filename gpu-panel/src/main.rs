@@ -513,8 +513,13 @@ fn fan_source_temp(p: &Paths, source: &str) -> f64 {
 /// the caller passes `target + (hotspot - source)`): `duty` at the centre,
 /// lower below it, and a firmware ramp to 100% above it.
 fn build_pid_curve(center_hotspot: f64, duty: f64, duty_min: f64) -> Vec<(i32, f64)> {
-    let t = center_hotspot.clamp(25.0, 95.0);
-    let candidates = [t - 20.0, t - 10.0, t, t + 5.0, t + 15.0];
+    let t = center_hotspot.clamp(25.0, 100.0);
+    // Spread the two anchors above the centre over the remaining range up to
+    // the SMU curve's 100 C x-axis end. Fixed `t+5`/`t+15` offsets collapse
+    // onto each other once the centre passes ~85 C, and duplicate anchor
+    // temperatures make the upper ramp unreachable for the firmware.
+    let room = (100.0 - t).max(0.0);
+    let candidates = [t - 20.0, t - 10.0, t, t + room * 0.5, 100.0];
     let mut temps: Vec<i32> = Vec::with_capacity(5);
     for c in candidates {
         let mut v = c.clamp(25.0, 100.0);
@@ -529,7 +534,7 @@ fn build_pid_curve(center_hotspot: f64, duty: f64, duty_min: f64) -> Vec<(i32, f
         duty - 20.0,
         duty - 8.0,
         duty,
-        (duty + 10.0).max(70.0),
+        duty + (100.0 - duty) * 0.5,
         100.0,
     ];
     // Clamp into [duty_min, 100] and force non-decreasing.
@@ -583,7 +588,11 @@ impl Default for Thermal {
         Thermal {
             enabled: false,
             target: 85.0,
-            source: "edge".into(),
+            // `junction` (hotspot) is both the sensor the SMU evaluates the
+            // overdrive curve against and the one that actually limits the
+            // card. Regulating `edge` instead lets the hotspot run ~25-30 C
+            // hotter than the setpoint (see hotspot_floor below).
+            source: "junction".into(),
             kp: 4.0,
             ki: 0.4,
             kd: 1.5,
@@ -678,8 +687,26 @@ impl Thermal {
         self.reset_loop();
     }
 
+    /// Hotspot safety floor, applied independently of the regulated sensor.
+    ///
+    /// Under load the hotspot runs ~25-30 C hotter than `edge` (and ~10 C
+    /// hotter than `mem`), so a loop regulating one of those sensors can sit
+    /// at minimum duty while the junction approaches its limit -- the firmware
+    /// ramp inside the written curve is then the only thing cooling the card.
+    /// This floor ramps duty from `duty_min` at 90 C to `duty_max` at 100 C, so
+    /// the junction is protected no matter which feedback sensor is selected.
+    fn hotspot_floor(&self, hotspot: f64) -> f64 {
+        const KNEE: f64 = 90.0;
+        const TRIP: f64 = 100.0;
+        if !hotspot.is_finite() || hotspot <= KNEE {
+            return self.duty_min;
+        }
+        let frac = ((hotspot - KNEE) / (TRIP - KNEE)).clamp(0.0, 1.0);
+        self.duty_min + frac * (self.duty_max - self.duty_min)
+    }
+
     /// One PID step. Returns the new duty cycle (%).
-    fn step(&mut self, measured: f64, now: i64) -> f64 {
+    fn step(&mut self, measured: f64, hotspot: f64, now: i64) -> f64 {
         let dt = if self.last_t_ms == 0 {
             1.0
         } else {
@@ -692,12 +719,25 @@ impl Thermal {
             None => 0.0,
         };
         self.last_meas = Some(measured);
-        self.integral = (self.integral + err * dt).clamp(-300.0, 300.0);
+        // Anti-windup: cap the integral term at the output span (the old fixed
+        // +/-300 C*s let `ki * integral` reach +/-120 %, so a railed loop took
+        // minutes to unwind once the error changed sign).
+        let i_limit = if self.ki > 0.0 {
+            (self.duty_max - self.duty_min) / self.ki
+        } else {
+            0.0
+        };
+        self.integral = (self.integral + err * dt).clamp(-i_limit, i_limit);
         let mut out = self.kp * err + self.ki * self.integral + self.kd * dmeas;
         // Hard safety: well above the setpoint -> full speed regardless.
-        if measured >= 100.0 {
+        // Checked on the hotspot too, since that is what the curve is graded
+        // against and `measured` may be a much cooler sensor.
+        if measured >= 100.0 || hotspot >= 100.0 {
             out = 100.0;
         }
+        // Max-select: whichever of the PID or the hotspot guard wants more fan
+        // wins, so the guard can only ever add duty, never remove it.
+        out = out.max(self.hotspot_floor(hotspot));
         let clamped = out.clamp(self.duty_min, self.duty_max.min(100.0));
         self.measured = measured;
         self.error = err;
@@ -1743,15 +1783,15 @@ fn main() {
                 let temp = fan_source_temp(&paths, &source);
                 // Firmware curve x-axis is hotspot; shift the centre so the
                 // ramp lines up with the regulated sensor. Cap the shift so the
-                // centre anchor stays representable (<=95 C) and the PID duty is
+                // centre anchor stays representable (<=100 C) and the PID duty is
                 // exactly delivered at hotspot == centre.
                 let hotspot = temp_by_label(&paths, "junction");
                 let now = now_ms();
                 let (curve, duty, center, changed) = {
                     let mut th = sh.thermal.lock().unwrap();
-                    let duty = th.step(temp, now);
+                    let duty = th.step(temp, hotspot, now);
                     th.last_update_ms = now;
-                    let offset = (hotspot - temp).clamp(0.0, (95.0 - th.target).max(0.0));
+                    let offset = (hotspot - temp).clamp(0.0, (100.0 - th.target).max(0.0));
                     th.center = th.target + offset;
                     // Only touch the firmware when the command actually moves;
                     // a 1 Hz rewrite of an unchanged curve is pointless churn.
