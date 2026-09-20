@@ -1248,12 +1248,14 @@ fn set_perf_level(p: &Paths, level: &str) -> Result<(), String> {
 }
 
 /// Curves are compared at ~1% speed resolution for change detection; rewriting
-/// an unchanged curve at 1 Hz would be pointless SMU churn.
+/// an unchanged curve at 1 Hz would be pointless SMU churn. Speeds are
+/// fractions (0..1), so 1% is 0.01 -- a tolerance of 1.0 would treat every
+/// curve as unchanged and freeze the fan on whatever was written first.
 fn curve_eq(a: &[(i32, f64)], b: &[(i32, f64)]) -> bool {
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
-            .all(|((ta, sa), (tb, sb))| ta == tb && (sa - sb).abs() < 1.0)
+            .all(|((ta, sa), (tb, sb))| ta == tb && (sa - sb).abs() < 0.01)
 }
 
 // ---------------------------------------------------------------------------
