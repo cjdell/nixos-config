@@ -261,9 +261,9 @@ function buildCurve() {
 
 function applyControl(c) {
   ctl = c;
-  $("lact").textContent = c.ok ? "daemon: connected" : "daemon: unreachable";
-  $("lact").className = "badge " + (c.ok ? "ok" : "err");
-  $("lact").title = c.error || "";
+  $("hw").textContent = c.ok ? "hardware: ready" : "hardware: unavailable";
+  $("hw").className = "badge " + (c.ok ? "ok" : "err");
+  $("hw").title = c.error || "";
   if (!c.ok) return;
 
   // fan
@@ -372,7 +372,7 @@ $("applyClocks").addEventListener("click", () => {
 });
 
 $("resetClocks").addEventListener("click", () => apply("api/clocks", { reset: true }, "clocks reset"));
-$("revert").addEventListener("click", () => apply("api/revert", {}, "revert"));
+$("reset").addEventListener("click", () => apply("api/reset", {}, "full reset"));
 
 // ---------------------------------------------------------------------------
 // PID thermal controller

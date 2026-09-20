@@ -2,7 +2,7 @@
 name = "gpu-panel"
 version = "0.1.0"
 edition = "2021"
-description = "GPU telemetry + control web panel (native sysfs reads, LACT daemon for clock/power/fan writes)"
+description = "GPU telemetry + control web panel (native sysfs reads and writes, no daemon)"
 
 [dependencies]
 

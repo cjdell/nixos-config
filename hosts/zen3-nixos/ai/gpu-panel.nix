@@ -8,15 +8,14 @@
 # gpu-panel: native GPU telemetry + overdrive control web UI for the R9700.
 #
 # Telemetry (temps, fan, power, clocks, utilisation, VRAM) is read straight
-# from sysfs by the Rust service; control writes (fan curve / power cap /
-# clocks / voltage / performance level) are sent to the LACT daemon over its
-# unix socket, which owns the SMU plumbing and the unconfirmed-change
-# auto-revert timer.
+# from sysfs by the Rust service, and every control write (fan curve / power
+# cap / clocks / voltage / performance level) goes to the same sysfs
+# interfaces -- there is no daemon in between and no second writer.
 #
-# The PID thermal loop is different: when armed it takes the fan away from
-# LACT and writes the SMU overdrive fan curve directly (gpu_od/fan_ctrl),
-# updating every `interval_ms`. It releases control back to the firmware on
-# stop or shutdown.
+# The PID thermal loop writes the SMU overdrive fan curve directly
+# (gpu_od/fan_ctrl) every `interval_ms` while armed, taking the fan away from
+# the configured curve. It releases control back to the firmware on stop or
+# shutdown, so a crash cannot leave the GPU with a stale curve.
 #
 # nginx: owns the /gpu locations on the IP vhost plus the public
 # gpu.ai.chrisdell.info subdomain. The panel is unauthenticated, like the
@@ -53,22 +52,22 @@ let
 in
 {
   systemd.tmpfiles.rules = [
-    # Persisted PID controller settings (armed state, target, gains).
+    # Persisted panel settings: PID arm state/target/gains plus the fan,
+    # power-cap, performance-level and clock overrides.
     "d /var/lib/gpu-panel 0755 root root - -"
   ];
 
   systemd.services.gpu-panel = {
     description = "GPU panel - telemetry + overdrive control web UI (R9700)";
-    after = [ "lact.service" "network.target" ];
-    wants = [ "lact.service" ];
+    after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
 
     serviceConfig = {
-      ExecStart = "${gpu-panel}/bin/gpu-panel --listen 127.0.0.1:8087 --pci 0000:03:00.0 --state /var/lib/gpu-panel/thermal.json";
+      ExecStart = "${gpu-panel}/bin/gpu-panel --listen 127.0.0.1:8087 --pci 0000:03:00.0 --state /var/lib/gpu-panel/settings.json";
       Restart = "always";
       RestartSec = 5;
-      # Runs as root: sysfs gpu_od fan-curve writes and the LACT socket
-      # (root:wheel, 0660) both need it.
+      # Runs as root: the gpu_od fan-curve, power-cap and pp_od_clk_voltage
+      # writes all need it.
       TimeoutStopSec = 20;
     };
   };
