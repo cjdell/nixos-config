@@ -50,7 +50,7 @@ in
     # journalctl -u podman-immich-server -f
     immich-server = {
       hostname = "immich-server";
-      image = "ghcr.io/immich-app/immich-server:v3.2.1";
+      image = "ghcr.io/immich-app/immich-server:v3.2.2";
       autoStart = true;
       ports = [
         "2283:2283"
@@ -82,7 +82,7 @@ in
     # journalctl -u podman-immich-machine-learning -f
     immich-machine-learning = {
       hostname = "immich-machine-learning";
-      image = "ghcr.io/immich-app/immich-machine-learning:v3.2.1";
+      image = "ghcr.io/immich-app/immich-machine-learning:v3.2.2";
       autoStart = true;
       volumes = [
         "/samsung-4tb/ds-photos/immich/model-cache:/cache"
