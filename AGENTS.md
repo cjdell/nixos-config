@@ -26,11 +26,12 @@ Formatting: `./format.sh` runs `nixfmt` over all `.nix` files.
 ## Critical: auto-rollback + `nixos-confirm` (READ THIS FIRST)
 
 `system.autoRollback.enable = true` is set on **N100-NAS**
-(`hosts/N100-NAS/default.nix`). It is currently **commented out (disabled) on
-zen3-nixos** (`hosts/zen3-nixos/default.nix` — no `auto-rollback.*` units on
-this live system; re-enable the line to bring the guard back). The module
-comes from the `nixos-utils` flake input (`github:cjdell/nixos-utils`, module
-`nixos-utils.nixosModules.rollback`).
+(`hosts/N100-NAS/default.nix`) and **grafton-router**
+(`hosts/grafton-router/configuration.nix`). It is currently **commented out
+(disabled) on zen3-nixos** (`hosts/zen3-nixos/default.nix` — no
+`auto-rollback.*` units on this live system; re-enable the line to bring the
+guard back). The module comes from the `nixos-utils` flake input
+(`github:cjdell/nixos-utils`, module `nixos-utils.nixosModules.rollback`).
 
 How it works:
 
