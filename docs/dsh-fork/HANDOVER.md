@@ -2,6 +2,16 @@
 
 **Status: DONE — built and deployed on grafton-router 2026-09-21. Service live.**
 
+> **Superseded later on 2026-09-21 (2):** the legacy `dsh-web` wrapper
+> (`common/dsh-web.nix` + `common/dsh-web.sh` + `common/dsh-web-proxy.mjs`) was
+> deleted. It drove `npx @deepseek-ai/dsh web` on the same port 3080 the service
+> uses, so whenever both were up they killed each other with `EADDRINUSE` (the
+> service logged four failed restarts before settling). Browser sign-in is now
+> `dsh-web-url` — it prints the live token URL (`--open` opens it) — and the
+> session cookie lives `services.dshWebHarness.cookieMaxAgeDays` (default 3650
+> days, upstream 30), so the plain `http://<host>:3080/` is the bookmark after one
+> token visit per browser. See “Using the GUI (signing in)” in `README.md`.
+
 > **Superseded later on 2026-09-21:** the offline/vendored-`node_modules` design
 > described below was replaced by a pure `fetchPnpmDeps` build in the fork's
 > flake (commit `df9c99e58a`). The fork no longer needs a local checkout and
@@ -143,9 +153,9 @@ Copy, or use a minimal manifest dir. (This is how the corruption happened.)
 - **8 GiB swapfile created and swapon'd** (`/swapfile`, also persisted via `swapDevices` above).
   The router had 15.7 GiB RAM, ~3 GiB available, **no swap** — the tsc/vite build phases
   (host tsc self-caps at 4 GiB) needed the cushion.
-- Nothing listening on 3080/30800 yet. The old npx-based `dsh-web` wrapper
-  (`common/dsh-web.nix`) is still a systemPackage on the router; the 30800 proxy design is
-  superseded by this service.
+- Nothing was listening on 3080/30800 at handover time. The old npx-based `dsh-web`
+  wrapper (`common/dsh-web.nix`) was still a systemPackage on the router then; it and the
+  30800 proxy have since been deleted (see the note at the top).
 - Router: 4 cores, no build machines (local builds), nix 2.34.7, ~68 G free on `/`.
 
 ## Proven facts (so you don't re-derive them)

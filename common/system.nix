@@ -2,11 +2,8 @@
 
 {
   imports = [
-    # dsh-web start/stop/status wrapper for the DeepSeek Harness web server
-    # (see common/dsh-web.nix).
-    ./dsh-web.nix
-    # The forked DeepSeek Harness Web GUI as an always-on LAN service — no
-    # proxy, declared authorities are the operator's own surface (see
+    # The forked DeepSeek Harness Web GUI as an always-on LAN service —
+    # declared authorities are the operator's own surface (see
     # common/dsh-web-service.nix and docs/dsh-fork/). Off by default; enable
     # services.dshWebHarness on the host that should serve it.
     ./dsh-web-service.nix

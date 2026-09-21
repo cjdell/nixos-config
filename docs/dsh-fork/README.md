@@ -1,7 +1,8 @@
 # DeepSeek Harness fork: declared authorities are the operator's own surface
 
-Why this exists: `http://192.168.49.1:30800/` (the `dsh-web proxy` → `dsh web` GUI on
-grafton-router) loads and chats, but **Settings → Models** dies with
+Why this exists: the retired `dsh-web proxy` → `dsh web` GUI on grafton-router
+(`http://192.168.49.1:30800/`; that proxy and its wrapper are gone — this service
+replaced them) loaded and chatted, but **Settings → Models** died with
 
 ```
 Loading the provider directory failed: settings are unavailable in this browser
@@ -27,13 +28,15 @@ treat it as the operator's own machine because it was not on the loopback interf
 Upstream documents this as a limitation ("Non-loopback pages get no durable settings")
 and blocks the direct fix at the CLI: `--host 0.0.0.0` is rejected outright.
 
-Verify the fence/wire side yourself (both must be `401`, i.e. trusted but
-unauthenticated — the proxy rewrites `Host` to `127.0.0.1:3080`, which is why the
-proxy works today):
+Verify the fence/wire side yourself. Against a service serving a declared
+authority (loopback counts as declared), a trusted but unauthenticated request
+must be `401`, and an undeclared authority must be `403` — no Host rewriting
+involved since the fork:
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Host: 127.0.0.1:3080' -d '{}' http://127.0.0.1:3080/api/
-curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Host: 192.168.49.1:30800' -H 'Origin: http://192.168.49.1:30800' -d '{}' http://127.0.0.1:3080/api/  # 403: untrusted without the rewrite
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Host: 127.0.0.1:3080' -d '{}' http://127.0.0.1:3080/api/            # 401: trusted, unauthenticated
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Host: 192.168.49.1:3080' -d '{}' http://127.0.0.1:3080/api/          # 401: declared authority
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Host: 192.168.49.50:3080' -d '{}' http://127.0.0.1:3080/api/         # 403: undeclared
 ```
 
 ## The change
@@ -110,6 +113,33 @@ After editing the fork, commit it, push the branch
 `pnpmDeps` hash must be regenerated whenever `pnpm-lock.yaml` (or the pnpm
 version) changes — set `hash = ""` and paste the hash from the failure.
 
+## Using the GUI (signing in)
+
+The service answers `401` on the bare URL until a browser has presented the launch
+token, which `dsh web` mints **per process** and prints only to the journal:
+
+```
+dsh web: http://127.0.0.1:3080/?token=… (LAN: http://192.168.49.50:3080/?token=…)
+```
+
+A token-carrying URL is therefore a bootstrap credential, not a bookmark.
+`dsh-web-url` (installed by `services.dshWebHarness` on the hosts that enable it)
+prints the live one, and `--open` hands it to the desktop browser:
+
+```sh
+dsh-web-url            # LAN URL of the currently running process
+dsh-web-url --local    # the loopback URL (SSH tunnel / same machine)
+dsh-web-url --open     # …and open it in the desktop browser
+```
+
+What the token mints **is** the bookmark: a `dsh-auth-…` cookie — HttpOnly,
+SameSite=Strict, bound to the authority it was issued for, and signed with a
+durable secret (`$DSH_HOME/.credentials.yaml`). `cookieMaxAgeDays` (default
+`3650` here, `30` upstream) is that cookie's lifetime, so after one token visit
+per browser the plain `http://192.168.49.50:3080/` keeps working — across service
+restarts, rebuilds and reboots. Reach for `dsh-web-url` again only for a new
+browser, a cleared cookie jar, or `--local` over a tunnel.
+
 ## Deploy (grafton-router, live)
 
 `hosts/grafton-router/dsh-harness.nix` enables the service with
@@ -121,11 +151,11 @@ sudo nixos-rebuild switch --flake .
 sudo nixos-confirm          # grafton-router has autoRollback: mandatory
 ```
 
-`systemctl status dsh-web-harness`; the journal prints
-`http://192.168.49.1:3080/?token=…`. The unit runs as `cjdell`, writes its profile
-patch layer in `preStart`, and serves on `0.0.0.0:3080`. Its `Environment`
-overrides systemd's default `PATH`, so the tools the GUI's agents invoke by name
-are listed there (`common/dsh-web-service.nix`).
+`systemctl status dsh-web-harness`; `dsh-web-url` prints the sign-in URL (the
+journal carries the same line, `http://192.168.49.1:3080/?token=…`). The unit runs
+as `cjdell`, writes its profile patch layer in `preStart`, and serves on
+`0.0.0.0:3080`. Its `Environment` overrides systemd's default `PATH`, so the tools
+the GUI's agents invoke by name are listed there (`common/dsh-web-service.nix`).
 
 **Security delta, deliberately opt-in:** a declared authority is served over plain
 HTTP on the LAN, and possession of the token URL is enough to reach remote code
@@ -144,6 +174,16 @@ SSH tunnel.
   `GET /?token=…` → GUI HTML, `http://192.168.49.1:3080/` reachable on the LAN.
 - The predicate tests and the patch's reproducibility were verified earlier (16
   cases, byte-for-byte reproduction of the upstream commit).
+- Sign-in verified on a scratch instance 2026-09-21 (before deploying the option):
+  a patch row replaces the matched row's whole `config`, so the `connection` row
+  restates `trustedHosts: !!js ctx.webRuntime.trustedHosts` — with that kept, a
+  declared authority is `401` and an undeclared one `403` (the `!!js` expression
+  still evaluates in a user patch layer), and the minted cookie carried
+  `Max-Age=315360000` (3650 days).
+- The legacy `dsh-web` wrapper (`common/dsh-web.{nix,sh}`) and its TCP proxy
+  (`common/dsh-web-proxy.mjs`) were deleted 2026-09-21: both bound port 3080, and
+  whenever both were up the service crash-looped with `EADDRINUSE: address already
+  in use 0.0.0.0:3080`. `dsh-web-url` replaces the URL-lookup half of that script.
 - The browser acceptance test — open the token URL from another LAN machine and
   confirm **Settings → Models** works — is user-side and has not been automated.
 

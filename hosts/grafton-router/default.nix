@@ -6,7 +6,6 @@
 
 [
   ../../utils/oci.nix
-  ../../common/dsh-web.nix
   ../../common/dsh-web-service.nix
 
   nixos-utils.nixosModules.rollback

@@ -10,6 +10,10 @@
 #
 # The GUI binary comes from the deepseek-harness flake input (the fork's own
 # flake builds the pnpm workspace); this module only runs it.
+#
+# To sign a browser in, run `dsh-web-url` (it prints the URL carrying the live
+# startup token; `dsh-web-url --open` opens it). After that one visit the plain
+# http://192.168.49.50:3080/ works — the cookie lasts `cookieMaxAgeDays`.
 {
   services.dshWebHarness = {
     enable = true;
