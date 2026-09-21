@@ -56,6 +56,22 @@
     gc-rust-node = {
       url = "path:/home/cjdell/Projects/gc-business/gc-rust-node";
     };
+    # The DeepSeek Harness fork (trusted-authority-surface branch) serving the
+    # forked Web GUI as a service (common/dsh-web-service.nix). Hosted input:
+    # the flake source is the git-filtered checkout on GitHub (node_modules/,
+    # .git/ and build outputs are not tracked, so the fork's `src = ./.` stays
+    # source-only — the same guarantee the old `git+file:` local input gave,
+    # without needing that local directory to exist). The fork flake pins its
+    # own nixpkgs (does NOT follow this flake's) and its derivation builds the
+    # whole pnpm workspace into one self-contained package; it still vendors
+    # node_modules from the local checkout at
+    # /home/cjdell/Projects/deepseek-harness (see the fork's flake.nix), so a
+    # machine building it needs that checkout with a `pnpm install` there.
+    # After editing/committing the fork, push the branch and refresh with:
+    #   nix flake lock --update-input deepseek-harness --impure
+    deepseek-harness = {
+      url = "github:cjdell/deepseek-harness/trusted-authority-surface";
+    };
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -141,6 +157,7 @@
       frigate-whisper,
       frigate-monitor,
       gc-rust-node,
+      deepseek-harness,
       sops-nix,
       home-manager,
       home-manager-unstable,

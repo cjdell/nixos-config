@@ -12,6 +12,16 @@
 
   system.autoRollback.enable = true;
 
+  # 8 GiB swapfile: the router has 15 GiB RAM and used to run with zero swap,
+  # so any memory spike (e.g. the deepseek-harness workspace build: pnpm +
+  # tsc + vite) risked the OOM killer taking out Frigate/HA/ClickHouse. The
+  # kernel now swaps cold pages under pressure instead. `size` (MiB) makes
+  # NixOS create the file at boot if it is missing or the wrong size.
+  swapDevices = [ {
+    device = "/swapfile";
+    size = 8192;
+  } ];
+
   # Bootloader.
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
@@ -92,6 +102,7 @@
     jq
     graphviz
     ethtool
+    just
 
     # Development
     nixfmt

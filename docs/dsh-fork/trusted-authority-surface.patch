@@ -1,0 +1,323 @@
+From c2547e0bbb1a3812c0d557e54435f312f2bfb501 Mon Sep 17 00:00:00 2001
+From: Fork <fork@localhost>
+Date: Mon, 21 Sep 2026 14:54:39 +0100
+Subject: [PATCH] Serve a declared authority as the operator's own surface
+
+A page served from a declared `trustedHosts` authority passed the /api
+fence and authenticated with the process token, but the browser still
+classified it as foreign because `isLoopback` was decided from the page
+hostname alone. Settings, credentials, and every other privileged client
+row were therefore inert on a LAN page ("settings are unavailable in this
+browser"), even though the Host had admitted it.
+
+Classify the page authority against the admitted set instead: the Host
+publishes the same `trustedHosts` it fences with, and the browser half
+accepts a page on one of them as its own Host. An all-interfaces bind now
+needs at least one declared authority, which keeps `--host 0.0.0.0`
+opt-in and explicit.
+---
+ packages/bundle/web-app/README.md             |  2 +-
+ packages/bundle/web-app/src/startup.ts        | 20 ++++++---
+ packages/bundle/web-app/tests/startup.spec.ts | 10 ++++-
+ .../client/connection/src/client/index.ts     | 16 ++++++-
+ packages/client/connection/src/index.ts       |  6 +++
+ .../connection/src/loopback-hostname.ts       | 44 +++++++++++++++++++
+ .../tests/loopback-hostname.client.spec.ts    | 28 +++++++++++-
+ packages/client/ui-settings/README.md         |  2 +-
+ 8 files changed, 115 insertions(+), 13 deletions(-)
+
+diff --git a/packages/bundle/web-app/README.md b/packages/bundle/web-app/README.md
+index d74489d..6b60095 100644
+--- a/packages/bundle/web-app/README.md
++++ b/packages/bundle/web-app/README.md
+@@ -150,7 +150,7 @@ These limits tell you what to expect in unusual setups — a source checkout, SS
+ - **Only the handoff start is observable** — the GUI reports that the browser was asked to open, not that it actually opened; a later browser exit is never reported, and the printed URL is your manual fallback.
+ - **SSH sessions keep the URL but skip the browser handoff** — the printed URL names the remote host's loopback endpoint; the SSH client or editor must expose and open the local forwarded address.
+ - **`BROWSER` overrides only come from the environment** — a discovered `.env` cannot set `BROWSER`; only an inherited value can choose the executable for the automatic handoff.
+-- **Binding all network interfaces is not supported** — `--host 0.0.0.0` is rejected at startup for safety; use the default loopback host.
++- **An all-interfaces bind needs a declared authority** — `--host 0.0.0.0` is rejected at startup unless at least one `--trusted-host` authority is named, because the bind exposes remote code execution to every network that reaches the port; the declared authorities are also the LAN pages the browser treats as the operator's own surface.
+ 
+ <a id="dev-note"></a>
+ ### Dev Note
+diff --git a/packages/bundle/web-app/src/startup.ts b/packages/bundle/web-app/src/startup.ts
+index 9faad24..745a73e 100644
+--- a/packages/bundle/web-app/src/startup.ts
++++ b/packages/bundle/web-app/src/startup.ts
+@@ -48,7 +48,7 @@ function webCommand(): Command {
+     .name('dsh --profile web')
+     .description('Serve the DeepSeek Harness browser UI.')
+     .helpOption('-h, --help', 'show this help')
+-    .option('--host <host>', 'bind host')
++    .option('--host <host>', 'bind host (0.0.0.0 needs a declared --trusted-host)')
+     .option('--no-open', 'do not open the Web UI in the default browser')
+     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
+     .option('--trusted-host <authority...>', 'extra authority the /api browser-trust fence accepts (host or host:port; repeatable)')
+@@ -57,22 +57,30 @@ Examples:
+   dsh --profile web                          serve on the composed host and port
+   dsh --profile web --no-open                serve without opening a browser
+   dsh --profile web --port 8080              serve on another port
++  dsh --profile web --host 0.0.0.0 --trusted-host 192.168.1.10
++                                             serve the LAN, naming the authority
+ `)
+ }
+ 
+ /**
+  * Parse and provide the Web invocation as an ordinary Cordis service. The
+  * command's action publishes the flags this invocation named; `--host 0.0.0.0`
+- * or a non-numeric `--port` is a usage error, so on rejection (and on `--help`)
+- * nothing is provided.
++ * without at least one declared `--trusted-host` authority, or a non-numeric
++ * `--port`, is a usage error, so on rejection (and on `--help`) nothing is
++ * provided.
+  * @param ctx - plugin context carrying the command line.
+  */
+ export function apply(ctx: Context): void {
+   const program = webCommand()
+   program.action(() => {
+     const options = program.opts<WebOptions>()
+-    if (options.host === '0.0.0.0') {
+-      program.error('error: --host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
++    const trustedHosts = options.trustedHost ?? []
++    // An all-interfaces bind reaches every network that can route to this
++    // port, so the deployment must name the authorities it is served under:
++    // those are exactly the authorities the /api fence admits and the browser
++    // treats as the operator's own surface.
++    if (options.host === '0.0.0.0' && trustedHosts.length === 0) {
++      program.error('error: --host 0.0.0.0 exposes remote code execution to the network; declare the authority this deployment is reached by with --trusted-host <host[:port]>, or use 127.0.0.1 instead')
+     }
+     if (options.port !== undefined && !/^\d+$/.test(options.port)) {
+       program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
+@@ -81,7 +89,7 @@ export function apply(ctx: Context): void {
+       openBrowser: options.open,
+       ...options.host !== undefined && { host: options.host },
+       ...options.port !== undefined && { port: Number(options.port) },
+-      trustedHosts: options.trustedHost ?? [],
++      trustedHosts,
+     } satisfies WebStartupValues)
+   })
+   parseCmdline(ctx, program)
+diff --git a/packages/bundle/web-app/tests/startup.spec.ts b/packages/bundle/web-app/tests/startup.spec.ts
+index a10272f..0b44652 100644
+--- a/packages/bundle/web-app/tests/startup.spec.ts
++++ b/packages/bundle/web-app/tests/startup.spec.ts
+@@ -139,11 +139,17 @@ describe('web command-line provider', () => {
+     expect(observed.exits).toEqual([1])
+   })
+ 
+-  it('rejects the intentionally unsupported all-interfaces host before the consumer activates', async () => {
++  it('rejects an all-interfaces host with no declared authority before the consumer activates', async () => {
+     const { values, observed } = await bootProvider(['--host', '0.0.0.0'])
+-    expect(observed.out).toContain('--host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
++    expect(observed.out).toContain('--host 0.0.0.0 exposes remote code execution to the network; declare the authority this deployment is reached by with --trusted-host <host[:port]>')
+     expect(values).toBeUndefined()
+     expect(observed.readerConfig).toBeUndefined()
+     expect(observed.exits).toEqual([1])
+   })
++
++  it('accepts an all-interfaces host once an authority is declared', async () => {
++    const { values } = await bootProvider(['--host', '0.0.0.0', '--trusted-host', '192.168.1.10'])
++    expect(values?.host).toBe('0.0.0.0')
++    expect(values?.trustedHosts).toEqual(['192.168.1.10'])
++  })
+ })
+diff --git a/packages/client/connection/src/client/index.ts b/packages/client/connection/src/client/index.ts
+index e9d80a6..f4c85ee 100644
+--- a/packages/client/connection/src/client/index.ts
++++ b/packages/client/connection/src/client/index.ts
+@@ -9,7 +9,7 @@ import {
+   type ConnectionState,
+ } from './connection.ts'
+ import { createWebConnectionRpc, type RpcFetch, type RpcStreamOpen } from './rpc.ts'
+-import { isLoopbackHostname } from '../loopback-hostname.ts'
++import { isOwnHostAuthority } from '../loopback-hostname.ts'
+ import type { ClientConnectionRpc } from '../rpc.ts'
+ import { resolveConnectionConfig } from '../recovery-config.ts'
+ 
+@@ -110,11 +110,15 @@ export interface ClientTransportHooks {
+ interface ClientTransportGlobal {
+   __DSH_TRANSPORT__?: ClientTransportHooks
+   __DSH_CONNECTION_RECOVERY__?: unknown
++  /** Authorities this Host declared as its own; see `ConnectionConfig.trustedHosts`. */
++  __DSH_TRUSTED_AUTHORITIES__?: readonly string[]
+ }
+ 
+ /** Browser location fields used to classify loopback authority. */
+ export interface ConnectionLocation {
+   readonly hostname: string
++  /** Page authority (WHATWG `location.host`); defaults to the hostname. */
++  readonly host?: string
+ }
+ 
+ /** Instance-local inputs for installing a Connection service. */
+@@ -125,6 +129,8 @@ export interface ConnectionInstallOptions {
+   readonly recovery?: ConnectionRecoveryConfig
+   /** Page location; omit for a non-browser composition. */
+   readonly location?: ConnectionLocation
++  /** Authorities the Host declared as its own, read from the page's boot globals. */
++  readonly trustedAuthorities?: readonly string[]
+ }
+ 
+ /**
+@@ -206,6 +212,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
+   const pageLocation = options.location
+   const transport = options.transport
+   const recovery = options.recovery ?? {}
++  const trustedAuthorities = options.trustedAuthorities ?? []
+   const rpc = transport?.rpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
+   let generationSource: ConnectionGenerationSource | undefined
+   let owner: ConnectionOwner | undefined
+@@ -245,7 +252,9 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
+     publishState(undefined)
+   }
+   const handle: ConnectionHandle = {
+-    isLoopback: transport?.ownsHost === true || pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
++    isLoopback: transport?.ownsHost === true
++      || pageLocation === undefined
++      || isOwnHostAuthority(pageLocation.host ?? pageLocation.hostname, trustedAuthorities),
+     generation: {
+       getSnapshot: () => generation,
+       subscribe: (listener) => {
+@@ -322,5 +331,8 @@ export function apply(ctx: Context): void {
+     ...(transport === undefined ? {} : { transport }),
+     recovery: resolveConnectionConfig(globals.__DSH_CONNECTION_RECOVERY__),
+     ...(pageLocation === undefined ? {} : { location: pageLocation }),
++    ...(globals.__DSH_TRUSTED_AUTHORITIES__ === undefined
++      ? {}
++      : { trustedAuthorities: globals.__DSH_TRUSTED_AUTHORITIES__ }),
+   })
+ }
+diff --git a/packages/client/connection/src/index.ts b/packages/client/connection/src/index.ts
+index 7a4457e..0182fea 100644
+--- a/packages/client/connection/src/index.ts
++++ b/packages/client/connection/src/index.ts
+@@ -94,6 +94,9 @@ export interface ConnectionConfig {
+    * non-loopback (`0.0.0.0`) deployment must declare the names it is reached
+    * by; the Web runtime derives LAN IP literals from an active all-interface
+    * bind. An entry that is not a bare, canonical authority fails plugin load.
++   * The same set is the deployment's own surface: a browser loaded under a
++   * listed authority is treated as the operator's own Host, so it gets the
++   * privileged client state without the page being on loopback.
+    */
+   trustedHosts?: string[]
+   /** Absolute browser-session lifetime in days. Default: 30. */
+@@ -135,6 +138,9 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
+     assertImageBodyCapacity(webCtx, maxRequestBodyBytes)
+     webCtx.on('webserver/index-inject', (table) => {
+       table.push({ kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: recovery })
++      // Served pages classify their own authority against the same set this
++      // fence admits, so a declared LAN authority is a privileged surface.
++      table.push({ kind: 'global', name: '__DSH_TRUSTED_AUTHORITIES__', value: trustedHosts })
+     })
+     const fetchHandler = connection.createSharedFetchHandler(API_PATH)
+     const route: WebRoute = {
+diff --git a/packages/client/connection/src/loopback-hostname.ts b/packages/client/connection/src/loopback-hostname.ts
+index fe2fe93..98437a5 100644
+--- a/packages/client/connection/src/loopback-hostname.ts
++++ b/packages/client/connection/src/loopback-hostname.ts
+@@ -16,3 +16,47 @@ export function isLoopbackHostname(hostname: string): boolean {
+     && parts[0] === '127'
+     && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+ }
++
++/**
++ * Whether a page authority names this deployment's own Host: loopback, or an
++ * authority the Host declared in `trustedHosts`. The declared set is the one
++ * the `/api` fence admits (see `api-request-trust.ts`, which owns the matching
++ * rule), so a page served under one is the operator's own surface even though
++ * it is not on the loopback interface.
++ * @param pageHost - the page's `location.host` (hostname plus written port).
++ * @param trustedAuthorities - declared authorities: exact `host:port`, or port-less `host` matching any port.
++ * @returns true when the page authority is the operator's own Host.
++ */
++export function isOwnHostAuthority(pageHost: string, trustedAuthorities: readonly string[]): boolean {
++  const page = splitAuthority(pageHost)
++  if (page === undefined) return false
++  if (isLoopbackHostname(page.hostname)) return true
++  return trustedAuthorities.some((entry) => {
++    const declared = splitAuthority(entry)
++    if (declared === undefined) return false
++    return declared.hostname === page.hostname && (declared.port === '' || declared.port === page.port)
++  })
++}
++
++/**
++ * Split one `host[:port]` authority into a lowercased hostname (brackets kept
++ * for IPv6 literals) and its written port, `''` when absent.
++ * @param value - authority text as written, e.g. `192.168.1.10:3080`.
++ * @returns the parsed pair, or undefined when the text is not an authority.
++ */
++function splitAuthority(value: string): { hostname: string; port: string } | undefined {
++  const lower = value.toLowerCase()
++  if (lower.startsWith('[')) {
++    const end = lower.indexOf(']')
++    if (end === -1) return undefined
++    const hostname = lower.slice(0, end + 1)
++    const rest = lower.slice(end + 1)
++    if (rest === '') return { hostname, port: '' }
++    const port = rest.slice(1)
++    return rest.startsWith(':') && /^\d+$/.test(port) ? { hostname, port } : undefined
++  }
++  const colon = lower.indexOf(':')
++  if (colon === -1) return lower === '' ? undefined : { hostname: lower, port: '' }
++  const port = lower.slice(colon + 1)
++  return colon > 0 && /^\d+$/.test(port) ? { hostname: lower.slice(0, colon), port } : undefined
++}
+diff --git a/packages/client/connection/tests/loopback-hostname.client.spec.ts b/packages/client/connection/tests/loopback-hostname.client.spec.ts
+index d0eaf3e..9c72b33 100644
+--- a/packages/client/connection/tests/loopback-hostname.client.spec.ts
++++ b/packages/client/connection/tests/loopback-hostname.client.spec.ts
+@@ -1,7 +1,7 @@
+ /** Shared loopback-hostname semantics for the Host fence and browser UI. */
+ 
+ import { describe, expect, it } from 'vitest'
+-import { isLoopbackHostname } from '../src/loopback-hostname.ts'
++import { isLoopbackHostname, isOwnHostAuthority } from '../src/loopback-hostname.ts'
+ 
+ describe('isLoopbackHostname', () => {
+   it('accepts localhost, IPv6 loopback, and the whole IPv4 127/8 block', () => {
+@@ -16,3 +16,29 @@ describe('isLoopbackHostname', () => {
+     }
+   })
+ })
++
++describe('isOwnHostAuthority', () => {
++  it('accepts loopback authorities with and without a port', () => {
++    for (const host of ['127.0.0.1', '127.0.0.1:3080', 'localhost:3080', '[::1]:3080']) {
++      expect(isOwnHostAuthority(host, [])).toBe(true)
++    }
++  })
++
++  it('accepts declared authorities and refuses undeclared ones', () => {
++    expect(isOwnHostAuthority('192.168.1.10:3080', ['192.168.1.10'])).toBe(true)
++    expect(isOwnHostAuthority('192.168.1.10:3080', ['192.168.1.10:3080'])).toBe(true)
++    expect(isOwnHostAuthority('192.168.1.10:9999', ['192.168.1.10:3080'])).toBe(false)
++    expect(isOwnHostAuthority('192.168.1.11:3080', ['192.168.1.10'])).toBe(false)
++    expect(isOwnHostAuthority('harness.internal:3080', ['HARNESS.INTERNAL'])).toBe(true)
++    expect(isOwnHostAuthority('harness.internal:3080', [])).toBe(false)
++  })
++
++  it('refuses malformed page authorities and malformed declarations', () => {
++    for (const host of ['', ':3080', 'harness.internal:abc', '[::1']) {
++      expect(isOwnHostAuthority(host, ['harness.internal'])).toBe(false)
++    }
++    for (const declared of ['', ':3080', 'harness.internal:abc']) {
++      expect(isOwnHostAuthority('harness.internal:3080', [declared])).toBe(false)
++    }
++  })
++})
+diff --git a/packages/client/ui-settings/README.md b/packages/client/ui-settings/README.md
+index 760b4a4..b265426 100644
+--- a/packages/client/ui-settings/README.md
++++ b/packages/client/ui-settings/README.md
+@@ -94,7 +94,7 @@ None; this package neither assembles nor sends a provider request.
+ 
+ These limits define where the settings transport cannot reach; they are current package constraints.
+ 
+-- **Non-loopback pages get no durable settings** — this Client keeps Host persistence disabled there, so a scope starts `unavailable` and never crosses the wire; every row it backs is inert even though Connection authentication covers the API.
++- **Only the deployment's own authorities get durable settings** — Host persistence is enabled for a loopback page and for a page served under an authority the Host declared in `trustedHosts`; every other non-loopback page keeps it disabled, so a scope starts `unavailable` and never crosses the wire.
+ 
+ <a id="dev-note"></a>
+ ### Dev Note
+-- 
+2.54.0
+

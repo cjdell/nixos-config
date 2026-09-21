@@ -23,6 +23,9 @@
   # deployment values live in ./pi5-deploy.nix).
   ./pi5-netboot.nix
   ./pi5-deploy.nix
+  # The forked DeepSeek Harness Web GUI served on this host (no proxy; settings
+  # per machine, keyed by this host's IP) — see common/dsh-web-service.nix.
+  ./dsh-harness.nix
 
   # One-time root partition resize (completed 2026-08-14: / 181G->250G,
   # /home 750G->681G). Left in the tree, commented out, for reference and
