@@ -41,6 +41,37 @@ in
     chmod -R g+rw /srv/fah
   '';
 
+  # The FAH account token is a sops secret (secrets/fah.yaml, encrypted to the
+  # key in .sops.yaml) instead of `builtins.readFile` of an absolute path. That
+  # read made every host importing this file need `--impure` — `secrets/` is
+  # outside the flake source, so a pure build refused it — and it baked the
+  # token into the world-readable store as part of the container's environment.
+  #
+  # The container receives it through an env file rather than `environment = {}`:
+  # a sops secret only exists after activation (too late for the container's
+  # environment to be built from it), and its path must stay outside the store.
+  sops.secrets."fah_account_token" = {
+    sopsFile = ../secrets/fah.yaml;
+    # A rotated token only reaches the running container once it is recreated.
+    restartUnits = [ "podman-fah.service" ];
+  };
+
+  sops.templates."fah-env" = {
+    owner = "root";
+    mode = "0400";
+    content = ''
+      ACCOUNT_TOKEN=${config.sops.placeholder.fah_account_token}
+    '';
+  };
+
+  # Containers start at `multi-user.target` and `sops-install-secrets.service`
+  # runs during sysinit, so the order is already right in practice; stating it
+  # keeps a container from starting (and failing) without its env file.
+  systemd.services.podman-fah = {
+    wants = [ "sops-install-secrets.service" ];
+    after = [ "sops-install-secrets.service" ];
+  };
+
   virtualisation.containers.enable = true;
 
   virtualisation.oci-containers.backend = "podman";
@@ -61,9 +92,9 @@ in
         PUID = toString FAH_UID;
         PGID = toString FAH_UID;
         NVIDIA_VISIBLE_DEVICES = "all";
-        ACCOUNT_TOKEN = (builtins.readFile "/home/cjdell/nixos-config/secrets/fah-account-token.txt");
         MACHINE_NAME = config.networking.hostName;
       };
+      environmentFiles = [ config.sops.templates."fah-env".path ];
       extraOptions = [
         "--device=/dev/dri"
         "--group-add=${RENDER_GID}"
