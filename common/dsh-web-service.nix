@@ -42,6 +42,20 @@ let
     types
     ;
 
+  # The nixos-utils rollback module installs nixos-confirm (the deploy
+  # workflow's "I am alive, don't roll back" step) into systemPackages on
+  # autoRollback hosts — but as a package local to that module, no other
+  # module can reference it. Wrap the system copy so the
+  # agents' PATH carries it by name on those hosts; on hosts without
+  # autoRollback the command simply is not there, as today.
+  nixosConfirm = pkgs.writeShellScriptBin "nixos-confirm" ''
+    exec /run/current-system/sw/bin/nixos-confirm "$@"
+  '';
+
+  # attrByPath (not config.system.autoRollback.enable) so this module also
+  # evaluates on hosts that don't import the rollback module at all.
+  autoRollbackEnabled = lib.attrByPath [ "system" "autoRollback" "enable" ] false config;
+
   # The profile's patch layer, applied after every bundle layer. The `settings`
   # row is `@deepseek-ai/dsh-settings-file` in the base bundle patch; a patch
   # replaces that row's whole config, and the row has none of its own, so
@@ -177,49 +191,70 @@ in
           # search (ripgrep/fd), JSON and scripting (jq/python3 — the
           # documented `nix shell nixpkgs#python3` workaround), the nix CLI
           # (flake check/eval of this repo), network (curl/ssh/rsync/openssl),
-          # archives (tar/zip) and inspection (file/hexdump/lsblk/tree/less).
+          # archives (tar/zip), inspection (file/hexdump/lsblk/tree/less), and
+          # system administration — systemctl/journalctl for the deploy and
+          # service workflow, nixos-rebuild for --flake rebuilds, hostname and
+          # ldd from the operator's shell.
+          #
+          # nixos-confirm (autoRollback hosts only) comes from a wrapper: the
+          # rollback module builds it locally, so it is not referenceable.
           # /run/wrappers/bin is appended last: the store's sudo is not setuid
           # on this system, and the wrappers hold the setuid copies the
-          # deploy workflow (sudo nixos-rebuild + sudo nixos-confirm) needs.
+          # deploy workflow (sudo nixos-rebuild + sudo nixos-confirm) needs —
+          # sudo has no secure_path here, so it resolves commands from this
+          # very PATH.
           "PATH=${
-            lib.makeBinPath [
-              cfg.dsh
-              # Shell and basics.
-              pkgs.bashInteractive
-              pkgs.coreutils
-              pkgs.git
-              pkgs.nodejs_24
-              pkgs.findutils
-              pkgs.gnugrep
-              pkgs.gnused
-              pkgs.gawk
-              pkgs.diffutils
-              pkgs.procps
-              pkgs.which
-              # Fast search.
-              pkgs.ripgrep
-              pkgs.fd
-              # JSON and scripting.
-              pkgs.jq
-              pkgs.python3
-              # This repo is Nix: agents should be able to check what they
-              # change without a `nix shell`.
-              pkgs.nix
-              # Network (the AGENTS.md API and cross-host workflows).
-              pkgs.curl
-              pkgs.openssh
-              pkgs.rsync
-              pkgs.openssl
-              # Archives.
-              pkgs.gnutar
-              pkgs.zip
-              pkgs.unzip
-              # Inspection.
-              pkgs.file
-              pkgs.util-linux
-              pkgs.tree
-              pkgs.less
-            ]
+            lib.makeBinPath (
+              [
+                cfg.dsh
+                # Shell and basics.
+                pkgs.bashInteractive
+                pkgs.coreutils
+                pkgs.git
+                pkgs.nodejs_24
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.gawk
+                pkgs.diffutils
+                pkgs.procps
+                pkgs.which
+                # Fast search.
+                pkgs.ripgrep
+                pkgs.fd
+                # JSON and scripting.
+                pkgs.jq
+                pkgs.python3
+                # This repo is Nix: agents should be able to check what they
+                # change without a `nix shell`.
+                pkgs.nix
+                # Network (the AGENTS.md API and cross-host workflows).
+                pkgs.curl
+                pkgs.openssh
+                pkgs.rsync
+                pkgs.openssl
+                # Archives.
+                pkgs.gnutar
+                pkgs.zip
+                pkgs.unzip
+                # System administration (the deploy workflow: check and
+                # restart services, read their journals, rebuild the flake).
+                pkgs.systemd
+                pkgs.nixos-rebuild
+                # Inspection.
+                pkgs.file
+                pkgs.util-linux
+                pkgs.tree
+                pkgs.less
+                # ldd/iconv/locale: glibc's bin split (the main output has no
+                # bin/ at all), hostname: the operator's shell gets it from
+                # inetutils (the util-linux split above carries no hostname).
+                pkgs.glibc.bin
+                pkgs.inetutils
+              ]
+              # autoRollback hosts: the deploy workflow's confirm step.
+              ++ lib.optionals autoRollbackEnabled [ nixosConfirm ]
+            )
           }:/run/wrappers/bin"
         ];
         # --trusted-host is variadic, so it comes last; --no-open keeps headless
