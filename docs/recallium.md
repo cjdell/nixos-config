@@ -204,7 +204,7 @@ option in `hosts/zen3-nixos/ai/default.nix`:
 
 ```sh
 # edit config.ai.recalliumGpu ("rx580" | "r9700" | "vega") in ai/default.nix, then:
-sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+sudo nixos-rebuild switch --flake . --max-jobs 1
 sudo nixos-confirm   # autoRollback host — mandatory
 ```
 

@@ -218,7 +218,7 @@ git fetch origin            # ggml-org master
 git merge origin/master     # resolve; qwen4exp.cpp is the usual conflict spot
 cd /home/cjdell/nixos-config
 nix flake lock --update-input llama-cpp-mtp
-sudo nixos-rebuild switch --impure --flake .
+sudo nixos-rebuild switch --flake .
 ```
 
 ## Sources

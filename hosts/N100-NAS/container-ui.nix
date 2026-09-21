@@ -6,9 +6,11 @@
 
 let
   # Per-system package set (nixos-utils' flake packages are nested by system).
-  # Note: in a NixOS module `config.system` is the `system.*` options set, so
-  # the architecture must come from `builtins.currentSystem`.
-  containerUi = builtins.getAttr builtins.currentSystem inputs.nixos-utils.packages;
+  # Use `pkgs.stdenv.hostPlatform.system`, not `builtins.currentSystem`:
+  # the latter is forbidden in pure evaluation mode (it forced rebuilds to
+  # pass `--impure`), and in a NixOS module `config.system` is the `system.*`
+  # options set, so it cannot be used here either.
+  containerUi = inputs.nixos-utils.packages.${pkgs.stdenv.hostPlatform.system};
 in
 {
   # ============================================================================

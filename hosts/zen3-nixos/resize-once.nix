@@ -16,7 +16,7 @@
 # inside the *initrd* (stage 1), before / or /home is mounted.
 #
 # Arming (one time, run as root on zen3-nixos):
-#   sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+#   sudo nixos-rebuild switch --flake . --max-jobs 1
 #   sudo nixos-confirm              # autoRollback host - mandatory!
 #   sudo touch /resize-once.flag
 #   sudo reboot

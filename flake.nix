@@ -4,8 +4,10 @@
 # to nixos-rebuild there — it overrides that and serializes remote builds.
 # Hosts without a build machine can still append --max-jobs 1 to keep builds
 # light on limited-RAM targets.
-# sudo nixos-rebuild boot   --impure --flake .
-# sudo nixos-rebuild switch --impure --flake .
+# sudo nixos-rebuild boot   --flake .
+# sudo nixos-rebuild switch --flake .
+# (--impure is no longer needed: the deepseek-harness fork now fetches its
+# dependencies purely, and N100-NAS uses pkgs.stdenv.hostPlatform.system.)
 {
   inputs = {
     # Stable nixpkgs: every host except alderlake-thinkpad (see nixpkgsFor).
@@ -57,18 +59,15 @@
       url = "path:/home/cjdell/Projects/gc-business/gc-rust-node";
     };
     # The DeepSeek Harness fork (trusted-authority-surface branch) serving the
-    # forked Web GUI as a service (common/dsh-web-service.nix). Hosted input:
-    # the flake source is the git-filtered checkout on GitHub (node_modules/,
-    # .git/ and build outputs are not tracked, so the fork's `src = ./.` stays
-    # source-only — the same guarantee the old `git+file:` local input gave,
-    # without needing that local directory to exist). The fork flake pins its
-    # own nixpkgs (does NOT follow this flake's) and its derivation builds the
-    # whole pnpm workspace into one self-contained package; it still vendors
-    # node_modules from the local checkout at
-    # /home/cjdell/Projects/deepseek-harness (see the fork's flake.nix), so a
-    # machine building it needs that checkout with a `pnpm install` there.
-    # After editing/committing the fork, push the branch and refresh with:
-    #   nix flake lock --update-input deepseek-harness --impure
+    # forked Web GUI as a service (common/dsh-web-service.nix). The GitHub
+    # input is self-sufficient: the fork fetches its dependency closure with
+    # `fetchPnpmDeps` (a fixed-output store) and builds fully in the Nix
+    # sandbox, so no machine-local checkout or `node_modules` is needed and
+    # the flake evaluates purely. The fork pins its own nixpkgs (does NOT
+    # follow this flake's) and builds the whole pnpm workspace into one
+    # self-contained package. After editing/committing the fork, push the
+    # branch and refresh with:
+    #   nix flake lock --update-input deepseek-harness
     deepseek-harness = {
       url = "github:cjdell/deepseek-harness/trusted-authority-surface";
     };

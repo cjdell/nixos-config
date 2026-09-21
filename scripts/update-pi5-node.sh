@@ -119,12 +119,12 @@ echo "==> re-locking the gc-rust-node flake input"
 
 # --- 4. rebuild zen3 (the Pi's boot files ARE this system now) -------------------
 if [ "$DO_REBUILD" = 1 ]; then
-  echo "==> nixos-rebuild switch on this host (--impure --flake .)"
+  echo "==> nixos-rebuild switch on this host (--flake .)"
   # The /exports root is exported with crossmnt (no /exports/nix-store
   # sub-export), so switch-to-configuration can replace the store bind mount
   # itself. Keep the tolerance as belt-and-braces (e.g. the old config is
   # still deployed, or the store is genuinely busy mid-boot).
-  if ! sudo nixos-rebuild switch --impure --flake "$REPO_ROOT"; then
+  if ! sudo nixos-rebuild switch --flake "$REPO_ROOT"; then
     echo "warning: nixos-rebuild exited non-zero (expected if only the" >&2
     echo "         store-export mount restart failed on a busy bind)" >&2
   fi

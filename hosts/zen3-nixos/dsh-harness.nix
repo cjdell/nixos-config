@@ -14,6 +14,6 @@
   services.dshWebHarness = {
     enable = true;
     trustedHosts = [ "192.168.49.50" ];
-    settingsIp = "192.168.49.50"
+    settingsIp = "192.168.49.50";
   };
 }

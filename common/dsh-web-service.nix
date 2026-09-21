@@ -7,15 +7,17 @@
 # even then the GUI's privileged surfaces stayed inert: the browser classified
 # a LAN page as a foreign machine, so Settings → Models failed with "settings
 # are unavailable in this browser"). The fork in `inputs.deepseek-harness`
-# (~/Projects/deepseek-harness, branch trusted-authority-surface) makes a
+# (github:cjdell/deepseek-harness, branch trusted-authority-surface) makes a
 # *declared* authority the operator's own surface, so the GUI is reachable on
 # the machine's own address and Settings works there. No proxy, no header
 # rewriting. See docs/dsh-fork/ for the patch, the diagnosis, and the build.
 #
-# The fork's own flake builds the whole workspace (pnpm install + build) into
-# one self-contained package: `$dsh/bin/dsh` embeds the Node it was built
-# with, and the rest of the package is the built tree the CLI resolves its
-# workspace dependencies through. This module only runs it.
+# The fork's own flake builds the whole workspace into one self-contained
+# package: it fetches the lockfile's dependencies with `fetchPnpmDeps`, runs
+# `pnpm run build` offline in the sandbox, and `$dsh/bin/dsh` embeds the Node
+# it was built with; the rest of the package is the built tree the CLI
+# resolves its workspace dependencies through. No local checkout is needed
+# and the flake evaluates purely (no `--impure`). This module only runs it.
 #
 # Settings are per machine: `settingsIp` names this host, and the settings
 # document is `settings-<ip>.yaml`, so machines sharing a settings directory
@@ -23,11 +25,22 @@
 #
 # The service deliberately runs as a normal user with no sandbox: the GUI's
 # agents execute commands in that user's workspaces.
-{ config, lib, pkgs, inputs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  inputs,
+  ...
+}:
 
 let
   cfg = config.services.dshWebHarness;
-  inherit (lib) mkEnableOption mkIf mkOption types;
+  inherit (lib)
+    mkEnableOption
+    mkIf
+    mkOption
+    types
+    ;
 
   # The profile's patch layer, applied after every bundle layer. The `settings`
   # row is `@deepseek-ai/dsh-settings-file` in the base bundle patch; a patch
@@ -158,21 +171,56 @@ in
           # The package's launcher (embeds its own Node) plus the userland the
           # GUI's agents invoke by name. This Environment overrides systemd's
           # default PATH, so everything they need must be listed here.
+          #
+          # The list mirrors a normal user shell, so agents running through
+          # the GUI meet the same tools the operator's terminal does: fast
+          # search (ripgrep/fd), JSON and scripting (jq/python3 — the
+          # documented `nix shell nixpkgs#python3` workaround), the nix CLI
+          # (flake check/eval of this repo), network (curl/ssh/rsync/openssl),
+          # archives (tar/zip) and inspection (file/hexdump/lsblk/tree/less).
+          # /run/wrappers/bin is appended last: the store's sudo is not setuid
+          # on this system, and the wrappers hold the setuid copies the
+          # deploy workflow (sudo nixos-rebuild + sudo nixos-confirm) needs.
           "PATH=${
             lib.makeBinPath [
               cfg.dsh
+              # Shell and basics.
+              pkgs.bashInteractive
               pkgs.coreutils
               pkgs.git
-              pkgs.bashInteractive
               pkgs.nodejs_24
               pkgs.findutils
               pkgs.gnugrep
               pkgs.gnused
               pkgs.gawk
+              pkgs.diffutils
               pkgs.procps
               pkgs.which
+              # Fast search.
+              pkgs.ripgrep
+              pkgs.fd
+              # JSON and scripting.
+              pkgs.jq
+              pkgs.python3
+              # This repo is Nix: agents should be able to check what they
+              # change without a `nix shell`.
+              pkgs.nix
+              # Network (the AGENTS.md API and cross-host workflows).
+              pkgs.curl
+              pkgs.openssh
+              pkgs.rsync
+              pkgs.openssl
+              # Archives.
+              pkgs.gnutar
+              pkgs.zip
+              pkgs.unzip
+              # Inspection.
+              pkgs.file
+              pkgs.util-linux
+              pkgs.tree
+              pkgs.less
             ]
-          }"
+          }:/run/wrappers/bin"
         ];
         # --trusted-host is variadic, so it comes last; --no-open keeps headless
         # service starts from trying to launch a browser.

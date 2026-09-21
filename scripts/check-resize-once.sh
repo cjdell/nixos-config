@@ -73,7 +73,7 @@ echo "OK: disk geometry and fs UUIDs match the resize-once script."
 echo "Resulting layout:  /  -> 250G,  /home -> ~${NEW_P5_GB}G."
 echo
 echo "To arm and run (as root):"
-echo "  sudo nixos-rebuild switch --impure --flake . --max-jobs 1"
+echo "  sudo nixos-rebuild switch --flake . --max-jobs 1"
 echo "  sudo nixos-confirm"
 echo "  sudo touch /resize-once.flag"
 echo "  sudo reboot"

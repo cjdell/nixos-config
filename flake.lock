@@ -119,11 +119,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1790010784,
-        "narHash": "sha256-n0kQ8HH4FkwH/8ubNxo0GJd99nepJYX/EwGYu+vZxR0=",
+        "lastModified": 1790019657,
+        "narHash": "sha256-vKfvSaIH33IKTBHDo2ETcdgQvl9vfLr12FexGV50qz4=",
         "owner": "cjdell",
         "repo": "deepseek-harness",
-        "rev": "3d99321d7be5569ad34cb49b82b7cc9b1b9f10fd",
+        "rev": "df9c99e58a7e9a63fad610a1afdf0cf504b6df2e",
         "type": "github"
       },
       "original": {

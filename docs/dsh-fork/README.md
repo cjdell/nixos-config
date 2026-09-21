@@ -79,44 +79,36 @@ connection package's two faces plus the web-app startup gate.
 ## Build (the fork's own flake)
 
 The fork carries its own flake (`packages.x86_64-linux.default` in
-`~/Projects/deepseek-harness/flake.nix`). It vendors the checkout's installed
-`node_modules`, runs `pnpm run build` offline in the Nix 2.34 sandbox, and
-installs the built tree with `$out/bin/dsh`. nixos-config consumes it as the
-`deepseek-harness` input and runs it through `services.dshWebHarness`
-(`common/dsh-web-service.nix`) — no `npx`, no checkout build, no proxy.
+`github:cjdell/deepseek-harness`, branch `trusted-authority-surface`). It fetches
+the lockfile's dependency closure with `fetchPnpmDeps` (a fixed-output store —
+the only step with network; `fetcherVersion = 4` dumps the store's SQLite index
+to SQL first because the binary db is not byte-reproducible), then
+`pnpmConfigHook` seeds that store into a writable tmpdir and runs
+`pnpm install --offline --frozen-lockfile` inside the Nix 2.34 sandbox.
+`pnpm run build` compiles the tree offline and the result is installed with
+`$out/bin/dsh`. nixos-config consumes it as the `deepseek-harness` input and
+runs it through `services.dshWebHarness` (`common/dsh-web-service.nix`) — no
+`npx`, no checkout build, no proxy.
 
 Nothing is built on grafton-router: the package comes from the fork's flake and
 the router only activates it. The flake's comments carry the full detail; the
 non-obvious parts are:
 
-- **Offline pnpm.** Nix 2.34 sandboxes input-addressed derivations in a private
-  netns, so the build must not touch the registry. pnpm 11 keeps its settings in
-  `pnpm-workspace.yaml` (not `.npmrc`): `pmOnFail: ignore` stops the
-  `packageManager`-field version switch (which fetches `@pnpm/exe`), and
-  `verifyDepsBeforeRun: false` stops the deps-status auto-install. The vendored
-  `.modules.yaml`'s absolute `storeDir` is rewritten to the build store.
-- **All `node_modules` are inputs.** pnpm links each workspace project's direct
-  deps into its own `node_modules`; vendoring only the root tree leaves `tsc`
-  unable to resolve e.g. `website/node_modules/vitepress`. The flake vendors the
-  project-local trees too.
+- **Pure and self-contained.** No `builtins.path`, no absolute paths, no local
+  checkout — the GitHub input alone builds the package. That is why
+  `nixos-rebuild switch` no longer needs `--impure`.
 - **Official Node.** `node-addon-require-builtin` resolves Node's internal
   modules by *probing the running Node binary's machine code*; the nixpkgs-built
   Node does not match its patterns (`x64 sysv getter is not a recognized
   this->field accessor`), the official nodejs.org build does. The launcher embeds
   a pinned official Node release, not `pkgs.nodejs_24`.
-- **Hosted `github:` input.** The flake source is the `trusted-authority-surface`
-  branch of `github:cjdell/deepseek-harness`: the tarball holds only tracked
-  files, so (like the earlier `git+file:` local input, and unlike a bare `path:`
-  input that would materialise `node_modules/`, `.git/` and build outputs) the
-  fork's `src = ./.` stays the git-filtered checkout — and the input no longer
-  needs the local directory to exist. The local checkout is still required on
-  the *building* machine, because the flake vendors its `node_modules` from
-  there (previous bullet).
 
 After editing the fork, commit it, push the branch
 (`git push fork trusted-authority-surface`) and refresh the input
-(`nix flake lock --update-input deepseek-harness --impure` in nixos-config).
-The flake's `DSH_CLIENT_COMMIT_HASH` must also be bumped when the commit changes.
+(`nix flake lock --update-input deepseek-harness` in nixos-config). The flake's
+`DSH_CLIENT_COMMIT_HASH` must be bumped when the commit changes, and the
+`pnpmDeps` hash must be regenerated whenever `pnpm-lock.yaml` (or the pnpm
+version) changes — set `hash = ""` and paste the hash from the failure.
 
 ## Deploy (grafton-router, live)
 
@@ -125,7 +117,7 @@ The flake's `DSH_CLIENT_COMMIT_HASH` must also be bumped when the commit changes
 
 ```sh
 cd ~/nixos-config
-sudo nixos-rebuild switch --impure --flake .
+sudo nixos-rebuild switch --flake .
 sudo nixos-confirm          # grafton-router has autoRollback: mandatory
 ```
 

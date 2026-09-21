@@ -2,6 +2,13 @@
 
 **Status: DONE — built and deployed on grafton-router 2026-09-21. Service live.**
 
+> **Superseded later on 2026-09-21:** the offline/vendored-`node_modules` design
+> described below was replaced by a pure `fetchPnpmDeps` build in the fork's
+> flake (commit `df9c99e58a`). The fork no longer needs a local checkout and
+> `nixos-rebuild` no longer needs `--impure`. References below to vendored
+> `node_modules`, absolute paths, or building from `~/Projects/deepseek-harness`
+> are historical; see `docs/dsh-fork/README.md` for the current build.
+
 See “Outcome” below for the extra blockers that the original handover did not
 know about, and the fix for each.
 

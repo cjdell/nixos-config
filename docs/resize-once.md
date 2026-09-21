@@ -40,7 +40,7 @@ before *any* partition of the disk is mounted (stage 1). It cannot run in stage 
 Arming sequence (still valid if ever reused):
 
 ```sh
-sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+sudo nixos-rebuild switch --flake . --max-jobs 1
 sudo nixos-confirm                 # autoRollback host — mandatory!
 sudo touch /resize-once.flag
 sudo reboot

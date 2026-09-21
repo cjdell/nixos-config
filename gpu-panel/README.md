@@ -146,6 +146,6 @@ unit on `127.0.0.1:8087`, and wires nginx (`/gpu/` on the IP vhost +
 `gpu.ai.chrisdell.info`).
 
 ```sh
-sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+sudo nixos-rebuild switch --flake . --max-jobs 1
 sudo nixos-confirm
 ```

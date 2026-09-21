@@ -64,11 +64,17 @@ You can also pass a generation number: `sudo nixos-confirm 189`.
 Per-host rebuilds use the flake; the canonical commands (from `flake.nix` header):
 
 ```sh
-sudo nixos-rebuild boot   --impure --flake .
-sudo nixos-rebuild switch --impure --flake .
+sudo nixos-rebuild boot   --flake .
+sudo nixos-rebuild switch --flake .
 ```
 
-- `--impure` is required (config reads the live system, e.g. UIDs).
+- **`--impure` is no longer needed.** It was only ever required by two
+  impure reads, both now removed: the `deepseek-harness` fork's flake vendored
+  `node_modules` from an absolute local path (it now uses `fetchPnpmDeps`
+  purely), and `hosts/N100-NAS/container-ui.nix` used
+  `builtins.currentSystem` (now `pkgs.stdenv.hostPlatform.system`). The flake
+  evaluates in pure mode — don't reintroduce `--impure` unless a genuinely
+  impure read comes back.
 - **Deploy locally when you're already on the target host:** check `hostname`
   first — if it matches the target host name (the `hosts/<name>` directory,
   e.g. `N100-NAS`), the flake is checked out on this machine, so run the
@@ -268,7 +274,7 @@ Rebuild + deploy on `zen3-nixos` (used successfully in the past):
 ```sh
 # the nix package is built from this dir by hosts/zen3-nixos/ai/llama-log-viewer.nix
 # (pkgs.rustPlatform.buildRustPackage with cargoLock.lockFile)
-sudo nixos-rebuild switch --impure --flake . --max-jobs 1
+sudo nixos-rebuild switch --flake . --max-jobs 1
 sudo nixos-confirm
 ```
 
@@ -484,6 +490,21 @@ agent thread with no way to resume it. Follow this order:
   bare `ssh`/`curl`/`ping` to a flaky or dead host will stall the session.
   Never `pgrep -f`/`pkill -f` with a pattern that matches your own shell's
   command line (it self-matches and loops).
+- **Poll for long-running work with a bounded loop, never one long `sleep`.**
+  A single `sleep 300` blocks the turn (and gets aborted) with no progress
+  visibility. Run the job in the background with output to a log, then loop a
+  short sleep with a status line each iteration, e.g.:
+
+  ```sh
+  for i in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || { echo "[done] ($i)"; break; }
+    printf '[%s] ' "$i"; tail -1 /tmp/job.log
+    sleep 15
+  done
+  ```
+
+  Check liveness with the job's PID (`kill -0`) or a `pgrep` pattern that
+  cannot match the polling shell itself — not a long blocking sleep.
 - Do not run heavy builds unless the task requires it; the user applies Nix
   config themselves when they prefer.
 - If you DO apply a config (with permission), always finish with
