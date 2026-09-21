@@ -550,6 +550,21 @@
         "url": "file:///home/cjdell/Projects/llama.cpp"
       }
     },
+    "meter-relay-rs": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_4"
+      },
+      "locked": {
+        "lastModified": 1790022671,
+        "narHash": "sha256-jAeGgXZFwvzUrh1eXlKI7k0e7aOp5zz7Q+qn2tN8eP0=",
+        "path": "/home/cjdell/Projects/meter-relay-rs",
+        "type": "path"
+      },
+      "original": {
+        "path": "/home/cjdell/Projects/meter-relay-rs",
+        "type": "path"
+      }
+    },
     "microvm": {
       "inputs": {
         "nixpkgs": [
@@ -595,7 +610,7 @@
     },
     "nixos-hardware_2": {
       "inputs": {
-        "nixpkgs": "nixpkgs_4"
+        "nixpkgs": "nixpkgs_5"
       },
       "locked": {
         "lastModified": 1785716867,
@@ -805,6 +820,22 @@
     },
     "nixpkgs_4": {
       "locked": {
+        "lastModified": 1789785513,
+        "narHash": "sha256-B44WL6h0XoLjJ41bUPJk0X5SDinLCII//6EcBLXKiJ0=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "20b1ddd1aa5ace70c9468305030aa4f9ef79671b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_5": {
+      "locked": {
         "lastModified": 1767892417,
         "narHash": "sha256-8bW3q88CEg2u4hSP66Vf4lpbLonHz7hqDNBMcCY7E9U=",
         "rev": "3497aa5c9457a9d88d71fa93a4a8368816fbeeba",
@@ -816,7 +847,7 @@
         "url": "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
       }
     },
-    "nixpkgs_5": {
+    "nixpkgs_6": {
       "locked": {
         "lastModified": 1789885152,
         "narHash": "sha256-mDNo95riUw8k0MA2Btzj/OuiMcfLKofqIliLYsLbrSY=",
@@ -832,7 +863,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_6": {
+    "nixpkgs_7": {
       "locked": {
         "lastModified": 1769789167,
         "narHash": "sha256-kKB3bqYJU5nzYeIROI82Ef9VtTbu4uA3YydSk/Bioa8=",
@@ -910,10 +941,11 @@
         "llama-cpp-mtp": "llama-cpp-mtp",
         "llama-cpp-rdna": "llama-cpp-rdna",
         "llama-cpp-uma": "llama-cpp-uma",
+        "meter-relay-rs": "meter-relay-rs",
         "microvm": "microvm",
         "nixos-hardware": "nixos-hardware_2",
         "nixos-utils": "nixos-utils",
-        "nixpkgs": "nixpkgs_5",
+        "nixpkgs": "nixpkgs_6",
         "nixpkgs-grafton": "nixpkgs-grafton",
         "nixpkgs-unstable": "nixpkgs-unstable",
         "plasma-manager": "plasma-manager",
@@ -1111,7 +1143,7 @@
       "inputs": {
         "crane": "crane_3",
         "flake-parts": "flake-parts_7",
-        "nixpkgs": "nixpkgs_6",
+        "nixpkgs": "nixpkgs_7",
         "rust-overlay": "rust-overlay"
       },
       "locked": {
