@@ -1,0 +1,33 @@
+let
+  net = import ./constants.nix;
+in
+{
+  imports = [
+    ./dns.nix
+    ./firewall.nix
+    ./interface.nix
+    ./pppoe.nix
+  ];
+
+  boot.kernel.sysctl = {
+    # be more swappy as we're using zramswap
+    "vm.swappiness" = 100;
+
+    # enable IPv4 and IPv6 forwarding on all interfaces
+    "net.ipv4.conf.all.forwarding" = true;
+    "net.ipv6.conf.all.forwarding" = true;
+
+    "net.ipv4.conf.all.arp_filter" = 1;
+    "net.ipv4.conf.default.arp_filter" = 1;
+    "net.ipv6.conf.${net.WAN_INTERFACE}.accept_ra" = 2;
+    "net.ipv6.conf.${net.WAN_INTERFACE}.autoconf" = 1;
+  };
+
+  networking = {
+    useDHCP = false;
+    useNetworkd = true;
+
+    nftables.enable = true;
+    firewall.enable = false;
+  };
+}

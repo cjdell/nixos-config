@@ -1,0 +1,43 @@
+{ config, pkgs, ... }:
+
+{
+  environment.systemPackages = with pkgs; [ sops ];
+
+  environment.variables = {
+    SOPS_AGE_KEY_FILE = config.sops.age.keyFile;
+  };
+
+  environment.sessionVariables = {
+    SOPS_AGE_KEY_FILE = config.sops.age.keyFile;
+  };
+
+  sops = {
+    age.keyFile = "/var/lib/sops-nix/key.txt";
+    defaultSopsFile = ./secrets/secrets.yaml;
+    secrets = {
+      aws_access_key_secret = { };
+      pppoe_password = { };
+      wireguard_key = { };
+      home_assistant_header = { };
+      home_assistant_token = { };
+      nginx_sso_client_secret = { };
+      plausible_secret_key = { };
+      headscale_secret = {
+        owner = "headscale";
+      };
+      headscale_api_key = {
+        owner = "headscale";
+      };
+      headscale_pre_auth_key = {
+        owner = "headscale";
+      };
+      tailscale_pre_auth_key = { };
+      leigh_hackspace_tailscale_pre_auth_key = { };
+      borg_backup_key = { };
+      frigate_whisper_db_password = { };
+      # Fixed sshd host key for the grafton-hackspace-client microVM (mounted
+      # into the VM's /run/secrets; baked into /var/secrets at activation).
+      vm_host_key = { };
+    };
+  };
+}

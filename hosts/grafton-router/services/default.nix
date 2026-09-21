@@ -1,0 +1,31 @@
+{
+  imports = [
+    ./2fauth.nix
+    ./adguard.nix
+    ./beszel.nix
+    ./backup.nix
+    ./container-ui.nix
+    ./frigate-monitor.nix
+    ./frigate.nix
+    ./frigate-whisper.nix
+    ./ghost.nix
+    ./headscale.nix
+    ./health.nix
+    ./home-assistant.nix
+    ./http-dump.nix
+    ./immich.nix
+    ./influxdb.nix
+    ./jack.nix
+    ./jellyfin.nix
+    ./kanidm.nix
+    ./meter-relay.nix
+    ./mosquitto.nix
+    ./postgres.nix
+    ./qbittorrent.nix
+    ./qwencraft.nix
+    ./rustagon.nix
+    ./tailscale.nix
+    ./web-blocks.nix
+    ./zigbee2mqtt.nix
+  ];
+}

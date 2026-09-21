@@ -21,6 +21,31 @@
       # url = "git+file:///home/cjdell/Projects/nixos-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # grafton-router is pinned to the nixpkgs revision its live system was
+    # built from (nixos-system-grafton-router-26.05.20260707.0ad6f47). The
+    # router has 15 GiB RAM and no swap (Frigate/Whisper/ClickHouse/VMs use
+    # ~11 GiB), so upgrading the whole closure locally OOMs the nix build.
+    # Pinning reuses the packages already in the store: migrating the config
+    # into this flake becomes a no-op build. Bump/remove this pin (like the
+    # other hosts) when a deliberate router upgrade is wanted.
+    nixpkgs-grafton = {
+      url = "github:nixos/nixpkgs/0ad6f47ea4fe188f4bc8f0380f93ae8523337c6c";
+    };
+    # microvm host module (grafton-router's virtual-machines/ use it).
+    microvm = {
+      url = "github:microvm-nix/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    # frigate-whisper: VAD + whisper.cpp transcription of Frigate camera audio.
+    # Local path input (the hosted copy is still referenced from grafton-router).
+    frigate-whisper = {
+      url = "path:/home/cjdell/Projects/frigate-whisper";
+    };
+    # frigate-monitor: static scene-change detection for Frigate cameras.
+    frigate-monitor = {
+      url = "path:/home/cjdell/Projects/frigate-monitor";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # The Raspberry Pi 5 netboot flake (Pi NixOS config + the gc-node worker it
     # runs). hosts/zen3-nixos/pi5-netboot.nix bind-mounts its pi5-netboot
     # package at /etc/tftp/e9cf02dc. A `path:` input freezes at the locked
@@ -111,6 +136,10 @@
       nixpkgs-unstable,
       nixos-hardware,
       nixos-utils,
+      nixpkgs-grafton,
+      microvm,
+      frigate-whisper,
+      frigate-monitor,
       gc-rust-node,
       sops-nix,
       home-manager,
@@ -392,7 +421,7 @@
         # Find configs in `hosts` folder and use the folder name as the host name
         (
           let
-            hosts = builtins.filter (x: x != null) (
+            hosts = builtins.filter (x: x != null && x != "grafton-router") (
               nixpkgs.lib.mapAttrsToList (name: value: if (value == "directory") then name else null) (
                 builtins.readDir ./hosts
               )
@@ -407,6 +436,28 @@
         )
         #  Legacy configs for old machines (to be converted)
         // {
+          # grafton-router is ported verbatim from ~/nixos-config: it runs its
+          # own module set (no common/system.nix, users/cjdell, or home-manager)
+          # and takes its flake inputs via `import ./hosts/grafton-router inputs`.
+          grafton-router = nixpkgs-grafton.lib.nixosSystem {
+            inherit system;
+            # NB: raw import (not mkPkgs) so the package set matches the pin
+            # exactly and every path is already in the store.
+            pkgs = import nixpkgs-grafton {
+              inherit system;
+              config.allowUnfree = true;
+            };
+            modules = [
+              {
+                networking.hostName = "grafton-router";
+                nix.registry.nixpkgs.flake = nixpkgs-grafton;
+              }
+              microvm.nixosModules.host
+            ]
+            ++ (import ./hosts/grafton-router inputs);
+            specialArgs = { inherit inputs; };
+          };
+
           zen1-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
