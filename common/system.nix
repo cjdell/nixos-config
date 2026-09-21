@@ -1,6 +1,12 @@
 { pkgs, ... }:
 
 {
+  imports = [
+    # dsh-web start/stop/status wrapper for the DeepSeek Harness web server
+    # (see common/dsh-web.nix).
+    ./dsh-web.nix
+  ];
+
   system.updateContainers = {
     enable = true;
     webhookUrl = "https://notify.home.chrisdell.info";
