@@ -8,11 +8,12 @@
 # re-lock a plain `nixos-rebuild switch` rebuilds the old snapshot and systemd
 # does not even restart the unit (ExecStart is unchanged) — the host keeps
 # running the previous binary while `nix build` inside the Rust repo happily
-# prints a new ./result. This script drives the loop:
+# reports a fresh build. This script drives the loop:
 #
 #   1. sanity-check the Rust checkout (warns about untracked NEW files: when you
 #      `nix build` in that repo Nix reads it through the git fetcher, so a file
-#      that is not at least staged is invisible to the build)
+#      that is not at least staged is invisible to the build; build it with
+#      `--no-link` so no stale ./result symlink is left behind)
 #   2. note the currently-deployed store path (nix eval … ExecStart)
 #   3. re-lock the input: nix flake update meter-relay-rs
 #   4. print the new store path and stop if it did not change

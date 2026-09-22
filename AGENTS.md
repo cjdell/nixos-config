@@ -519,7 +519,7 @@ grafton-router). By hand:
 cd ~/Projects/meter-relay-rs
 git add -A                       # at least stage any NEW file — see below
 git commit -m "…"                # optional, but keeps the locked hash reviewable
-nix build                        # optional fast local check; prints ./result
+nix build --no-link              # optional fast local check (no ./result symlink)
 
 cd ~/nixos-config
 nix flake update meter-relay-rs                       # ← REQUIRED, every time
@@ -544,8 +544,8 @@ A `path:` flake input is frozen at the `narHash` recorded in `flake.lock`, so
 `nixos-rebuild switch` happily rebuilds the *old* snapshot; because the
 resulting `ExecStart` is unchanged, systemd does not even restart the unit, and
 the service keeps running the previous binary with no warning. What makes this
-so misleading is that `nix build` **inside the Rust repo** succeeds and prints a
-brand-new `./result` — it builds the working tree directly, while the host
+so misleading is that `nix build` **inside the Rust repo** succeeds and produces
+a fresh store path — it builds the working tree directly, while the host
 builds the locked snapshot. Always `nix flake update meter-relay-rs` first
 (or `scripts/deploy-meter-relay.sh`), then compare the store path as above.
 (Same rule for the other path inputs: `gc-rust-node`, `frigate-monitor`, the
