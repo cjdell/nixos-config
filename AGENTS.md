@@ -490,8 +490,9 @@ fork patch: `docs/dsh-fork/`.
 The solar-inverter meter relay on **grafton-router** (the router itself,
 `192.168.49.1`) is built from the Rust port at
 `/home/cjdell/Projects/meter-relay-rs` — *not* the older TypeScript app in
-`/home/cjdell/Projects/meter-relay`, which stays around for reference and
-because its `.env` holds the live `MR_*` credentials. It reads the grid meter
+`/home/cjdell/Projects/meter-relay`, which stays around for reference only (the
+live `MR_*` credentials used to live in a `.env` in the Rust checkout; they are
+in sops now and there is no `.env` on the host). It reads the grid meter
 over serial Modbus RTU, re-serves those registers to the inverters, nudges them
 with per-inverter PIDs so grid export tracks `MR_METER_TARGET_POWER`, charges the
 batteries in the Octopus Go window, publishes to Home Assistant + InfluxDB, and
@@ -501,9 +502,10 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
 - **The plant is a priority list, not two hardcoded inverters.** `MR_INVERTERS`
   orders it (default `solis,solax`) and each entry takes `MR_<ID>_*` overrides,
   so the existing `MR_SOLIS_*`/`MR_SOLAX_*` names still work. Entry 0 is the
-  primary actuator; the rest are the reserve. Adding a third inverter is a
-  `.env` change plus `MR_<ID>_DRIVER` pointing at a known driver; a genuinely
-  new *model* needs a row in `driver_defaults()` (`src/config.rs`) and an arm in
+  primary actuator; the rest are the reserve. Adding a third inverter is another
+  id in the module's `plant` attrset plus `MR_<ID>_DRIVER` pointing at a known
+  driver; a genuinely new *model* needs a row in
+  `driver_defaults()` (`src/config.rs`) and an arm in
   `inverters::build()` (`src/inverters.rs`). Duplicate ports or slave addresses
   are a startup error.
 - **Allocation water-fills in both directions**, so surplus PV the main bank's
@@ -515,12 +517,23 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
   `/stats` and the Home Assistant entity ids are unchanged.
 
 - Module: `hosts/grafton-router/services/meter-relay.nix` (imported by
-  `services/default.nix`). It only sets
-  `ExecStart = inputs.meter-relay-rs.packages.${pkgs.hostPlatform.system}.default`
-  and `WorkingDirectory = /home/cjdell/Projects/meter-relay-rs`, so the binary
-  picks up the gitignored `.env` there. The dashboard is bundled into the store
-  by the port's own `nix/package.nix` (`buildNpmPackage` + a wrapper exporting
-  `MR_WEB_DIR`) — a frontend change needs a rebuild, never a file copy.
+  `services/default.nix`). **It is the relay's entire configuration** — the
+  plant is declared there as an attrset applied via systemd `Environment`, so
+  behaviour changes are Nix changes (`nixos-rebuild switch`), not edits on the
+  host. The two credentials come from sops through
+  `sops.templates."meter-relay.env"` + `EnvironmentFile`: the Home Assistant
+  token reuses the existing `home_assistant_token` secret (byte-identical to
+  what the old `.env` held), and `meter_relay_influxdb_token` is the relay's own.
+  There is deliberately **no `WorkingDirectory` and no `.env`** on the host —
+  the process CWD is `/`, so a stray `.env` has nowhere to be picked up from
+  (dotenvy survives only as a local-development convenience). The dashboard is
+  bundled into the store by the port's own `nix/package.nix`
+  (`buildNpmPackage` + a wrapper exporting `MR_WEB_DIR`) — a frontend change
+  needs a rebuild, never a file copy.
+- To change one setting, edit the `plant` attrset in that module. Non-secret
+  values are visible in `systemctl show meter-relay -p Environment`; the tokens
+  are not (they arrive via the rendered `/run/secrets/rendered/meter-relay.env`,
+  mode 0400 root).
 - Flake input (`flake.nix`): `meter-relay-rs = { url = "path:/home/cjdell/Projects/meter-relay-rs"; }`.
   It keeps its own nixpkgs pin (its `flake.lock`), so nothing here needs
   `--impure`. Live logs: `journalctl -u meter-relay -f`.
@@ -546,9 +559,12 @@ sudo nixos-confirm               # grafton-router has autoRollback — see the t
 systemctl status meter-relay && journalctl -u meter-relay -f
 ```
 
-- **`.env`-only edits** (credentials, `MR_METER_TARGET_POWER`, …) need no
-  rebuild: `sudo systemctl restart meter-relay` re-reads
-  `WorkingDirectory/.env`.
+- **A configuration-only change needs a rebuild, not a re-lock.** Editing the
+  `plant` attrset changes no Rust code, so `scripts/deploy-meter-relay.sh` will
+  correctly stop at "input source is unchanged — nothing to deploy" and *not*
+  switch — use `./scripts/deploy-meter-relay.sh --force`, or by hand
+  `sudo nixos-rebuild switch --flake . && sudo nixos-confirm`. There is no
+  restart-only path any more: the old `.env` shortcut is gone.
 - **Verify the running build, don't assume:** `grep ExecStart
   /etc/systemd/system/meter-relay.service` must show the same store path the
   `nix eval` above printed, and `curl -s http://127.0.0.1:8484/api/status`
