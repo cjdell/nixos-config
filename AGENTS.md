@@ -97,6 +97,16 @@ sudo nixos-rebuild switch --flake .
   either way.
 - Always follow with `sudo nixos-confirm` on hosts that enable autoRollback
   (see above).
+- **Local `path:` flake inputs freeze at the `narHash` in `flake.lock`.** The
+  repo consumes several checkouts that live outside it by path
+  (`meter-relay-rs`, `gc-rust-node`, `frigate-monitor`, the `llama.cpp` forks,
+  …). Editing such a checkout changes *nothing* until `nix flake update <name>`
+  (the old `nix flake lock --update-input <name>`, now deprecated) rewrites that
+  lock entry — a plain `nixos-rebuild switch` then redeploys the previous build
+  without any warning.
+  In a flake's *own* checkout Nix reads the git tree instead, so a new file must
+  be at least staged (`git add`) or it is invisible to the build (both failure
+  modes, with the exact symptoms, are written up under "meter-relay-rs").
 - Avoid running `nix build`/`nixos-rebuild` for heavy jobs unless the task
   calls for it; the user often deploys manually.
 
@@ -475,6 +485,90 @@ fork patch: `docs/dsh-fork/`.
 - Deploy = `nixos-rebuild switch` on the host (+ `sudo nixos-confirm` on
   **grafton-router**, which has autoRollback; zen3-nixos has it commented out).
 
+## meter-relay-rs (grafton-router, live)
+
+The solar-inverter meter relay on **grafton-router** (the router itself,
+`192.168.49.1`) is built from the Rust port at
+`/home/cjdell/Projects/meter-relay-rs` — *not* the older TypeScript app in
+`/home/cjdell/Projects/meter-relay`, which stays around for reference and
+because its `.env` holds the live `MR_*` credentials. It reads the grid meter
+over serial Modbus RTU, re-serves those registers to the Solis/Solax inverters,
+nudges them with per-inverter PIDs so grid export tracks
+`MR_METER_TARGET_POWER`, charges the batteries in the Octopus Go window,
+publishes to Home Assistant + InfluxDB, and serves a Solid.js dashboard on
+`:8484` (`/api/status`, `/api/history`, `/api/events` SSE, legacy `/stats`).
+
+- Module: `hosts/grafton-router/services/meter-relay.nix` (imported by
+  `services/default.nix`). It only sets
+  `ExecStart = inputs.meter-relay-rs.packages.${pkgs.hostPlatform.system}.default`
+  and `WorkingDirectory = /home/cjdell/Projects/meter-relay-rs`, so the binary
+  picks up the gitignored `.env` there. The dashboard is bundled into the store
+  by the port's own `nix/package.nix` (`buildNpmPackage` + a wrapper exporting
+  `MR_WEB_DIR`) — a frontend change needs a rebuild, never a file copy.
+- Flake input (`flake.nix`): `meter-relay-rs = { url = "path:/home/cjdell/Projects/meter-relay-rs"; }`.
+  It keeps its own nixpkgs pin (its `flake.lock`), so nothing here needs
+  `--impure`. Live logs: `journalctl -u meter-relay -f`.
+
+### Deploying a change (the step that gets missed)
+
+`scripts/deploy-meter-relay.sh` does all of the below and verifies the result
+(`--no-rebuild` re-locks and reports only; it refuses to switch on any host but
+grafton-router). By hand:
+
+```sh
+cd ~/Projects/meter-relay-rs
+git add -A                       # at least stage any NEW file — see below
+git commit -m "…"                # optional, but keeps the locked hash reviewable
+nix build                        # optional fast local check; prints ./result
+
+cd ~/nixos-config
+nix flake update meter-relay-rs                       # ← REQUIRED, every time
+# the input must really have moved — the store path has to change:
+nix eval --raw .#nixosConfigurations.grafton-router.config.systemd.services.meter-relay.serviceConfig.ExecStart
+sudo nixos-rebuild switch --flake .
+sudo nixos-confirm               # grafton-router has autoRollback — see the top
+systemctl status meter-relay && journalctl -u meter-relay -f
+```
+
+- **`.env`-only edits** (credentials, `MR_METER_TARGET_POWER`, …) need no
+  rebuild: `sudo systemctl restart meter-relay` re-reads
+  `WorkingDirectory/.env`.
+- **Verify the running build, don't assume:** `grep ExecStart
+  /etc/systemd/system/meter-relay.service` must show the same store path the
+  `nix eval` above printed, and `curl -s http://127.0.0.1:8484/api/status`
+  should show the new fields (e.g. the PID `"saturated"` flag and the “at limit”
+  badge added 2026-09-22).
+
+**Failure mode 1 — “I rebuilt but the host still runs the old code.”**
+A `path:` flake input is frozen at the `narHash` recorded in `flake.lock`, so
+`nixos-rebuild switch` happily rebuilds the *old* snapshot; because the
+resulting `ExecStart` is unchanged, systemd does not even restart the unit, and
+the service keeps running the previous binary with no warning. What makes this
+so misleading is that `nix build` **inside the Rust repo** succeeds and prints a
+brand-new `./result` — it builds the working tree directly, while the host
+builds the locked snapshot. Always `nix flake update meter-relay-rs` first
+(or `scripts/deploy-meter-relay.sh`), then compare the store path as above.
+(Same rule for the other path inputs: `gc-rust-node`, `frigate-monitor`, the
+`llama.cpp` forks.)
+
+**Failure mode 2 — `vite build` / rustc says a new file does not exist.**
+`error during build: Could not resolve "./Tip" from "src/App.tsx"` was exactly
+this: `web/src/Tip.tsx` existed in the checkout but had never been added to git.
+**New files must be at least staged (`git add`), or Nix cannot see them.** Nix
+reads a flake's own directory through the **git fetcher**, which copies only what
+git's index knows: tracked files (modified or not) *and staged ones*. A file
+that is merely untracked is absent from `/build/source`, so the build fails on a
+module that is plainly there in the working tree. Staging is enough; committing
+is tidier. This applies to anything the build reads — `src/*.rs`,
+`web/src/*.tsx`, `nix/package.nix`.
+
+Note the asymmetry: the `path:` *input* nixos-config consumes is **not**
+git-filtered — it copies that directory whole, untracked files, `.gitignore`d
+junk (`target/`, `web/node_modules/`, `.env`, `.git`) and all. So the deploy is
+never blocked by a missing stage; it is blocked by a stale lock (failure mode 1).
+Keep `git status` in the Rust repo clean-ish anyway, so the locked `narHash`
+corresponds to something reviewable.
+
 ## Known gotchas on this host
 
 - **GPU pinning (all three routers are Vulkan now).** The mesa
@@ -551,7 +645,9 @@ agent thread with no way to resume it. Follow this order:
   network call a `timeout`. Existing: `scripts/update-pi5-node.sh` (enroll a
   join code, re-lock the gc-rust-node input, `nixos-rebuild switch` +
   `nixos-confirm`, power-cycle the Pi, verify),
-  `scripts/pi5-powercycle.sh` (HA relay: default full cycle, `--off`/`--on`).
+  `scripts/pi5-powercycle.sh` (HA relay: default full cycle, `--off`/`--on`),
+  `scripts/deploy-meter-relay.sh` (re-lock the `meter-relay-rs` path input,
+  rebuild grafton-router, confirm, verify — see that section).
   Do not paste HA tokens/curls inline in agent sessions — call the script.
 - **Set timeouts on everything that talks to the network** (`timeout N cmd`);
   bare `ssh`/`curl`/`ping` to a flaky or dead host will stall the session.

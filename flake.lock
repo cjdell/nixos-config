@@ -101,6 +101,21 @@
     },
     "crane_3": {
       "locked": {
+        "lastModified": 1789760033,
+        "narHash": "sha256-jtT4yxZpR8seYnlCMMWSSPlFN92zO6ICuZ8pJrmi86k=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "73b980519cefc727a5f6cc8e5c0947a2f9be6edd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "repo": "crane",
+        "type": "github"
+      }
+    },
+    "crane_4": {
+      "locked": {
         "lastModified": 1769737823,
         "narHash": "sha256-DrBaNpZ+sJ4stXm+0nBX7zqZT9t9P22zbk6m5YhQxS4=",
         "owner": "ipetkov",
@@ -552,11 +567,12 @@
     },
     "meter-relay-rs": {
       "inputs": {
+        "crane": "crane_3",
         "nixpkgs": "nixpkgs_4"
       },
       "locked": {
-        "lastModified": 1790022671,
-        "narHash": "sha256-jAeGgXZFwvzUrh1eXlKI7k0e7aOp5zz7Q+qn2tN8eP0=",
+        "lastModified": 1790035306,
+        "narHash": "sha256-gxA+v5i602IQY2tQIe+BnQnmaxCVtvvdsbPXweaHIEM=",
         "path": "/home/cjdell/Projects/meter-relay-rs",
         "type": "path"
       },
@@ -1141,7 +1157,7 @@
     },
     "zed": {
       "inputs": {
-        "crane": "crane_3",
+        "crane": "crane_4",
         "flake-parts": "flake-parts_7",
         "nixpkgs": "nixpkgs_7",
         "rust-overlay": "rust-overlay"
