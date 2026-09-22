@@ -109,6 +109,15 @@ sudo nixos-rebuild switch --flake .
   modes, with the exact symptoms, are written up under "meter-relay-rs").
 - Avoid running `nix build`/`nixos-rebuild` for heavy jobs unless the task
   calls for it; the user often deploys manually.
+- **`hosts/grafton-router/secrets/` looks ignored but is tracked.** The root
+  `.gitignore`'s `secrets/` has no leading slash, so it matches at *any* depth —
+  yet `hosts/grafton-router/secrets/secrets.yaml` is in HEAD, and ignore rules
+  do not apply to tracked files. The trap is that `git add` on it prints
+  "The following paths are ignored … use -f" **and exits 1**, while quietly
+  staging it correctly: in a `git add … && git commit` chain the commit never
+  runs and it looks like the add failed. Check `git status` rather than trusting
+  the exit code, and use `git add -f` for a genuinely *new* file under there
+  (sops needs it in the flake source).
 
 ## The live target host: `zen3-nixos`
 
