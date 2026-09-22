@@ -492,11 +492,27 @@ The solar-inverter meter relay on **grafton-router** (the router itself,
 `/home/cjdell/Projects/meter-relay-rs` — *not* the older TypeScript app in
 `/home/cjdell/Projects/meter-relay`, which stays around for reference and
 because its `.env` holds the live `MR_*` credentials. It reads the grid meter
-over serial Modbus RTU, re-serves those registers to the Solis/Solax inverters,
-nudges them with per-inverter PIDs so grid export tracks
-`MR_METER_TARGET_POWER`, charges the batteries in the Octopus Go window,
-publishes to Home Assistant + InfluxDB, and serves a Solid.js dashboard on
-`:8484` (`/api/status`, `/api/history`, `/api/events` SSE, legacy `/stats`).
+over serial Modbus RTU, re-serves those registers to the inverters, nudges them
+with per-inverter PIDs so grid export tracks `MR_METER_TARGET_POWER`, charges the
+batteries in the Octopus Go window, publishes to Home Assistant + InfluxDB, and
+serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
+`/api/events` SSE, legacy `/stats`).
+
+- **The plant is a priority list, not two hardcoded inverters.** `MR_INVERTERS`
+  orders it (default `solis,solax`) and each entry takes `MR_<ID>_*` overrides,
+  so the existing `MR_SOLIS_*`/`MR_SOLAX_*` names still work. Entry 0 is the
+  primary actuator; the rest are the reserve. Adding a third inverter is a
+  `.env` change plus `MR_<ID>_DRIVER` pointing at a known driver; a genuinely
+  new *model* needs a row in `driver_defaults()` (`src/config.rs`) and an arm in
+  `inverters::build()` (`src/inverters.rs`). Duplicate ports or slave addresses
+  are a startup error.
+- **Allocation water-fills in both directions**, so surplus PV the main bank's
+  charge taper cannot absorb spills into the reserve instead of being exported
+  (it exists to cover demand the main bank cannot, and the peak-rate import it
+  displaces beats the 12p export). A reserve at `MR_<ID>_MAX_SOC` is skipped;
+  `MR_<ID>_ABSORB_SURPLUS=false` makes an inverter discharge-only. `/api/status`
+  now publishes `inverters: [...]` rather than named `solis`/`solax` keys —
+  `/stats` and the Home Assistant entity ids are unchanged.
 
 - Module: `hosts/grafton-router/services/meter-relay.nix` (imported by
   `services/default.nix`). It only sets
