@@ -4,6 +4,7 @@
   sops-nix.nixosModules.sops
 
   ((import ../../common/folding-at-home.nix) "none")
+  ../../common/folding-at-home-sops.nix
 
   ../../common/nosleep.nix
   ../../common/sops.nix

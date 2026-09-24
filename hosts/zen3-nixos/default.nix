@@ -10,6 +10,7 @@
   ../../common/wine.nix
 
   ((import ../../common/folding-at-home.nix) "amd")
+  ../../common/folding-at-home-sops.nix
 
   ./ai
   # ACME (Route 53 DNS-01) + nginx TLS vhost for *.ai.chrisdell.info
