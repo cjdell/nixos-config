@@ -17,6 +17,7 @@ workstation, etc.). Key layout:
 | `llama-log-viewer/` | Standalone zero-dependency Rust web app (see below) |
 | `llama-logs/` | Live `llama-server --log-prompts-dir` output consumed by the viewer |
 | `docs/recallium.md` | How to use the Recallium memory server (APIs, MCP, examples) |
+| `docs/klipper-3d-printer.md` | 3d-printer-server / Klipper (Smoothieboard LPC1768): boot-race fix, `klipper-firmware-update` + SD-flash runbook, and the **open** thermistor/ADC fault |
 | `docs/gtt-vram.md` | GTT-default/VRAM-cache research: `GGML_VK_ALLOW_SYSMEM_FALLBACK`, why there's no weight cache in llama.cpp, and why GTT never auto-unspills |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
@@ -255,6 +256,40 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   `armstub8-2712.bin` is the TF-A rpi5 build
   (bl31.bin) — built from source in the gc-rust-node flake (`pi5Armstub`,
   v2.15.0) — see pi5-blog.md.
+
+## 3d-printer-server (Klipper on a Smoothieboard, live)
+
+Host `3d-printer-server` = `192.168.49.60` (config `machines/dell-optiplex-core-4770/`,
+flake attr `3d-printer-server`; **no autoRollback** → no `nixos-confirm`). Runs the
+`mkuf/prind` Klipper stack as three rootful podman units (`podman-klipper`,
+`-moonraker`, `-mainsail`) with Mainsail on nginx :80. Board is a **Smoothieboard
+(LPC1768)**, USB CDC-ACM, 16 KiB Smoothieware/DFU bootloader.
+
+- **Full runbook: `docs/klipper-3d-printer.md`.** Read it before touching this host.
+  Highlights: the host has **no GitHub credentials** (deploy commits via `git bundle`
+  + `scp`, then `nohup sudo nixos-rebuild switch --flake .` — `systemd-run` fails on a
+  libgit2 ownership check); the `config/build.config` in the printer checkout is a
+  stale **RP2040** config, don't use it.
+- **MCU firmware:** `sudo klipper-firmware-update [--status|--to-sd DIR|--flash]`
+  (`machines/dell-optiplex-core-4770/klipper-firmware.nix`). Needed because the
+  container tracks the floating `latest` tag and re-pulls on every start, so the host
+  version drifts silently while the flashed firmware doesn't change — it had drifted
+  **16 months**. It builds from the running image's version label so they can't drift
+  again. Flash via the SD card (bootloader renames `firmware.bin` → `FIRMWARE.CUR`).
+- **"Mainsail doesn't load" is usually not a Mainsail problem.** The UI's files serve
+  fine; when klippy wedges (e.g. after an MCU-side `ADC out of range` shutdown) its API
+  socket accepts connections but never answers, so Moonraker's requests hang 60 s and
+  the SPA never finishes loading. Recovery: restart `podman-klipper` + `podman-moonraker`,
+  then `FIRMWARE_RESTART`.
+- **Open fault:** both thermistor readings sit at a stable but wrong ~81/86 °C and
+  don't respond to heating (raw ADC 0.6889 = 10.41 kΩ, vs 0.955 expected for the 100 k
+  sensors, which measure good). Not the sensors, not the host version (ADC code
+  byte-identical across the working and current release), and not a non-sampling ADC
+  (open inputs ramp to full scale). Leading suspect: the analog rail feeding the
+  thermistor pullups (~2.4 V while the ADC is referenced to 3.3 V). Next tests are in
+  the doc — measure the 3.3 V rail, then swap the sensors to the spare `P0.23`/`P0.24`
+  ADC pins already commented in `printer.cfg`. **Do not leave a heater running:**
+  with an in-range-but-wrong reading Klipper holds 100 % duty and `max_temp` can't trip.
 
 ## llama-log-viewer
 
