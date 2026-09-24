@@ -542,8 +542,8 @@
               ./common/nfs.nix
               ./common/nosleep.nix
               ./common/podman.nix
-              ./common/sunshine.nix
-              ./common/sunshine-nvidia.nix
+              # ./common/sunshine.nix
+              # ./common/sunshine-nvidia.nix
               ./common/system.nix
               ./machines/dell-optiplex-core-4770
               ./users/cjdell
