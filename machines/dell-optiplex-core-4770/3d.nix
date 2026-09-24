@@ -68,6 +68,25 @@
     };
   };
 
+  # The printer MCU (/dev/ttyACM0, Klipper lpc1768) is a USB CDC-ACM device that
+  # enumerates ~20s into boot - well after the OCI container units start. With no
+  # ordering dependency the container aborts with
+  #   Error: stat /dev/ttyACM0: no such file or directory
+  # and, because the module uses Restart=on-failure with RestartSec=100ms, it
+  # burns systemd's default StartLimitBurst=5 within 10s and latches into
+  # "start-limit-hit" for the rest of the boot (klipper container never created,
+  # Moonraker has no printer). Order after the device unit and give the retries a
+  # window wide enough to survive a printer that is powered off or slow to boot.
+  systemd.services."podman-klipper" = {
+    wants = [ "dev-ttyACM0.device" ];
+    after = [ "dev-ttyACM0.device" ];
+    unitConfig = {
+      StartLimitIntervalSec = 300;
+      StartLimitBurst = 30;
+    };
+    serviceConfig.RestartSec = 5;
+  };
+
   services.nginx.enable = true;
 
   services.nginx.virtualHosts = {
