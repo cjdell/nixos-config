@@ -1,9 +1,11 @@
 # 3d-printer-server / Klipper (Smoothieboard LPC1768) — runbook & findings (2026-09-24)
 
-**Status: two problems fixed, one STILL OPEN.**
-Fixed: the `podman-klipper` boot race (§3) and the 16-month MCU-firmware version
-drift (§4). Open: the thermistor/ADC readings are implausible (§6) — that section
-is written so it can be picked up cold.
+**Status: all three fixed.**
+Fixed: the `podman-klipper` boot race (§3), the 16-month MCU-firmware version
+drift (§4), and the implausible thermistor readings (§6). The last one was
+bypassed, not diagnosed: the two NTCs now run on an Arduino Nano acting as a
+second Klipper MCU — see **§11** for the full bring-up (2026-09-24). §6 remains
+the underlying, still-unexplained board fault.
 
 ---
 
@@ -209,7 +211,7 @@ curl -X POST "http://127.0.0.1/printer/gcode/script?script=FIRMWARE_RESTART"
 
 Then confirm `state: "ready"` and that the `pending` count is 0.
 
-## 6. OPEN — thermistor readings implausible (bed ≈ 86 °C, extruder ≈ 81 °C, frozen)
+## 6. OPEN (bypassed — see §11) — thermistor readings implausible (bed ≈ 86 °C, extruder ≈ 81 °C, frozen)
 
 **Symptom.** Both temperatures read a stable but wrong value that does not change
 when heating is switched on. Onset was mid-print: job 57
@@ -822,3 +824,118 @@ Nothing has been run on `3d-printer-server`; no hardware has been touched.
   `writeShellApplication` so it lands on `PATH` under `sudo`, like
   `klipper-firmware-update`? Not done yet.
 - Upgrade to ADS1115 (§9.2) once one is available — config-only change.
+
+---
+
+## 11. DONE — Arduino Nano as a 2nd Klipper MCU (2026-09-24)
+
+This is the §9.7/§10 plan, executed. The bed and hotend NTCs now feed the Nano's
+ADC pins; the heaters stay on the Smoothieboard. Both temperatures are live and
+in range again, and this is what §6's "OPEN" now refers to as bypassed.
+
+### 11.1 What was built
+
+- `nano-klipper.sh` flashed Klipper `atmega328p` @ 16 MHz / 250000 baud onto the
+  Nano. Build config `~/Projects/prind.delta/config/build.nano.config`, output
+  `out-nano/klipper.elf.hex` (13844 bytes of flash).
+- **The "pin the board only" seed overflows.** With the original 6-line seed,
+  `make olddefconfig` enables every optional feature and the link dies with
+  `region 'text' overflowed by 16670 bytes`. The seed must disable them all —
+  this Nano only does ADC: `CONFIG_WANT_ADC=y` and `# … is not set` for SPI,
+  I2C, hard PWM, buttons, TMC UART, neopixel, pulse counter, ST7920, HD44780,
+  every external sensor chip, and `WANT_TRIGGER_ANALOG`. Both the script's
+  inline seed and `build.nano.config` now carry the full list.
+- **avrdude needs 57600**, not 115200 (old Nano bootloader). `--flash` already
+  tries 115200 then 57600.
+- **The by-id is not the one §9.7/§10 guessed.** It is
+  `/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0` (→ `ttyUSB0`), *not*
+  `usb-1a86_USB_Serial-…`.
+
+### 11.2 Host/container plumbing
+
+EPERM, not ENOENT, is the failure mode when the device is missing. The container
+bind-mounts all of `/dev`, so `/dev/ttyUSB0` *appeared* inside it, but the OCI
+module only passed `--device=/dev/ttyACM0`, so the device cgroup returned
+`[Errno 1] Operation not permitted` on open. `3d.nix` now adds:
+
+```nix
+"--device=/dev/ttyUSB0"
+"--device=/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"
+# and in systemd.services."podman-klipper":
+wants/after = [ "dev-ttyACM0.device" "dev-ttyUSB0.device" ];
+```
+
+Deployed with `nohup sudo nixos-rebuild switch --flake .` (dirty tree is fine).
+No autoRollback on this host → no `nixos-confirm`.
+
+### 11.3 printer.cfg changes
+
+```ini
+[mcu nano]
+serial: /dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0
+
+[extruder]
+sensor_type: extruder_cal
+sensor_pin: nano:PC1        # hotend NTC
+
+[heater_bed]
+sensor_type: bed_cal
+sensor_pin: nano:PC0        # bed NTC
+```
+
+### 11.4 Which pin is which (identified, not assumed)
+
+They were **swapped** relative to the first guess. Driving only the bed heater
+(`P2.5`, `M140 S60`) made the channel then assigned to `[extruder]` rise
+(54.42 → 55.33 °C) while the `heater_bed` channel stayed flat. So **`PC0` = bed,
+`PC1` = hotend**, and the pins were swapped. Do this with a low target and
+watch, never by leaving a heater on.
+
+### 11.5 Calibration
+
+The Nano divider reads a ratio **~0.897×** what it should (both channels ~0.857
+where a 100 k NTC on 4.7 k must read ~0.955). That is the §9.1 supply/reference
+mismatch — the pullup rail sits ~0.5 V below the Nano's AVcc. Klipper's
+thermistor path (`r = pullup·adc/(1-adc)`) has no term for it, so the stock
+sensors read ~55 °C at room temperature.
+
+Fix: `[adc_temperature]` tables that fold the scale into the true curves —
+`bed_cal` (Honeywell 100 K 135-104LAG-J01) and `extruder_cal` (ATC Semitec
+104GT-2, Steinhart-Hart from Klipper's three points), scale `k ≈ 0.89` anchored
+at a 23.0 °C bed reading, `pullup_resistor: 4700`.
+
+**Validated:** bed holding 60.6 °C, the **underside** (where the thermistor is)
+measured ≈ 60 °C — within ~1 °C. The top **plastic** sheet read 53 °C; that is a
+real plate-to-surface gradient, not sensor error. Do **not** correct the table to
+the top surface — it would drive the plate ~7 °C above every setpoint and eat the
+`max_temp: 130` headroom.
+
+### 11.6 PID was the other half of the "wild readings"
+
+The saved gains were tuned against the old broken sensor; the bed in particular
+had `pid_Kd = 1288`, so every downward ADC blip slammed full power and the
+reading sat ~3 °C high and jittered. `PID_CALIBRATE` + `SAVE_CONFIG` (written
+into the usual `#*#` block) gives:
+
+```
+[heater_bed]  pid_Kp=74.687  pid_ki=1.671  pid_kd=834.600
+[extruder]    pid_Kp=14.021  pid_ki=0.654  pid_kd=75.184
+```
+
+Both now hold setpoint to ~±0.2 °C.
+
+### 11.7 The IR thermometer is not a hotend reference
+
+Two hotend points (Klipper 179.92 → IR 155.2; Klipper 240.25 → IR 194.0) fit
+`T_ir⁴ = a·T_true⁴ + T_bg⁴` with `a ≈ 0.51`, `T_bg ≈ 58 °C` — the gun's spot is
+larger than the small heater block, so it averages block and surroundings. It is
+not a sensor fault; no table change was made. Use a contact K-type probe if the
+hotend ever needs a true reference.
+
+### 11.8 Residual / safety
+
+The underlying §6 board fault is still unexplained and only bypassed. With
+Klipper-on-Nano, `min_temp`/`max_temp` are enforced on the Nano as normal (unlike
+the ADS1115 route in §9.2), so `verify_heater` behaves. Upgrade path unchanged:
+an ADS1115 on the board's I2C (§9.2) would drop the Nano *and* the calibration
+tables.

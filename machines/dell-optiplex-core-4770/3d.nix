@@ -31,6 +31,10 @@
         "--ip=10.88.0.10"
         "--device=/dev/ttyACM0"
         "--device=/dev/serial/by-id/usb-Klipper_lpc1768_0D40001727953EAE6BC5B753C52000F5-if00"
+        # Arduino Nano (CH340) running Klipper as a 2nd MCU - the thermistor ADC
+        # workaround for the Smoothieboard's failed channels (docs/klipper-3d-printer.md).
+        "--device=/dev/ttyUSB0"
+        "--device=/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"
         # Add container process to group `dialout` so it has permission to access serial devices
         "--group-add=${toString config.users.groups.dialout.gid}"
       ];
@@ -78,8 +82,8 @@
   # Moonraker has no printer). Order after the device unit and give the retries a
   # window wide enough to survive a printer that is powered off or slow to boot.
   systemd.services."podman-klipper" = {
-    wants = [ "dev-ttyACM0.device" ];
-    after = [ "dev-ttyACM0.device" ];
+    wants = [ "dev-ttyACM0.device" "dev-ttyUSB0.device" ];
+    after = [ "dev-ttyACM0.device" "dev-ttyUSB0.device" ];
     unitConfig = {
       StartLimitIntervalSec = 300;
       StartLimitBurst = 30;

@@ -140,12 +140,39 @@ write_seed_config() {
   mkdir -p "$(dirname "$CONFIG_ABS")"
   cat >"$CONFIG_ABS" <<'SEED'
 # Klipper MCU firmware build config -- Arduino Nano / ATmega328P / UART0.
-# Only the board selection is pinned; `make olddefconfig` fills the rest.
+# The ATmega328P has only 32 KiB flash, so pinning the board alone and letting
+# `make olddefconfig` enable every optional feature overflows the link.  This
+# second MCU only does ADC (thermistors), so disable the rest explicitly.
 CONFIG_MACH_AVR=y
 CONFIG_MACH_atmega328p=y
 CONFIG_AVR_FREQ_16000000=y
 CONFIG_AVR_SERIAL_UART0=y
 CONFIG_SERIAL_BAUD=250000
+CONFIG_WANT_ADC=y
+# CONFIG_WANT_SPI is not set
+# CONFIG_WANT_SOFTWARE_SPI is not set
+# CONFIG_WANT_I2C is not set
+# CONFIG_WANT_SOFTWARE_I2C is not set
+# CONFIG_WANT_HARD_PWM is not set
+# CONFIG_WANT_BUTTONS is not set
+# CONFIG_WANT_TMCUART is not set
+# CONFIG_WANT_NEOPIXEL is not set
+# CONFIG_WANT_PULSE_COUNTER is not set
+# CONFIG_WANT_ST7920 is not set
+# CONFIG_WANT_HD44780 is not set
+# CONFIG_WANT_ADXL345 is not set
+# CONFIG_WANT_LIS2DW is not set
+# CONFIG_WANT_BMI160 is not set
+# CONFIG_WANT_MPU9250 is not set
+# CONFIG_WANT_ICM20948 is not set
+# CONFIG_WANT_THERMOCOUPLE is not set
+# CONFIG_WANT_HX71X is not set
+# CONFIG_WANT_CS1237 is not set
+# CONFIG_WANT_ADS131M0X is not set
+# CONFIG_WANT_ADS1220 is not set
+# CONFIG_WANT_LDC1612 is not set
+# CONFIG_WANT_SENSOR_ANGLE is not set
+# CONFIG_WANT_TRIGGER_ANALOG is not set
 SEED
 }
 
