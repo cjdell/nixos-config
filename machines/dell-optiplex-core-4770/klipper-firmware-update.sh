@@ -193,22 +193,28 @@ SEED
 
 build_firmware() {
   local tools=$1
-  mkdir -p "$OUT_ABS"
+  local jobs
+  jobs=$(nproc)
   if ! podman image exists "$tools"; then
     log "pulling $tools (large, one-off)"
     timeout 1800 podman pull "$tools"
   fi
-  local jobs
-  jobs=$(nproc)
+  # Start from an empty out dir: Klipper's make does not reliably notice a
+  # changed .config, and stale artifacts (e.g. left over from an RP2040 build)
+  # break the build.  `make clean` can NOT be used for this -- it runs
+  # `rm -rf $(OUT)` and $(OUT) is a bind-mount point, so it dies with
+  # "rm: cannot remove 'out/': Device or resource busy".  Clean host-side
+  # instead, before the container starts, so the mount source is empty.
+  log "cleaning build dir $OUT_ABS"
+  rm -rf "$OUT_ABS"
+  mkdir -p "$OUT_ABS"
   log "building firmware from $tools"
-  # `make clean` first: Klipper's make does not reliably notice a changed
-  # .config, and the output dir may hold artifacts from an earlier build.
   podman run --rm \
     --entrypoint /bin/bash \
     -v "$CONFIG_ABS:/opt/klipper/.config" \
     -v "$OUT_ABS:/opt/klipper/out" \
     -w /opt/klipper \
-    "$tools" -c "make clean >/dev/null && make olddefconfig && make -j${jobs}"
+    "$tools" -c "make olddefconfig && make -j${jobs}"
 
   [[ -s $OUT_ABS/klipper.bin ]] ||
     die "build finished but $OUT_ABS/klipper.bin is missing"
