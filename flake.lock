@@ -571,8 +571,8 @@
         "nixpkgs": "nixpkgs_4"
       },
       "locked": {
-        "lastModified": 1790184316,
-        "narHash": "sha256-BjjCXoTInJE/pBi0ivIkv559d7FAb5QFGbiSmI/WC9A=",
+        "lastModified": 1790380418,
+        "narHash": "sha256-MOJcDWGPi5CUxuehLXs1OYV3KCzdfAVgbxPK9LP+TK8=",
         "path": "/home/cjdell/Projects/meter-relay-rs",
         "type": "path"
       },
