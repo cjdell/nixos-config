@@ -545,7 +545,7 @@
               # ./common/sunshine.nix
               # ./common/sunshine-nvidia.nix
               ./common/system.nix
-              ./machines/dell-optiplex-core-4770
+              ./hosts/3d-printer-server
               ./users/cjdell
               home-manager.nixosModules.home-manager
               homeManagerPrefs

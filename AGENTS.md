@@ -278,7 +278,7 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
 
 ## 3d-printer-server (Klipper on a Smoothieboard, live)
 
-Host `3d-printer-server` = `192.168.49.60` (config `machines/dell-optiplex-core-4770/`,
+Host `3d-printer-server` = `192.168.49.60` (config `hosts/3d-printer-server/`,
 flake attr `3d-printer-server`; **no autoRollback** → no `nixos-confirm`). Runs the
 `mkuf/prind` Klipper stack as three rootful podman units (`podman-klipper`,
 `-moonraker`, `-mainsail`) with Mainsail on nginx :80. Board is a **Smoothieboard
@@ -290,7 +290,7 @@ flake attr `3d-printer-server`; **no autoRollback** → no `nixos-confirm`). Run
   libgit2 ownership check); the `config/build.config` in the printer checkout is a
   stale **RP2040** config, don't use it.
 - **MCU firmware:** `sudo klipper-firmware-update [--status|--to-sd DIR|--flash]`
-  (`machines/dell-optiplex-core-4770/klipper-firmware.nix`). Needed because the
+  (`hosts/3d-printer-server/klipper-firmware.nix`). Needed because the
   container tracks the floating `latest` tag and re-pulls on every start, so the host
   version drifts silently while the flashed firmware doesn't change — it had drifted
   **16 months**. It builds from the running image's version label so they can't drift

@@ -21,7 +21,7 @@
 # scripts/install-ubuntu-18.04.sh), so nothing extra is needed on the host.
 #
 # UNTESTED: written 2026-09-24 from Klipper's Kconfig/Makefile and modelled on
-# the working machines/dell-optiplex-core-4770/klipper-firmware-update.sh.
+# the working hosts/3d-printer-server/klipper-firmware-update.sh.
 # The first run should be `--build-only` to confirm the toolchain is present.
 #
 # Usage:

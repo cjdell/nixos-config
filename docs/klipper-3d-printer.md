@@ -15,7 +15,7 @@ the underlying, still-unexplained board fault.
 | --- | --- |
 | Host | **`3d-printer-server`** = `192.168.49.60` (static lease in `hosts/grafton-router/networking/dns.nix`) |
 | Hardware | Dell OptiPlex 4770, i7-4770, 8 cores |
-| Config | `machines/dell-optiplex-core-4770/` (flake host attr `3d-printer-server`) |
+| Config | `hosts/3d-printer-server/` (flake host attr `3d-printer-server`) |
 | autoRollback | **not enabled here** → no `nixos-confirm` needed after rebuilds |
 | Board | **Smoothieboard, LPC1768** @ 100 MHz, USB CDC-ACM, 16 KiB Smoothieware/DFU bootloader |
 | Serial | `/dev/serial/by-id/usb-Klipper_lpc1768_0D40001727953EAE6BC5B753C52000F5-if00` → `ttyACM0` |
@@ -94,7 +94,7 @@ and because the module sets `Restart=on-failure` with `RestartSec=100ms`, it bur
 systemd's default `StartLimitBurst=5` / `StartLimitIntervalSec=10s` and latched into
 `start-limit-hit` for the rest of the boot. Seen at least 10× in 10 days.
 
-**Fix** (`machines/dell-optiplex-core-4770/3d.nix`):
+**Fix** (`hosts/3d-printer-server/3d.nix`):
 
 ```nix
 systemd.services."podman-klipper" = {
@@ -119,7 +119,7 @@ actually flashed into the MCU only changes when someone does it by hand. On
 2026-09-24 the host was `v0.13.0-770-gce7002bed` while the MCU still ran a build
 from **2025-05-25** — ~16 months of drift.
 
-Installed by `machines/dell-optiplex-core-4770/klipper-firmware.nix`
+Installed by `hosts/3d-printer-server/klipper-firmware.nix`
 (`writeShellApplication`, so podman/jq/curl stay on `PATH` under `sudo`); the script
 source is `klipper-firmware-update.sh` beside it. It derives the target version from
 the image label `org.prind.image.version`, so host and MCU can no longer drift.
@@ -494,7 +494,7 @@ second MCU it cannot also carry a custom serial protocol to the Smoothieboard.
 
 ### 9.4 Option C: Nano as a standalone C sensor node (what's in this repo)
 
-`machines/dell-optiplex-core-4770/analog-adc/` — a bare-metal AVR program and
+`hosts/3d-printer-server/analog-adc/` — a bare-metal AVR program and
 flash script. This is the literal ask (C program for the Nano, flash script,
 wiring). Read the caveat: **as written it is a thermometer, not a Klipper
 temperature source** — it prints readings, it does not drive a heater. Its real
@@ -606,7 +606,7 @@ already carries the AVR toolchain (`scripts/install-ubuntu-18.04.sh` installs
 **Recipe**
 
 1. Build + flash the firmware with `nano-klipper.sh` (beside this doc's host
-   config, at `machines/dell-optiplex-core-4770/nano-klipper.sh`):
+   config, at `hosts/3d-printer-server/nano-klipper.sh`):
 
    ```sh
    sudo ./nano-klipper.sh --build-only     # confirm the toolchain works
@@ -707,13 +707,13 @@ workaround for a fault they would actually identify.
 
 Files (all in this repo):
 
-- `machines/dell-optiplex-core-4770/analog-adc/NanoThermistor.c` — bare-metal
+- `hosts/3d-printer-server/analog-adc/NanoThermistor.c` — bare-metal
   AVR thermometer. **Compiles clean** (`avr-gcc 15.3.0`, 3874 bytes text).
-- `machines/dell-optiplex-core-4770/analog-adc/flash.sh` — builds/flashes it.
+- `hosts/3d-printer-server/analog-adc/flash.sh` — builds/flashes it.
   **Build path verified** (`./flash.sh --build-only` works, pulls the
   `pkgsCross.avr` toolchain via `nix shell`).
-- `machines/dell-optiplex-core-4770/analog-adc/.gitignore`
-- `machines/dell-optiplex-core-4770/nano-klipper.sh` — builds + flashes Klipper
+- `hosts/3d-printer-server/analog-adc/.gitignore`
+- `hosts/3d-printer-server/nano-klipper.sh` — builds + flashes Klipper
   `atmega328p` firmware for the Nano as a 2nd MCU. **Syntax-checked only
   (`bash -n`); never run.**
 - `docs/klipper-3d-printer.md` §9 (+ this §10).
