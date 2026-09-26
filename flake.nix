@@ -534,25 +534,6 @@
             ];
           };
 
-          "3d-printer-server" = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "nvidia")
-              ./common/nfs.nix
-              ./common/nosleep.nix
-              ./common/podman.nix
-              # ./common/sunshine.nix
-              # ./common/sunshine-nvidia.nix
-              ./common/system.nix
-              ./hosts/3d-printer-server
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           haswellmatx-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
