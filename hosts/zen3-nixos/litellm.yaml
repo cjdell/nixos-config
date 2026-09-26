@@ -5,12 +5,12 @@
 # creative / uncensored.
 #
 # Two llama-swap backends (each a llama.cpp router pinned to one GPU):
-#   http://127.0.0.1:8081/upstream/vega/v1   -> Vega 8 iGPU (Vulkan1, GTT)
-#   http://127.0.0.1:8081/upstream/r9700/v1  -> Radeon R9700 32 GB (Vulkan0)
-# A model is named by its GGUF basename in /home/cjdell/Models; the router
-# loads it on demand. The R9700 router runs --models-max 1 (one model resident
-# at a time), the Vega router up to 4. Adding another box = adding more
-# deployments to a group (see docs/litellm.md).
+#   http://127.0.0.1:8081/upstream/r9700/v1  -> Radeon R9700 32 GB (Vulkan)
+# Since 2026-09-26 there is only ONE router: the vega (Vega 8 iGPU) and rx580
+# (RX 580 4 GB) entries were removed from llama-swap (too slow / too little
+# VRAM to be useful), so EVERY group below points at r9700 - one model resident
+# at a time (--models-max 1) and one request at a time (--parallel 1), which
+# means a second request queues behind the first instead of halving its speed.
 #
 # The systemd unit references THIS FILE DIRECTLY (no Nix rebuild needed):
 #   sudo systemctl restart litellm
@@ -22,14 +22,15 @@
 model_list:
   # ---------------------------------------------------------------------------
   # scouting: cheap + fast, for broad exploration / summarising / cheap passes.
-  # Served by the Vega 8 iGPU (GTT-backed), so it never touches the R9700 and
-  # stays resident next to the big models. The research sub-agent should use
-  # this group.
+  # This used to be served by the Vega 8 iGPU so it would never touch the
+  # R9700's model; the R9700 is now the only router, so this group evicts the
+  # big model (--models-max 1) - use it for dedicated small-model work, not
+  # alongside a long R9700 session.
   # ---------------------------------------------------------------------------
   - model_name: scouting
     litellm_params:
       model: openai/ornith-1.0-9b-Q4_K_M
-      api_base: http://127.0.0.1:8081/upstream/vega/v1
+      api_base: http://127.0.0.1:8081/upstream/r9700/v1
       api_key: local-llama-swap
     model_info:
       id: ornith-1.0-9b-Q4_K_M
@@ -91,9 +92,10 @@ model_list:
 #     "gpt-4": "planning"
 #     "claude-sonnet-4-5": "planning"
 
-# Two GPUs now: big models on the R9700 (one resident, --models-max 1), small
-# ones on the Vega. The R9700 router still swaps models for concurrent requests
-# to different groups, so give it room to retry and cool down a straggler.
+# One GPU now: every group runs on the R9700 (one model resident,
+# --models-max 1, one slot, --parallel 1). The R9700 router swaps models for
+# requests to different groups, so give it room to retry and cool down a
+# straggler.
 router_settings:
   routing_strategy: least-busy
   num_retries: 2

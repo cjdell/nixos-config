@@ -105,39 +105,16 @@
       url = "github:ggml-org/llama.cpp";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # llama.cpp for Qwen3.8-Flash-Next MTP, as a LOCAL repo (see
-    # /home/cjdell/Projects/llama-mtp): upstream ggml-org master (rev
-    # 42f0225, 2026-09-03) + the two open upstream qwen4exp-MTP PRs merged on
-    # top — ggml-org#27836 "qwen4exp: add NextN/MTP draft head" and #28097
-    # "support draft-head-only GGUFs (unsloth layout)" — plus a backport of
-    # unslothai/llama.cpp#144's cross-model tensor borrowing so the unsloth
-    # `shared` MTP head files work. WHY NOT THE FORK: unsloth's release tag
-    # b10715-mix-86bd2d3 tracks their master, which has NO qwen4exp arch at
-    # all ("unknown model architecture" from source); their PR branch
-    # mtp/qwen4exp-nextn works but sits on an Aug-31 base that predates the
-    # merged upstream decode fixes (e.g. #28123 recurrent-state rollback:
-    # "MTP slower than no draft" -> +50-90% decode on the LocalLLaMA thread;
-    # #28023 indexer prefill). The local repo = the fork's MTP code, but on
-    # today's master with those fixes + borrowing. Refresh after editing the
-    # repo with: nix flake lock --update-input llama-cpp-mtp
-    llama-cpp-mtp = {
-      url = "git+file:///home/cjdell/Projects/llama-mtp";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    # stew675's RDNA performance fork (HIP/CUDA backend only): RDNA4 WMMA
-    # flash-attn, gfx1201 mmvq decode, fused MoE/SSM kernels, adaptive MTP.
-    # Previously used for the R9700 router (hosts/zen3-nixos/ai/llama-swap.nix);
-    # the router moved to the upstream Vulkan build (2026-08-23) because MTP
-    # draft acceptance was 0 on the HIP fork. Kept as an input for reference /
-    # easy re-enable; nothing references it while unbuilt (lazy).
-    llama-cpp-rdna = {
-      url = "github:stew675/llama.cpp/rdna-boosts";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    llama-cpp-uma = {
-      url = "git+file:///home/cjdell/Projects/llama.cpp";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    # Upstream llama.cpp ONLY (2026-09-26). The three fork inputs that used to
+    # live here are gone: `llama-cpp-mtp` (local /home/cjdell/Projects/llama-mtp,
+    # upstream master + the open qwen4exp-MTP PRs #27836/#28097 + unsloth #144
+    # tensor borrowing) was the R9700 router's build; `llama-cpp-rdna`
+    # (stew675/llama.cpp rdna-boosts) was its HIP predecessor; `llama-cpp-uma`
+    # was an unused local checkout of upstream. Upstream master carries
+    # `--spec-type draft-mtp`, and the fork's only unique feature was the
+    # qwen4exp draft head for Qwen3.8-Flash-Next (~79 GB - impossible on a
+    # 32 GiB card), so the forks bought nothing and the router now runs the
+    # upstream Vulkan build (see hosts/zen3-nixos/ai/llama-swap.nix).
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -172,9 +149,6 @@
       plasma-manager,
       stylix,
       llama-cpp,
-      llama-cpp-mtp,
-      llama-cpp-rdna,
-      llama-cpp-uma,
       disko,
       disko-zfs,
       zed,
@@ -378,16 +352,6 @@
         })
       ) llama-cpp.packages.${system};
 
-      # Same test-off wrapper for the local llama-cpp-mtp repo (see llamaCppPkgs).
-      # Exposed via specialArgs as llamaCppMtpPkgs and consumed only by
-      # hosts/zen3-nixos/ai/llama-swap.nix (llamaCmdR9700Flash / r9700 router).
-      llamaCppMtpPkgs = builtins.mapAttrs (
-        _: pkg:
-        pkg.overrideAttrs (old: {
-          cmakeFlags = old.cmakeFlags ++ [ "-DLLAMA_BUILD_TESTS=OFF" ];
-        })
-      ) llama-cpp-mtp.packages.${system};
-
       # Which nixpkgs each host runs on: hosts listed here opt into unstable,
       # everything else uses the stable `nixpkgs` input.
       nixpkgsFor = host: if host == "alderlake-thinkpad" then nixpkgs-unstable else nixpkgs;
@@ -437,7 +401,6 @@
           specialArgs = {
             inherit inputs;
             inherit llamaCppPkgs;
-            inherit llamaCppMtpPkgs;
           };
         };
     in

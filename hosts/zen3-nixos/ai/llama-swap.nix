@@ -6,11 +6,21 @@
   ...
 }:
 
-# llama-swap router matrix: three llama.cpp router instances (llama-server
-# --models-dir), one per GPU, kept co-resident via a `matrix` so neither
-# evicts the other. See AGENTS.md "The live target host" for the full story:
-# r9700 (Vulkan build, --models-max 1, no GTT spill), vega (Vulkan, GTT,
-# up to 4 resident), rx580 (Vulkan, 4 GB hard cap, 1 resident).
+# llama-swap in front of ONE llama.cpp router: an upstream Vulkan build
+# (`llama-cpp-vulkan`, from the `llama-cpp` flake input =
+# github:ggml-org/llama.cpp) pinned to the R9700. See AGENTS.md
+# "The live target host: zen3-nixos".
+#
+# What was removed from here on 2026-09-26, and why:
+#   * the vega (Vega 8 iGPU) and rx580 (RX 580 4 GB) routers, and the `matrix`
+#     that kept all three llama-server routers co-resident. Both GPUs are too
+#     slow / have too little VRAM to be useful next to the R9700.
+#   * the local llama.cpp fork (`llama-cpp-mtp` = /home/cjdell/Projects/llama-mtp)
+#     that the r9700 router ran for MTP. Upstream master carries
+#     `--spec-type draft-mtp`; the fork only added the qwen4exp draft head,
+#     whose model (Qwen3.8-Flash-Next, ~79 GB) cannot fit a 32 GiB card at all.
+#     All llama.cpp forks are gone from flake.nix (llama-cpp-mtp,
+#     llama-cpp-rdna, llama-cpp-uma) - upstream only, one router, one GPU.
 #
 # nginx: owns the "/" location + llama-swap's /api management carve-outs on
 # the IP vhost, plus the public llama.ai.chrisdell.info (UI + API at root,
@@ -44,179 +54,107 @@ in
     wants = [ "wait-for-network.service" ];
     wantedBy = [ "multi-user.target" ];
 
-    environment = {
-      # All three routers run a Vulkan build of llama.cpp (llama-cpp-vulkan,
-      # except the r9700 router which uses the llama-cpp-mtp build — see below).
-      # The r9700 previously ran the stew675/llama.cpp `rdna-boosts` HIP fork;
-      # its MTP speculative decoding showed no draft acceptance (spec_decode
-      # counters stayed at 0 on the r9700), so it was switched to the Vulkan
-      # build, where MTP works (verified 35/35 drafts accepted in the LM Studio
-      # trial, 2026-08-23).
-      #
-      # Qwen3.8-Flash-Next (qwen4exp arch, ~79 GB IQ3_XXS MoE) does NOT fit in
-      # the R9700's 32 GiB VRAM, so without this fallback llama.cpp fails the
-      # model load outright with "unable to allocate Vulkan0 buffer" (no CPU
-      # re-balance, no GTT — see docs/gtt-vram.md). With it, the overflow lands
-      # in GTT (host RAM, PCIe speed) and the model runs instead of erroring.
-      # Weights that DO fit (the 27B models) still take device-local VRAM first
-      # (allocation ladder: rebar -> device-local -> GTT), so this does not
-      # slow down models that fit. There is no auto-unspill: a GTT-resident
-      # model stays in GTT until unloaded (--models-max 1 evicts it when
-      # another r9700 model is requested).
-      GGML_VK_ALLOW_SYSMEM_FALLBACK = "1";
-      # GGML_VK_LOG_SUBMISSIONS = "1";
-      # GGML_VK_SERIALIZE_SUBMISSIONS = "1";
-    };
+    # NO GGML_VK_ALLOW_SYSMEM_FALLBACK here any more. It was set so that a model
+    # that does not fit the card spills into GTT instead of failing the load -
+    # but that silently turned the 27B's VRAM overflow into ~2 GB of
+    # GTT-resident weights (measured 2026-09-26: 1995 MiB of GTT, byte-identical
+    # over 707 samples and static from load time), i.e. PCIe-speed reads inside
+    # every long prefill, which is exactly the "model fits fine on this GPU"
+    # trap. A model that does not fit must now fail loudly. See docs/gtt-vram.md.
 
     serviceConfig =
       let
         llama-cpp-vulkan = specialArgs.llamaCppPkgs.vulkan;
 
-        # llama-cpp-mtp (local repo /home/cjdell/Projects/llama-mtp: upstream
-        # master + the open upstream qwen4exp-MTP PRs #27836/#28097 + a
-        # backport of unsloth #144 tensor borrowing) for the r9700 router.
-        # REQUIRED for Qwen3.8-Flash-Next MTP: mainline llama.cpp has no MTP
-        # graph for the qwen4exp architecture and no cross-model draft-head
-        # borrowing (the shared MTP head needs it), so --spec-type draft-mtp
-        # on that model silently does nothing / fails there. See the input
-        # comment in flake.nix for why not the unsloth fork release.
-        llama-cpp-mtp-vulkan = specialArgs.llamaCppMtpPkgs.vulkan;
+        modelsPath = "/home/cjdell/Models";
 
-        # Pin each router to its physical GPU via mesa's device-select layer
-        # (VK_LAYER_MESA_device_select) instead of relying on llama.cpp's
-        # `-dev VulkanN` indices. Those indices are assigned in RADV enumeration
-        # order, which is NOT stable: the implicit layer reorders devices so the
-        # boot-VGA (console) GPU comes first when no MESA_VK_DEVICE_SELECT is set.
-        # The R9700 drives no screens (console lives on the iGPU), so `-dev Vulkan0`
-        # silently meant the Vega and the r9700 router's models ran on the Vega's
-        # GTT (30 GB GTT used, R9700 idle at 57 MB). Selecting by vendor:device ID
-        # with a trailing `!` (exposes ONLY that device, making it Vulkan0) is
-        # immune to enumeration/boot-VGA changes:
+        # Pin the router to the physical GPU via mesa's device-select implicit
+        # layer (VK_LAYER_MESA_device_select) instead of llama.cpp's
+        # `-dev VulkanN` index. Those indices follow RADV enumeration order,
+        # which is NOT stable: the implicit layer puts the boot-VGA (console)
+        # GPU first when nothing is forced, and the R9700 drives no screens, so
+        # `-dev Vulkan0` silently meant the Vega's GTT. Selecting by
+        # vendor:device ID is immune to enumeration/boot-VGA changes, and the
+        # trailing `!` exposes ONLY that device - so Vulkan0 always means the
+        # R9700 and no other GPU is even visible to the process.
         #   1002:7551 = Radeon AI PRO R9700 (Navi 48, discrete, 32 GiB)
-        #   1002:1638 = Cezanne Vega 8 iGPU
-        #   1002:67df = Radeon RX 580 (Polaris, discrete, 4 GiB)
-        # XDG_DATA_DIRS is required for the loader to discover the implicit layer
-        # manifest under /run/opengl-driver/share/vulkan/implicit_layer.d.
-        #
-        # Three llama.cpp router instances (llama-server --models-dir), one per GPU:
-        #
-        #   r9700 (Radeon R9700 32 GB)  -> the big models. `--models-max 1`
-        #     pins residency to a single model: the router unloads the current one
-        #     and waits for the unload to finish before loading the next (LRU), so
-        #     weights + KV always stay in VRAM and never spill to GTT.
-        #   vega (Vega 8 iGPU, GTT-backed) -> the small/fast research
-        #     sub-agent models. GTT overflow is fine here, so up to `--models-max 4`
-        #     models can stay resident.
-        #   rx580 (Radeon RX 580 4 GB) -> small models that fit in 4 GB, running
-        #     fully in GDDR5 (~50 tok/s on a 2.6 B, faster than the Vega).
-        #     `--models-max 1`: the 4 GB is a hard VRAM limit (no GTT headroom), so
-        #     only one model stays resident at a time.
-        #
-        # All three wrappers use the mesa device-select layer so their pinned
-        # GPU is the only Vulkan device (always Vulkan0).
-        #
-        # `-cram N` (MiB) keeps idle-slot KV cache in system RAM and restores it to
-        # VRAM on the next request with a matching prompt prefix (verified working on
-        # the Vulkan backend: a 1243-token prefix reused ~1240 tokens, 16s -> 1.9s).
-        # This is THE warm-start mechanism for the agent harness: at the old 8192
-        # default the LCP cache logged "prompt state size ... exceeds cache size
-        # limit, skipping", so every turn re-prefilled the whole context (~5 min,
-        # longer than the client's 300 s stream idle timeout). 32 GiB was then
-        # observed MAXED by the pi-ai harness (llama-server RSS sat at ~26.5 GiB,
-        # LRU already evicting warm agent contexts), so it's doubled to 64 GiB:
-        # ~13 x 100k-token contexts stay warm at q8_0 (vs ~6 before) - a returning
-        # sub-agent's next turn skips its prefill entirely. LRU evicts the oldest
-        # states first, and if a state alloc ever fails, llama.cpp auto-shrinks the
-        # cache to 40% of its current size — but that only protects the cache's OWN
-        # allocation, NOT the system: at 64 GiB the r9700 server sat at ~64.5 GB
-        # anon RSS and, with no swap on this box, the machine global-OOM'd
-        # llama-server 4x in 5 days (Aug 24/27/28) whenever a second model load (or
-        # any other big allocation) came along. Mitigated by `zramSwap` in
-        # hosts/zen3-nixos/default.nix: the kernel swaps cold cache pages to
-        # compressed RAM under pressure instead of killing — the cache still uses
-        # all free RAM, it just yields when the system needs it.
-        # NOTE: do NOT switch to `-cram -1` here - that only removes the MiB cap,
-        # the per-cache token cap (= --ctx-size) still binds, which is SMALLER.
-        #
-        # `--cache-reuse 256` enables KV-shifting chunk reuse: runs of >=256 tokens
-        # that appear in a new prompt at a SHIFTED position (rolling-window contexts
-        # that trim history from the front, reordered segments, ...) are shifted into
-        # place instead of re-evaluated. Prefix reuse above already covers the common
-        # "same system prompt + growing history" case; this covers the rest. Only
-        # applies on shift-capable contexts (auto-disabled with a warning otherwise).
-        #
-        # `-ctk q8_0 -ctv q8_0` quantizes the KV cache: halves the VRAM/RAM footprint
-        # of the context (12 GiB -> 6 GiB at 128K for REAP) with near-lossless quality.
-        # The `-cram` RAM cache checkpoints store raw KV at the cache dtype, so it
-        # shrinks too. f16 was the previous (default) cache type.
-        #
-        # Flash attention: NOT set explicitly - `-fa auto` (the default) probes the
-        # backend and the Vulkan backend supports GGML_OP_FLASH_ATTN_EXT (incl. q8_0
-        # KV), so it resolves to enabled. Explicit `-fa on` would skip the probe.
-        #
-        # `--models-preset` (mtpPresets below) enables `draft-mtp` speculative
-        # decoding PER MODEL: the model's built-in MTP module drafts tokens, the
-        # target model verifies. Must stay per-model — models without MTP tensors
-        # (REAP, ornith, Laguna, LFM2.5...) fail to load if set globally. Verify
-        # acceptance via the spec_decode_* counters on /metrics.
-        # The layer is discoverable via XDG_DATA_DIRS; the `!` makes the pinned
-        # device the only one exposed (so its ggml name is always Vulkan0).
-        # r9700: 1002:7551 (Navi 48) — the R9700 is the only visible device, so
-        # `-dev Vulkan0` always means the R9700 (same scheme as vega/rx580).
+        # XDG_DATA_DIRS is required for the loader to discover the implicit
+        # layer manifest under /run/opengl-driver/share/vulkan/implicit_layer.d.
         llama-r9700 = pkgs.writeShellScript "llama-r9700" ''
           export XDG_DATA_DIRS=/run/opengl-driver/share
           export MESA_VK_DEVICE_SELECT=1002:7551!
           exec ${llama-cpp-vulkan}/bin/llama-server "$@"
         '';
 
-        llama-vega = pkgs.writeShellScript "llama-vega" ''
-          export XDG_DATA_DIRS=/run/opengl-driver/share
-          export MESA_VK_DEVICE_SELECT=1002:1638!
-          exec ${llama-cpp-vulkan}/bin/llama-server "$@"
-        '';
+        # Router mode (`--models-dir`): llama-server loads a GGUF from
+        # /home/cjdell/Models on demand, named by its basename.
+        #
+        # --models-max 1    one model resident; a switch unloads the current one
+        #                   first, so weights + KV of two models never have to
+        #                   coexist in 32 GiB.
+        # --parallel 1      ONE slot. Concurrent requests queue instead of
+        #                   sharing the KV pool and the SMs. Measured 2026-09-26:
+        #                   two simultaneous 24k-token cold prefills ran at 340
+        #                   and 565 tok/s, the same prompt solo at 723 tok/s -
+        #                   parallel long requests roughly halve each other.
+        #                   (opencode's harness had 369 of 397 r9700 requests
+        #                   overlapping another request; its title agent is now
+        #                   disabled and nothing else fans out on purpose.)
+        #                   Requests get SSE pings while queued, so a client's
+        #                   idle timeout is not at risk from the queue itself.
+        #
+        # --ctx-size 196608 (192k), -ctk/-ctv q8_0
+        #                   KV math for this model (Qwen3.8-27B = 17 attention
+        #                   layers x 4 KV heads x (256 key + 256 value) values,
+        #                   x 1.0625 B/value at q8_0 = 2176 B per layer per
+        #                   token = 36992 B/token): 4.5 GiB at 128k, 6.8 GiB at
+        #                   192k, 9.0 GiB at 256k - on top of the 18.7 GiB of
+        #                   weights, against ~31.2 GiB usable on the 32 GiB card.
+        #                   At 262144 with 4 slots it did NOT fit and ~2 GB went
+        #                   to GTT; 192k leaves ~6 GiB for the compute graph(s)
+        #                   and is deliberately kept in step with the
+        #                   `limit.context` opencode is configured with, so the
+        #                   client compacts before the server would refuse.
+        #
+        # -cram 32768       RAM prompt-cache cap in MiB (idle-slot KV states held
+        #                   in system RAM, restored to VRAM when a prompt prefix
+        #                   matches). This is THE warm-start mechanism: at the
+        #                   8192 default llama.cpp logged "prompt state size ...
+        #                   exceeds cache size limit, skipping" and every turn
+        #                   re-prefilled the whole context (~5 min, longer than
+        #                   the client's stream idle timeout). 32 GiB keeps ~4
+        #                   long-context states. It is real RSS, not free: at the
+        #                   old 65536 the box global-OOM'd llama-server 4x in
+        #                   Aug 2026, hence the lower cap + the zramSwap cushion
+        #                   in hosts/zen3-nixos/default.nix. Do NOT use `-cram -1`
+        #                   (removes the MiB cap only; the per-state token cap
+        #                   still binds).
+        #
+        # --cache-reuse 256 reuse runs of >=256 tokens that reappear at a shifted
+        #                   position (front-trimmed rolling contexts, reordered
+        #                   segments) by KV-shifting them into place instead of
+        #                   re-evaluating; needs prompt caching.
+        #
+        # -fa (default `auto`) probes the backend; Vulkan supports
+        #                   GGML_OP_FLASH_ATTN_EXT incl. q8_0 KV, so it resolves
+        #                   to enabled. Nothing to set explicitly.
+        #
+        # --sse-ping-interval 10  emit an SSE comment ping every 10 s while the
+        #                   stream is silent (i.e. during a long prefill) so
+        #                   harnesses that die after 300 s of silence survive.
+        #
+        # --log-prompts-dir feeds the (currently disabled) llama-log-viewer.
+        #
+        # --models-preset  per-model draft-mtp speculation - see mtpPresets.
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 --parallel 1 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (192 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
-        llama-rx580 = pkgs.writeShellScript "llama-rx580" ''
-          export XDG_DATA_DIRS=/run/opengl-driver/share
-          export MESA_VK_DEVICE_SELECT=1002:67df!
-          exec ${llama-cpp-vulkan}/bin/llama-server "$@"
-        '';
-
-        # Same GPU-pinning wrapper as llama-r9700 but execs the llama-cpp-mtp
-        # build's llama-server (llama-cpp-mtp-vulkan) instead of upstream.
-        llama-r9700-flash = pkgs.writeShellScript "llama-r9700-flash" ''
-          export XDG_DATA_DIRS=/run/opengl-driver/share
-          export MESA_VK_DEVICE_SELECT=1002:7551!
-          exec ${llama-cpp-mtp-vulkan}/bin/llama-server "$@"
-        '';
-
-        # `--sse-ping-interval 10`: while the stream is silent (i.e. during long
-        # prompt processing), emit an SSE comment ping every 10 s so streaming
-        # clients with first-token idle timeouts don't give up. Comment lines are
-        # invisible to SSE parsers. Default is 30 s; the pi-ai harness dies at 300 s
-        # of silence, which a 100k+ token prefill exceeds.
-        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-        # r9700 router running the llama-cpp-mtp build (see llama-r9700-flash)
-        # so Qwen3.8-Flash-Next can use draft-mtp. -ngl all is REQUIRED: the
-        # router otherwise defaults to ngl=0 (CPU only); with the build + the
-        # GGML_VK_ALLOW_SYSMEM_FALLBACK service env, whatever does not fit in
-        # the R9700's 32 GiB VRAM spills to GTT instead of failing to load.
-        # (A previous iteration appended `-ngl -1 --moe-cache auto --flash-attn`
-        # here — --moe-cache does not exist in any llama.cpp build and made the
-        # router exit at startup with "invalid argument"; do not bring it back.)
-        llamaCmdR9700Flash = "${llama-r9700-flash} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 65536 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-        llamaCmdVega = "${llama-vega} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 4 -ngl all --models-dir ${modelsPath} --models-max 4 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (256 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-
-        # rx580: small models fully in 4 GB GDDR5. --models-max 1 because the 4 GB
-        # is a hard VRAM limit (no GTT headroom); -cram 16384 keeps idle-slot KV
-        # warm in system RAM.
-        llamaCmdRx580 = "${llama-rx580} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 8 -ngl all --models-dir ${modelsPath} --models-max 1 -cram 16384 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (128 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
-
-        modelsPath = "/home/cjdell/Models";
-
-        # Per-model speculative decoding presets for the inner llama.cpp routers.
-        # `draft-mtp` reuses the model's own MTP module (`blk.N.nextn.*` tensors) as
-        # the draft — no separate draft model, no extra VRAM. Only MTP-capable models
-        # are listed; everything else loads without speculation.
+        # Per-model speculative decoding for the llama.cpp router, upstream
+        # `--spec-type draft-mtp`: the model's own MTP module (blk.N.nextn.*
+        # tensors) drafts tokens and the target verifies them - no separate
+        # draft model, no extra VRAM. It must stay per-model: models without MTP
+        # tensors fail to load if speculation is forced on. Verify real
+        # acceptance with the spec_decode_* counters on /metrics (the r9700
+        # Vulkan build was measured at ~88/92 drafts accepted on 2026-09-26).
         mtpPresets = pkgs.writeText "llama-mtp-presets" ''
           version = 1
 
@@ -236,69 +174,15 @@ in
           spec-type = draft-mtp
           [Dirk-Qwen3.8-27B-UD-Q5_K_XL]
           spec-type = draft-mtp
-          # Qwen3.8-Flash-Next (qwen4exp arch) has NO built-in MTP module like
-          # the Qwen3 models — its draft head is a SEPARATE GGUF that must be
-          # passed via md= (router sidecar auto-discovery does not search the
-          # heads' directory). spec-draft-n-max 2 per the model card; the
-          # shared- head borrows the main model's embeddings/output projection
-          # (cross-model tensor borrowing in the llama-cpp-mtp build).
-          # MTP head: /home/cjdell/mtp-heads/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
-          [Qwen3.8-Flash-Next-UD-IQ3_XXS]
-          spec-type = draft-mtp
-          spec-draft-n-max = 2
-          md = /home/cjdell/mtp-heads/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
         '';
 
-        # Native Nix structure representing the YAML config
+        # Native Nix structure representing the llama-swap YAML config: one
+        # model entry, i.e. one llama-server router on the R9700.
+        # (No `matrix`/groups: those exist to keep several routers co-resident.)
         llamaConfig = {
           models = {
-            # Router mode, API chooses the model but less tweakable. One entry
-            # per GPU; each spawns its own llama.cpp router (llama-server
-            # --models-dir) auto-loading GGUFs from /home/cjdell/Models on demand.
-            #
-            # r9700 = Radeon R9700 32 GB (device-select pinned to 1002:7551, also
-            #         Vulkan0 in its own process): the big models. --models-max 1
-            #         keeps ONE model resident at a time (no GTT spill).
-            # vega  = Vega 8 iGPU (device-select pinned to 1002:1638, also Vulkan0
-            #         in its own process; GTT-backed): small research sub-agent
-            #         models, up to 4 resident.
-            # rx580 = Radeon RX 580 4 GB (device-select pinned to 1002:67df, also
-            #         Vulkan0 in its own process): small models that fit in 4 GB,
-            #         1 resident (hard VRAM limit).
-            #
-            # litellm routes: scouting -> /upstream/vega/v1, everything else
-            # -> /upstream/r9700/v1 (see litellm.yaml). Add an rx580 route there if
-            # you want litellm to send small-model traffic to it.
             "r9700" = {
-              # cmd = llamaCmdR9700;
-              cmd = llamaCmdR9700Flash;
-            };
-
-            # "vega" = {
-            #   cmd = llamaCmdVega;
-            # };
-
-            "rx580" = {
-              cmd = llamaCmdRx580;
-            };
-          };
-
-          # Run all three routers in parallel. llama-swap's default is one model
-          # at a time: without a matrix/groups it would evict whichever router is
-          # running whenever another entry is requested, killing that GPU's
-          # instance. Declaring them co-resident (`r & v & x`) means llama-swap
-          # only starts the requested entry on first use and then keeps all three
-          # llama-server router processes up side by side — each GPU serves its
-          # own model pool independently.
-          matrix = {
-            vars = {
-              r = "r9700";
-              # v = "vega";
-              x = "rx580";
-            };
-            sets = {
-              # gpus = "r & v & x";
-              gpus = "r & x";
+              cmd = llamaCmdR9700;
             };
           };
         };

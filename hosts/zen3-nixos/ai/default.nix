@@ -30,19 +30,18 @@
   ];
 
   options.ai = {
-    # Which GPU serves Recallium's LLM calls. Change this to switch the
-    # target WITHOUT touching the Recallium DB: its base_url stays fixed at
-    # http://host.containers.internal/recallium-llm -> nginx -> this GPU
-    # (see locations."/recallium-llm/" in recallium.nix). Also picks the GPU
-    # behind llm.ai.chrisdell.info (public LLM endpoint in llama-swap.nix).
-    # Then `nixos-rebuild switch`.
-    #   "r9700" -> the big R9700 (HIP, 32 GB)  [original setup]
-    #   "rx580" -> the RX 580 (4 GB, Vulkan)   [former default]
-    #   "vega"  -> the Vega 8 iGPU (GTT-backed) [current: Qwen3-4B-Instruct-2507]
+    # Which llama-swap router serves Recallium's and litellm's LLM calls. It
+    # also picks the backend behind llm.ai.chrisdell.info (public
+    # OpenAI-compatible endpoint, see llama-swap.nix).
+    #
+    # "r9700" is the only router that exists since 2026-09-26 (the vega and
+    # rx580 routers were removed - too slow / too little VRAM); the option is
+    # kept so the routing is explicit and a second GPU could be added back
+    # without editing every consumer.
     recalliumGpu = lib.mkOption {
       type = lib.types.str;
-      default = "vega";
-      description = "llama-swap router (r9700|vega|rx580) serving Recallium's LLM calls";
+      default = "r9700";
+      description = "llama-swap router (r9700) serving Recallium's/litellm's LLM calls";
     };
   };
 

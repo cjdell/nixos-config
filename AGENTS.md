@@ -124,43 +124,38 @@ sudo nixos-rebuild switch --flake .
 The repo lives here (`192.168.49.50`) as on other hosts (e.g. N100-NAS) — check
 `hostname` to see which machine you're on. It runs:
 
-- **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). Three
-  llama.cpp router instances, one per GPU (see `hosts/zen3-nixos/ai/llama-swap.nix`),
-  kept co-resident by a llama-swap `matrix` so neither evicts the other. **All
-  three run the upstream Vulkan build** (`llama-cpp-vulkan` flake input), each
-  pinned to its physical GPU via `MESA_VK_DEVICE_SELECT` with a trailing `!`
-  (exposes only that device, so it's always `Vulkan0`):
-  `r9700` = `1002:7551!` (Radeon R9700 32 GB — the big models, `--models-max 1`
-  = one resident model, no GTT spill), `vega` = `1002:1638!` (Vega 8 iGPU,
-  GTT-backed, `--models-max 4` small research sub-agent models), `rx580` =
-  `1002:67df!` (RX 580 4 GB, `--models-max 1`, small models fully in GDDR5,
-  ~50 tok/s on a 2.6B). The `rdna-boosts` HIP fork (`llama-cpp-rdna` flake
-  input) was the r9700 build until **2026-08-23**, then dropped: MTP
-  speculative decoding showed **zero draft acceptance on the HIP build**
-  (spec_decode counters stayed 0) while the Vulkan build's MTP works (35/35
-  drafts accepted in the LM Studio trial). The fork was faster on prefill
-  (+11-22%) but slower on batch-1 decode (-2% dense, -30% MoE; see
-  `bench-results/r9700/`); the input stays in flake.nix for
-  reference/benchmarking. All three routers keep the idle-slot KV RAM prompt
-  cache (`r9700` `-cram 65536`, `vega` `-cram 32768`, `rx580` `-cram 16384`
-  — MiB caps) + `--cache-reuse 256` (KV-shift reuse) + `-ctk/-ctv q8_0`
-  (quantized KV): restored to VRAM on matching prompt prefixes.
+- **llama-server** via `llama-swap` on `127.0.0.1:8081` (model serving). ONE
+  llama.cpp router instance, on the R9700 (see `hosts/zen3-nixos/ai/llama-swap.nix`).
+  **Upstream `llama.cpp` only** — the `llama-cpp` flake input
+  (`github:ggml-org/llama.cpp`), built as `llama-cpp-vulkan`. The local forks
+  (`llama-cpp-mtp`, `llama-cpp-rdna`, `llama-cpp-uma`) were removed from
+  flake.nix on **2026-09-26**, together with the `vega` and `rx580` routers and
+  the llama-swap `matrix` that kept all three co-resident: upstream master has
+  `--spec-type draft-mtp`, and the fork's only unique feature (the qwen4exp
+  draft head) needs a ~79 GB model that cannot fit a 32 GiB card at all. The
+  Vega iGPU and RX 580 were dropped as too slow / too little VRAM to be useful.
+  The single router is pinned to the physical GPU via `MESA_VK_DEVICE_SELECT=`
+  `1002:7551!` (Radeon R9700 32 GB) with a trailing `!` (exposes only that
+  device, so it is always `Vulkan0`) and runs with `--models-max 1` (one model
+  resident), **`--parallel 1`** (one slot: concurrent requests queue instead of
+  halving each other's speed) and `-cram 32768` (32 GiB idle/other KV prompt
+  cache in RAM) + `--cache-reuse 256` (KV-shift reuse) + `-ctk/-ctv q8_0`
+  (quantized KV) + `--models-preset` (per-model `draft-mtp` speculation).
   ⚠️ **The `-cram` cache can OOM the box — see the RAM bullet below.**
-- **RAM: the `-cram` prompt cache has OOM'd this box.** The r9700's 64 GiB
-  RAM cache grows to ~64 GB anon RSS under sustained pi-ai use (the 450 KB
-  per-call prompts in `llama-logs/`). Without swap the kernel has nothing to
-  reclaim once the cache is full, and a second concurrent model load (or any
-  big allocation) triggers a **global OOM that kills llama-server** — happened
-  4× in 5 days (Aug 24/27/28×2, always the r9700 model server at 54–64 GB
-  RSS). llama.cpp's cache auto-shrink-to-40% only fires when the cache's OWN
-  allocation fails; it does **not** yield memory when other processes need it.
-  Approaching-OOM symptom: Recallium's rx580 route 502s after exactly 10 min
-  on a 10-min cadence (even a 2.4 GB model load can't make progress) while
-  r9700 keeps serving. **Mitigation: `zramSwap` in
-  `hosts/zen3-nixos/default.nix`** — the kernel swaps cold cache pages to
-  compressed RAM under pressure instead of killing, and the full cache still
-  lives in free RAM when there is any. Don't remove the zram without a
-  replacement cushion.
+- **RAM: the `-cram` prompt cache has OOM'd this box.** The r9700's RAM cache
+  grows to its cap as anon RSS under sustained use (the 450 KB per-call prompts
+  in `llama-logs/`). Without swap the kernel has nothing to reclaim once the
+  cache is full, and a second concurrent model load (or any big allocation)
+  triggers a **global OOM that kills llama-server** — happened 4× in 5 days
+  (Aug 24/27/28×2, always the r9700 model server at 54–64 GB RSS, at the old
+  `-cram 65536`). The cap is now **32768 (32 GiB)**. llama.cpp's cache
+  auto-shrink-to-40% only fires when the cache's OWN allocation fails; it does
+  **not** yield memory when other processes need it. Approaching-OOM symptom:
+  requests stall and `free` shows the anon RSS of llama-server at its cap while
+  the box swaps. **Mitigation: `zramSwap` in `hosts/zen3-nixos/default.nix`** —
+  the kernel swaps cold cache pages to compressed RAM under pressure instead of
+  killing, and the full cache still lives in free RAM when there is any. Don't
+  remove the zram without a replacement cushion.
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
 - **nginx** (from `netboot.nix` + the `hosts/zen3-nixos/ai/` service modules —
@@ -437,7 +432,8 @@ proxy. Full usage docs: `docs/recallium.md`.
 - **Chain:** container (OpenAI provider, fixed `base_url`
   `http://host.containers.internal/recallium-llm`) → nginx proxy → llama-swap
   `/upstream/<gpu>/v1` where `<gpu>` is the **`config.ai.recalliumGpu` option
-  in `hosts/zen3-nixos/ai/default.nix`** (currently `vega`) → llama.cpp.
+  in `hosts/zen3-nixos/ai/default.nix`** (currently `r9700`, the only router
+  that exists since 2026-09-26) → llama.cpp.
   Switching GPU =
   edit that one option + `nixos-rebuild switch` (see docs/recallium.md). The
   old `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it.
@@ -644,31 +640,32 @@ corresponds to something reviewable.
 
 ## Known gotchas on this host
 
-- **GPU pinning (all three routers are Vulkan now).** The mesa
+- **GPU pinning (single router, still Vulkan).** The mesa
   device-select layer (`VK_LAYER_MESA_device_select`, an implicit layer
   auto-loaded by every Vulkan app because NixOS patches the loader's search
   paths to `/run/opengl-driver/share`) reorders Vulkan devices so the
   **boot-VGA (console) GPU comes first** when `MESA_VK_DEVICE_SELECT` is unset.
   The R9700 drives no screens — the console lives on the iGPU — so `-dev
-  Vulkan0` used to silently mean the Vega. Fix in `hosts/zen3-nixos/ai/llama-swap.nix`:
-  every router wrapper — r9700, vega, rx580 (and sd-gate's spawned sd-server)
-  — sets `XDG_DATA_DIRS=/run/opengl-driver/share` and
-  `MESA_VK_DEVICE_SELECT=1002:7551!` / `1002:1638!` / `1002:67df!`; the
-  trailing `!` exposes only that device, so `-dev Vulkan0` always means the
-  pinned GPU. The HIP-fork era is over (`HIP_VISIBLE_DEVICES`,
-  `HSA_OVERRIDE_GFX_VERSION` are gone — the fork's MTP was dead, see the host
-  section). Don't "simplify" this back to plain indices.
+  Vulkan0` used to silently mean the Vega (that is how the r9700's models once
+  ended up on the iGPU's GTT). Fix in `hosts/zen3-nixos/ai/llama-swap.nix`:
+  the r9700 router wrapper sets `XDG_DATA_DIRS=/run/opengl-driver/share` and
+  `MESA_VK_DEVICE_SELECT=1002:7551!`; the trailing `!` exposes only that device,
+  so `-dev Vulkan0` always means the pinned GPU. The HIP-fork era is over
+  (`HIP_VISIBLE_DEVICES`, `HSA_OVERRIDE_GFX_VERSION` are gone). Don't
+  "simplify" this back to plain indices.
 
-- **Building/benchmarking the r9700 HIP fork (historical).** The `rdna-boosts`
-  fork is the `llama-cpp-rdna` flake input; the router no longer uses it
-  (dropped 2026-08-23 — zero MTP draft acceptance), but it stays in flake.nix
-  for benchmarking/easy re-enable. To build it: `rocm` package overridden to
-  `rocmGpuTargets = "gfx1201"` + `-DLLAMA_BUILD_TESTS=OFF` (the fork leaves
-  tests at the cmake default ON; parallel test compilation ICEs gcc on
-  test-jinja.cpp — GGC crash). `scripts/bench-r9700.sh <tag> <llama-bench>
-  [--vulkan|--hip] [models...]` runs the before/after suite (results in
-  `bench-results/r9700/`), `scripts/bench-compare.sh <before-tag> <after-tag>`
-  prints the side-by-side table.
+- **The r9700 HIP fork is gone (all llama.cpp forks removed 2026-09-26).**
+  `rdna-boosts`/`llama-cpp-rdna` (stew675) was the r9700 build until
+  2026-08-23 (zero MTP draft acceptance on HIP: spec_decode counters stayed 0);
+  `llama-cpp-mtp` (local `/home/cjdell/Projects/llama-mtp`) carried the open
+  qwen4exp-MTP PRs from 2026-09-03; `llama-cpp-uma` was an unused local
+  checkout of upstream. All three inputs are deleted from `flake.nix` — the
+  router runs upstream `llama-cpp` (Vulkan) only. The checkouts are still on
+  disk for reference. The old build recipe was: `rocm` overridden to
+  `rocmGpuTargets = "gfx1201"` + `-DLLAMA_BUILD_TESTS=OFF` (upstream's flake
+  builds the full test suite and parallel test compilation ICEs gcc on
+  test-jinja.cpp). Benchmarks: `scripts/bench-r9700.sh` /
+  `bench-compare.sh`, results in `bench-results/r9700/`.
 
 - **`sudo nginx -T` is misleading** — it reads the package's stock
   `conf/nginx.conf`, NOT the NixOS-generated config under
