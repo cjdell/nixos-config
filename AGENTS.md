@@ -579,6 +579,38 @@ systemctl status meter-relay && journalctl -u meter-relay -f
   `nix eval` above printed, and `curl -s http://127.0.0.1:8484/api/status`
   should show the new fields (e.g. the PID `"saturated"` flag and the “at limit”
   badge added 2026-09-22).
+- **An inverter can be effectively dead with nothing failing.** The relay learns
+  what each inverter actually delivers/accepts and clamps the loop to that
+  estimate — and because every rule only revises an estimate *down* to what was
+  delivered, an inverter that delivers **nothing** at the command it is given
+  gives the estimator no evidence to grow on, so the loop never asks for a
+  command big enough to stir it. It sits there for as long as the process runs,
+  raising no error and logging nothing; the only symptom is a number sitting
+  still. Recognise it by an inverter whose `charge_limit` **and**
+  `discharge_limit` are both *exactly* `150` (`= AUTHORITY_MARGIN_W`) with
+  `battery_power` 0 while the grid is off target. On 2026-09-26 the Solax reserve
+  sat like that for five hours *during the Go window*, at 17% SOC, delivering
+  0 W — so the plant charged at 3.6 kW instead of 4.6 kW and the reserve failed
+  to refill. Fixed in meter-relay-rs `ea54038` (re-locked here in `a6314f5`): a
+  silent plant is now offered a ladder of larger commands every 30 s, and the
+  60 W/s authority probe integrates over real time instead of over the PID's
+  clamped step — that second one was also why the same window's charge crawled
+  at 7 W/s and took 17 minutes to reach its rating. Reasoning, the regression
+  table, and the diagnostic one-liner: `CONTROL-DESIGN.md` §2 and §7 in the
+  meter-relay-rs checkout. **A relay restart clears a collapsed estimate** (the
+  estimates initialise at the configured rating), which is the stopgap if it
+  happens again before a rebuild.
+- **The main bank still has no discharge floor, and `MR_SOLIS_MIN_SOC` will not
+  give it one.** The Solis exposes no SOC register, so the relay cannot see the
+  pack's state of charge at all (`"percentage": null`); it discharges until the
+  JK BMS's own undervoltage protection cuts it off. Setting `MR_SOLIS_MIN_SOC`
+  looks like the fix and is inert — it makes the slot *claim* to sense SOC, so it
+  seeds at 50 % and then never updates, and the floor compares against that
+  constant forever. That is how the bank was walked to 0 % on 2026-09-26 (BMS 2
+  raised `Discharging undervoltage` and YaMBMS zeroed the discharge request, so
+  the house imported ~1 kW for hours against a saturated PID). Closing it needs
+  the BMS's SOC ingested into the relay, not a config knob. See
+  `CONTROL-DESIGN.md` §2 "Known gap".
 
 **Failure mode 1 — “I rebuilt but the host still runs the old code.”**
 A `path:` flake input is frozen at the `narHash` recorded in `flake.lock`, so
