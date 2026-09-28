@@ -13,20 +13,24 @@
   ../../common/folding-at-home-sops.nix
 
   ./ai
+  # Base nginx (services.nginx.enable + temp/spill dirs). Lives here, NOT in
+  # ./netboot.nix: nginx fronts every AI/TLS vhost on this host, so disabling
+  # the Pi 5 netboot module must not take the whole HTTP surface down.
+  ./nginx.nix
   # ACME (Route 53 DNS-01) + nginx TLS vhost for *.ai.chrisdell.info
   ./tls.nix
   # ./litellm.nix
   # ./open-webui.nix
   ./hardware-configuration.nix
-  ./netboot.nix
+  # ./netboot.nix
   # The RPi 5 netboot bundle (bind-mounts the gc-rust-node pi5-netboot output
   # at /etc/tftp/e9cf02dc — the eeprom boot files are part of this system now;
   # deployment values live in ./pi5-deploy.nix).
-  ./pi5-netboot.nix
-  ./pi5-deploy.nix
+  # ./pi5-netboot.nix
+  # ./pi5-deploy.nix
   # The forked DeepSeek Harness Web GUI served on this host (no proxy; settings
   # per machine, keyed by this host's IP) — see common/dsh-web-service.nix.
-  ./dsh-harness.nix
+  # ./dsh-harness.nix
 
   # One-time root partition resize (completed 2026-08-14: / 181G->250G,
   # /home 750G->681G). Left in the tree, commented out, for reference and
@@ -89,6 +93,12 @@
     ];
 
     boot.kernel.sysctl = {
+      # Disable the kernel's memory-allocation profiling. It defaults on
+      # (CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT=y) and Oopsed repeatedly
+      # in __pgalloc_tag_sub on 7.2.0, crashing the box (unclean reboots, journal
+      # corruption). Also a suspect in the Sep 2026 userspace segfaults.
+      "vm.mem_profiling" = 0;
+
       # enable IPv4 and IPv6 forwarding on all interfaces
       "net.ipv4.conf.all.forwarding" = true;
       "net.ipv6.conf.all.forwarding" = true;

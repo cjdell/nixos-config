@@ -91,65 +91,36 @@ in
     };
   };
 
-  services.nginx = {
-    enable = true;
+  # The base nginx configuration (enable, recommended* settings, temp/spill
+  # dirs) lives in ./nginx.nix — nginx fronts every AI/TLS vhost on this host,
+  # not just the netboot images, so it must not disappear when this module is
+  # dropped from ./default.nix. What stays here is only this vhost for the
+  # netboot images, which is meaningless without the rest of this module.
+  services.nginx.virtualHosts = {
+    "zen3-nixos.grafton.lan" = {
+      locations = {
+        "= /boot/bzImage" = {
+          alias = "${build.kernel}/bzImage";
+        };
 
-    recommendedTlsSettings = true;
-    recommendedOptimisation = true;
-    recommendedGzipSettings = true;
+        "= /boot/initrd" = {
+          alias = "${build.netbootRamdisk}/initrd";
+        };
 
-    # nginx's compiled-in temp dirs point at /tmp/nginx_* — nothing important
-    # may live in /tmp (it can vanish mid-run). When the client_body temp dir
-    # is missing, nginx 500s every request whose body exceeds the in-memory
-    # client_body_buffer_size (Pi agent's multi-hundred-KB prompts) with
-    # `open() "/tmp/nginx_client_body/..." failed (2: No such file or directory)`.
-    # Point all spill dirs at /var/cache/nginx (the unit's CacheDirectory,
-    # persistent on disk) — pre-created for the nginx worker user below.
-    appendHttpConfig = ''
-      client_body_temp_path /var/cache/nginx/client_body_temp;
-      proxy_temp_path /var/cache/nginx/proxy_temp;
-      fastcgi_temp_path /var/cache/nginx/fastcgi_temp;
-      uwsgi_temp_path /var/cache/nginx/uwsgi_temp;
-      scgi_temp_path /var/cache/nginx/scgi_temp;
-    '';
+        "= /boot/netboot.ipxe" = {
+          alias = "/etc/netboot.ipxe";
+        };
 
-    virtualHosts = {
-      "zen3-nixos.grafton.lan" = {
-        locations = {
-          "= /boot/bzImage" = {
-            alias = "${build.kernel}/bzImage";
-          };
+        "= /boot/logo.png" = {
+          alias = "${../../pxe-sys/leigh-logo.png}";
+        };
 
-          "= /boot/initrd" = {
-            alias = "${build.netbootRamdisk}/initrd";
-          };
-
-          "= /boot/netboot.ipxe" = {
-            alias = "/etc/netboot.ipxe";
-          };
-
-          "= /boot/logo.png" = {
-            alias = "${../../pxe-sys/leigh-logo.png}";
-          };
-
-          "/" = {
-            tryFiles = "$uri $uri/ =404";
-          };
+        "/" = {
+          tryFiles = "$uri $uri/ =404";
         };
       };
     };
   };
-
-  # nginx spill dirs (see services.nginx above) — owned by the worker user
-  # (workers run as nginx:nginx; /var/cache/nginx itself is 0750 nginx:nginx
-  # and not group-writable, so these subdirs must exist ahead of the service).
-  systemd.tmpfiles.rules = [
-    "d /var/cache/nginx/client_body_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/proxy_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/fastcgi_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/uwsgi_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/scgi_temp 0700 nginx nginx -"
-  ];
 
   boot.kernel.sysctl = {
     # TCP buffer sizes

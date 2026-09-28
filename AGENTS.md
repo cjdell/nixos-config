@@ -19,6 +19,7 @@ workstation, etc.). Key layout:
 | `docs/recallium.md` | How to use the Recallium memory server (APIs, MCP, examples) |
 | `docs/klipper-3d-printer.md` | 3d-printer-server / Klipper (Smoothieboard LPC1768): boot-race fix, `klipper-firmware-update` + SD-flash runbook, and the **open** thermistor/ADC fault |
 | `docs/gtt-vram.md` | GTT-default/VRAM-cache research: `GGML_VK_ALLOW_SYSMEM_FALLBACK`, why there's no weight cache in llama.cpp, and why GTT never auto-unspills |
+| `docs/zen3-random-crashes.md` | **OPEN** investigation into zen3-nixos' random hard resets (watchdog-reaped hangs, not panics; memory/IMC hypothesis; `[S]`=CPU_OUT_OF_SPEC) + the `scripts/stress-monitor.sh` soak harness — sequel to `docs/kernel-rcu-wedge.md` |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
@@ -158,9 +159,10 @@ The repo lives here (`192.168.49.50`) as on other hosts (e.g. N100-NAS) — chec
   remove the zram without a replacement cushion.
 - **llama-log-viewer** on `127.0.0.1:8083` (the web app in this repo)
 - **diamcp** container on `127.0.0.1:8082` (OCI container, podman)
-- **nginx** (from `netboot.nix` + the `hosts/zen3-nixos/ai/` service modules —
-  each service file owns its reverse-proxy locations and subdomain vhost)
-  exposing all of it on port 80
+- **nginx** (base config `services.nginx.enable` + temp/spill dirs in
+  `hosts/zen3-nixos/nginx.nix`, TLS in `tls.nix`, and the `hosts/zen3-nixos/ai/`
+  service modules — each service file owns its reverse-proxy locations and subdomain vhost;
+  `netboot.nix` only adds the netboot-image vhost) exposing all of it on port 80
   - `server_name 192.168.49.50` → `/` → 8081, `/logs` → 8083, `/mcp` → 8082
   - the app is reachable at `http://192.168.49.50/logs/`
   - `/api/...` is SPLIT: llama-swap's own management endpoints (`/api/events`,

@@ -17,8 +17,11 @@
   # Bootloader.
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+  # Memtest86+ in the boot menu — RAM diagnostics for the Sep 2026 segfault
+  # investigation (4 mixed dual-rank DIMMs at 3600 MT/s, non-ECC).
+  boot.loader.systemd-boot.memtest86.enable = true;
 
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  # boot.kernelPackages = pkgs.linuxPackages_latest;
 
   boot.initrd.availableKernelModules = [
     "xhci_pci"
@@ -41,6 +44,10 @@
 
   boot.kernelParams = [
     "amd_iommu=on"
+    # The RTL8125B NIC (r8169) hangs its TX queue under ASPM L1, which starves
+    # DHCP renewal and drops brlan's 192.168.49.50 (Sep 2026). The driver only
+    # disables ASPM *after* the first timeout; keep it off from boot instead.
+    "pcie_aspm=off"
     "amdgpu.gttsize=90112"
     "ttm.pages_limit=23068672"
     "ttm.page_pool_size=23068672"

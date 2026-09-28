@@ -357,7 +357,7 @@
         "nixpkgs": "nixpkgs_3"
       },
       "locked": {
-        "lastModified": 1788219563,
+        "lastModified": 1790588992,
         "narHash": "sha256-g72Ke8vVj9taSqb3htlWD+F8Jlc+CjxFq8GBca+aSrI=",
         "path": "/home/cjdell/Projects/gc-business/gc-rust-node",
         "type": "path"

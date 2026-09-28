@@ -4,8 +4,8 @@
   environment.systemPackages = with pkgs; [
     bottles
     lutris
-    wineWow64Packages.waylandFull
+    # wineWow64Packages.waylandFull
   ];
 
-  programs.steam.enable = true;
+  # programs.steam.enable = true;
 }

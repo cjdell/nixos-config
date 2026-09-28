@@ -56,19 +56,19 @@
   # sudo ddcutil detect --verbose
   # sudo ddcutil getvcp known
   # sudo ddcutil setvcp 100 50 --display 1
-  boot.extraModulePackages = [ config.boot.kernelPackages.ddcci-driver ];
+  # boot.extraModulePackages = [ config.boot.kernelPackages.ddcci-driver ];
   boot.kernelModules = [
     "i2c-dev"
-    "ddcci_backlight"
+    # "ddcci_backlight"
   ];
 
   # List packages installed in system profile. To search, run:
   # $ nix search wget
   environment.systemPackages = with pkgs; [
     # GUI Things
-    vscode
+    # vscode
     appimage-run
-    geekbench
+    # geekbench
     google-chrome
     kdePackages.kate
     bottles

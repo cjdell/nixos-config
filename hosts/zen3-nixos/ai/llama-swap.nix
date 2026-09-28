@@ -146,7 +146,7 @@ in
         # --log-prompts-dir feeds the (currently disabled) llama-log-viewer.
         #
         # --models-preset  per-model draft-mtp speculation - see mtpPresets.
-        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 --parallel 1 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --ctx-size ${toString (192 * 1024)} --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
+        llamaCmdR9700 = "${llama-r9700} --tools all --host 127.0.0.1 --port \${PORT} -dev Vulkan0 -t 12 -ngl all --models-dir ${modelsPath} --models-max 1 --parallel 1 -cram 32768 --cache-reuse 256 -ctk q8_0 -ctv q8_0 --metrics --reasoning-preserve --sse-ping-interval 10 --log-prompts-dir /home/cjdell/nixos-config/llama-logs --models-preset ${mtpPresets}";
 
         # Per-model speculative decoding for the llama.cpp router, upstream
         # `--spec-type draft-mtp`: the model's own MTP module (blk.N.nextn.*
@@ -160,20 +160,13 @@ in
 
           [Qwen3.8-27B-UD-Q4_K_XL]
           spec-type = draft-mtp
+          ctx-size = ${toString (256 * 1024)}
           [Qwen3.8-27B-UD-Q5_K_XL]
           spec-type = draft-mtp
-          [Qwen3.8-27B-Q4_K_S]
+          ctx-size = ${toString (256 * 1024)}
+          [Qwen3.8-27B-UD-Q6_K_XL]
           spec-type = draft-mtp
-          [Qwen3.6-35B-A3B-UD-Q3_K_XL]
-          spec-type = draft-mtp
-          [DeepSeek-V4-Pro-Qwen3.5-9B-MTP-Q4_K_M]
-          spec-type = draft-mtp
-          [Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M]
-          spec-type = draft-mtp
-          [Tiel-Coder-35B-A3B-GGUF-MTP]
-          spec-type = draft-mtp
-          [Dirk-Qwen3.8-27B-UD-Q5_K_XL]
-          spec-type = draft-mtp
+          ctx-size = ${toString (208 * 1024)}
         '';
 
         # Native Nix structure representing the llama-swap YAML config: one
