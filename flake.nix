@@ -10,10 +10,9 @@
 # dependencies purely, and N100-NAS uses pkgs.stdenv.hostPlatform.system.)
 {
   inputs = {
-    # Stable nixpkgs: every host except alderlake-thinkpad (see nixpkgsFor).
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
-    # Unstable nixpkgs: hosts opt in per-host (see nixpkgsFor in outputs).
-    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
+    # nixos-unstable is the default nixpkgs for every host, including
+    # grafton-router.
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     nixos-hardware = {
       # url = "git+file:///home/cjdell/Projects/nixos-hardware";
       url = "github:cjdell/nixos-hardware/master";
@@ -22,16 +21,6 @@
       url = "github:cjdell/nixos-utils";
       # url = "git+file:///home/cjdell/Projects/nixos-utils";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
-    # grafton-router is pinned to the nixpkgs revision its live system was
-    # built from (nixos-system-grafton-router-26.05.20260707.0ad6f47). The
-    # router has 15 GiB RAM and no swap (Frigate/Whisper/ClickHouse/VMs use
-    # ~11 GiB), so upgrading the whole closure locally OOMs the nix build.
-    # Pinning reuses the packages already in the store: migrating the config
-    # into this flake becomes a no-op build. Bump/remove this pin (like the
-    # other hosts) when a deliberate router upgrade is wanted.
-    nixpkgs-grafton = {
-      url = "github:nixos/nixpkgs/0ad6f47ea4fe188f4bc8f0380f93ae8523337c6c";
     };
     # microvm host module (grafton-router's virtual-machines/ use it).
     microvm = {
@@ -84,13 +73,8 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     home-manager = {
-      url = "github:nix-community/home-manager/release-26.05";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    # master for hosts on unstable nixpkgs (see homeManagerFor)
-    home-manager-unstable = {
       url = "github:nix-community/home-manager/master";
-      inputs.nixpkgs.follows = "nixpkgs-unstable";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     plasma-manager = {
       url = "github:nix-community/plasma-manager";
@@ -98,7 +82,7 @@
       inputs.home-manager.follows = "home-manager";
     };
     stylix = {
-      url = "github:nix-community/stylix/release-26.05";
+      url = "github:nix-community/stylix/master";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     llama-cpp = {
@@ -133,10 +117,8 @@
     {
       self,
       nixpkgs,
-      nixpkgs-unstable,
       nixos-hardware,
       nixos-utils,
-      nixpkgs-grafton,
       microvm,
       frigate-whisper,
       frigate-monitor,
@@ -145,7 +127,6 @@
       deepseek-harness,
       sops-nix,
       home-manager,
-      home-manager-unstable,
       plasma-manager,
       stylix,
       llama-cpp,
@@ -318,9 +299,6 @@
             allowUnfree = true;
             packageOverrides = pkgs: {
               fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
-              # moonlight-qt 6.1.0 doesn't build against ffmpeg 9 (unstable's
-              # default); nixpkgs master pins it to ffmpeg_8, mirror that here.
-              moonlight-qt = pkgs.moonlight-qt.override { ffmpeg = pkgs.ffmpeg_8; };
             };
             permittedInsecurePackages = [
               "broadcom-sta-6.30.223.271-59-6.17.7"
@@ -336,7 +314,7 @@
           ];
         };
 
-      # Stable pkgs used by the legacy machines below.
+      # pkgs used by the legacy machines below.
       pkgs = mkPkgs nixpkgs;
 
       # Upstream llama.cpp's flake packages build the FULL test suite by
@@ -352,14 +330,6 @@
         })
       ) llama-cpp.packages.${system};
 
-      # Which nixpkgs each host runs on: hosts listed here opt into unstable,
-      # everything else uses the stable `nixpkgs` input.
-      nixpkgsFor = host: if host == "alderlake-thinkpad" then nixpkgs-unstable else nixpkgs;
-
-      # Home-manager follows the same split: the release branch for stable
-      # hosts, master for hosts on unstable nixpkgs.
-      homeManagerFor = host: if host == "alderlake-thinkpad" then home-manager-unstable else home-manager;
-
       homeManagerPrefs = {
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
@@ -374,26 +344,22 @@
         nix.registry.nixpkgs.flake = nixpkgs;
       };
 
-      # Build one host with the nixpkgs input that nixpkgsFor picks for it.
+      # Build one host on the unified nixos-unstable nixpkgs.
       mkHost =
         host:
-        let
-          hostPkgs = nixpkgsFor host;
-          hostHomeManager = homeManagerFor host;
-        in
-        hostPkgs.lib.nixosSystem {
+        nixpkgs.lib.nixosSystem {
           inherit system;
-          pkgs = mkPkgs hostPkgs;
+          pkgs = mkPkgs nixpkgs;
           modules = [
             # This fixes nixpkgs (for e.g. "nix shell") to match the system nixpkgs
             { networking.hostName = host; }
-            # Point the registry at the host's nixpkgs (unstable on opted-in hosts)
+            # Point the registry at the host's nixpkgs
             ({ lib, ... }: {
-              nix.registry.nixpkgs.flake = lib.mkForce hostPkgs;
+              nix.registry.nixpkgs.flake = lib.mkForce nixpkgs;
             })
             ./common/system.nix
             ./users/cjdell
-            hostHomeManager.nixosModules.home-manager
+            home-manager.nixosModules.home-manager
             homeManagerPrefs
             commonModules
           ]
@@ -427,18 +393,14 @@
           # grafton-router is ported verbatim from ~/nixos-config: it runs its
           # own module set (no common/system.nix, users/cjdell, or home-manager)
           # and takes its flake inputs via `import ./hosts/grafton-router inputs`.
-          grafton-router = nixpkgs-grafton.lib.nixosSystem {
+          # It now runs on the unified nixos-unstable nixpkgs.
+          grafton-router = nixpkgs.lib.nixosSystem {
             inherit system;
-            # NB: raw import (not mkPkgs) so the package set matches the pin
-            # exactly and every path is already in the store.
-            pkgs = import nixpkgs-grafton {
-              inherit system;
-              config.allowUnfree = true;
-            };
+            pkgs = mkPkgs nixpkgs;
             modules = [
               {
                 networking.hostName = "grafton-router";
-                nix.registry.nixpkgs.flake = nixpkgs-grafton;
+                nix.registry.nixpkgs.flake = nixpkgs;
               }
               microvm.nixosModules.host
             ]

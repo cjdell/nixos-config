@@ -104,10 +104,11 @@
           # url = "https://tailscale.home.chrisdell.info";
           url = "http://127.0.0.1:8801";
           config_path = "${headscaleConfig}";
+          # sudo headscale apikeys create
+          api_key_path = "${config.sops.secrets.headscale_api_key.path}";
         };
         integration.agent = {
           enabled = true;
-          pre_authkey_path = "${config.sops.secrets.headscale_pre_auth_key.path}";
         };
         oidc = {
           issuer = "https://kanidm.home.chrisdell.info/oauth2/openid/headscale";
@@ -119,8 +120,6 @@
           # Might needed when integrating with Authentik.
           # token_endpoint_auth_method = "client_secret_basic";
           token_endpoint_auth_method = "client_secret_post";
-
-          headscale_api_key_path = "${config.sops.secrets.headscale_api_key.path}"; # sudo headscale apikeys create
         };
       };
     };
