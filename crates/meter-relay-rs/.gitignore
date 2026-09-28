@@ -1,0 +1,9 @@
+/target
+.env
+web/node_modules
+web/dist
+# `nix build` output symlinks — build with --no-link so a stale one never
+# reappears in the checkout.
+result
+result-*
+.direnv

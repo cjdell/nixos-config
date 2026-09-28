@@ -1,7 +1,7 @@
 { lib, pkgs, ... }:
 
 # Zero-dependency Rust web app that browses llama-server's
-# --log-prompts-dir output (see llama-log-viewer/README.md).
+# --log-prompts-dir output (see crates/llama-log-viewer/README.md).
 #
 # nginx: owns the /logs locations on the IP vhost plus the public
 # logs.ai.chrisdell.info subdomain (whole app at the root, no /logs prefix).
@@ -10,8 +10,8 @@ let
   llama-log-viewer = pkgs.rustPlatform.buildRustPackage {
     pname = "llama-log-viewer";
     version = "0.1.0";
-    src = ../../../llama-log-viewer;
-    cargoLock.lockFile = ../../../llama-log-viewer/Cargo.lock;
+    src = ../../../crates/llama-log-viewer;
+    cargoLock.lockFile = ../../../crates/llama-log-viewer/Cargo.lock;
     doCheck = false;
   };
 in

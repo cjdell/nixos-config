@@ -14,7 +14,7 @@ workstation, etc.). Key layout:
 | `common/` | Shared modules (`system.nix`, `desktop.nix`, `sops.nix`, …) |
 | `users/` | User configs (home-manager) |
 | `machines/` | Legacy configs for older machines (referenced from `flake.nix`) |
-| `llama-log-viewer/` | Standalone zero-dependency Rust web app (see below) |
+| `crates/` | Every Rust crate in this repo (`llama-log-viewer`, `sd-gate`, `gpu-panel`, `ollama-bridge`, `meter-relay-rs`), built by the root flake (see below) |
 | `llama-logs/` | Live `llama-server --log-prompts-dir` output consumed by the viewer |
 | `docs/recallium.md` | How to use the Recallium memory server (APIs, MCP, examples) |
 | `docs/klipper-3d-printer.md` | 3d-printer-server / Klipper (Smoothieboard LPC1768): boot-race fix, `klipper-firmware-update` + SD-flash runbook, and the **open** thermistor/ADC fault |
@@ -100,11 +100,12 @@ sudo nixos-rebuild switch --flake .
   (see above).
 - **Local `path:` flake inputs freeze at the `narHash` in `flake.lock`.** The
   repo consumes several checkouts that live outside it by path
-  (`meter-relay-rs`, `gc-rust-node`, `frigate-monitor`, the `llama.cpp` forks,
-  …). Editing such a checkout changes *nothing* until `nix flake update <name>`
+  (`gc-rust-node`, `frigate-monitor`, the `llama.cpp` forks, …). Editing such a
+  checkout changes *nothing* until `nix flake update <name>`
   (the old `nix flake lock --update-input <name>`, now deprecated) rewrites that
   lock entry — a plain `nixos-rebuild switch` then redeploys the previous build
-  without any warning.
+  without any warning. (The Rust crates now live under `crates/` and are built
+  from this repo — no path input, no re-lock.)
   In a flake's *own* checkout Nix reads the git tree instead, so a new file must
   be at least staged (`git add`) or it is invisible to the build (both failure
   modes, with the exact symptoms, are written up under "meter-relay-rs").
@@ -309,7 +310,7 @@ flake attr `3d-printer-server`; **no autoRollback** → no `nixos-confirm`). Run
 
 ## llama-log-viewer
 
-`llama-log-viewer/` is a **zero-dependency Rust** app (stdlib only — no crates
+`crates/llama-log-viewer/` is a **zero-dependency Rust** app (stdlib only — no crates
 in `Cargo.toml`). Frontend (`index.html`, `app.js`, `style.css`) is embedded
 into the binary via `include_str!`.
 
@@ -319,12 +320,12 @@ into the binary via `include_str!`.
   files appear; stats show e.g. `496 files / 1743 nodes / 24 roots`.
 - Log files: one `.txt` per API call containing the complete context; formats
   handled: Qwen `<|im_start|>` and opencode `<system>…</system>` style.
-- See `llama-log-viewer/README.md` for API endpoints and design.
+- See `crates/llama-log-viewer/README.md` for API endpoints and design.
 
 Rebuild + deploy on `zen3-nixos` (used successfully in the past):
 
 ```sh
-# the nix package is built from this dir by hosts/zen3-nixos/ai/llama-log-viewer.nix
+# the nix package is built from crates/llama-log-viewer by hosts/zen3-nixos/ai/llama-log-viewer.nix
 # (pkgs.rustPlatform.buildRustPackage with cargoLock.lockFile)
 sudo nixos-rebuild switch --flake . --max-jobs 1
 sudo nixos-confirm
@@ -373,7 +374,7 @@ VRAM is at a premium (the R9700 also hosts llama-swap's resident coding
 model), so SDXL is **not** kept resident:
 
 - **systemd service `sd-gate`** (`hosts/zen3-nixos/ai/sd-gate.nix`; zero-dep Rust app
-  in `sd-gate/`): always listens on `127.0.0.1:8084` (nginx's `/sd-api`
+  in `crates/sd-gate/`): always listens on `127.0.0.1:8084` (nginx's `/sd-api`
   target). On the **first connection** it checks free VRAM (`amd-smi metric
   -m --json`): if < `--min-vram-gib 10` (i.e. the llama-swap LLM is
   resident) it posts to llama-swap's `POST /api/models/unload` and waits up
@@ -495,11 +496,14 @@ fork patch: `docs/dsh-fork/`.
 ## meter-relay-rs (grafton-router, live)
 
 The solar-inverter meter relay on **grafton-router** (the router itself,
-`192.168.49.1`) is built from the Rust port at
-`/home/cjdell/Projects/meter-relay-rs` — *not* the older TypeScript app in
-`/home/cjdell/Projects/meter-relay`, which stays around for reference only (the
-live `MR_*` credentials used to live in a `.env` in the Rust checkout; they are
-in sops now and there is no `.env` on the host). It reads the grid meter
+`192.168.49.1`) is built from the Rust crate at `crates/meter-relay-rs` in this
+repo — *not* the older TypeScript app in `/home/cjdell/Projects/meter-relay`
+(kept for reference only), and no longer from the external checkout at
+`/home/cjdell/Projects/meter-relay-rs` (the crate was folded into this repo;
+the old checkout is just a backup). The
+live `MR_*` credentials used to live in a `.env` in the old Rust checkout; they
+are
+in sops now and there is no `.env` on the host. It reads the grid meter
 over serial Modbus RTU, re-serves those registers to the inverters, nudges them
 with per-inverter PIDs so grid export tracks `MR_METER_TARGET_POWER`, charges the
 batteries in the Octopus Go window, publishes to Home Assistant + InfluxDB, and
@@ -534,44 +538,45 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
   There is deliberately **no `WorkingDirectory` and no `.env`** on the host —
   the process CWD is `/`, so a stray `.env` has nowhere to be picked up from
   (dotenvy survives only as a local-development convenience). The dashboard is
-  bundled into the store by the port's own `nix/package.nix`
+  bundled into the store by the crate's own `nix/package.nix`
   (`buildNpmPackage` + a wrapper exporting `MR_WEB_DIR`) — a frontend change
   needs a rebuild, never a file copy.
 - To change one setting, edit the `plant` attrset in that module. Non-secret
   values are visible in `systemctl show meter-relay -p Environment`; the tokens
   are not (they arrive via the rendered `/run/secrets/rendered/meter-relay.env`,
   mode 0400 root).
-- Flake input (`flake.nix`): `meter-relay-rs = { url = "path:/home/cjdell/Projects/meter-relay-rs"; }`.
-  It keeps its own nixpkgs pin (its `flake.lock`), so nothing here needs
-  `--impure`. Live logs: `journalctl -u meter-relay -f`.
+- **Build:** the crate lives in this repo at `crates/meter-relay-rs`. The root
+  flake builds it — `hosts/grafton-router/services/meter-relay.nix` calls its
+  `nix/package.nix` via `pkgs.callPackage` with
+  `craneLib = inputs.crane.mkLib pkgs` (crane is a `flake.nix` input, no nixpkgs
+  follow). There is **no separate `meter-relay-rs` input or `flake.lock` entry
+  any more**, so a plain `nixos-rebuild switch --flake .` always builds the
+  working tree. Live logs: `journalctl -u meter-relay -f`.
 
 ### Deploying a change (the step that gets missed)
 
 `scripts/deploy-meter-relay.sh` does all of the below and verifies the result
-(`--no-rebuild` re-locks and reports only; it refuses to switch on any host but
+(`--no-rebuild` evaluates and reports only; it refuses to switch on any host but
 grafton-router). By hand:
 
 ```sh
-cd ~/Projects/meter-relay-rs
-git add -A                       # at least stage any NEW file — see below
-git commit -m "…"                # optional, but keeps the locked hash reviewable
-nix build --no-link              # optional fast local check (no ./result symlink)
-
 cd ~/nixos-config
-nix flake update meter-relay-rs                       # ← REQUIRED, every time
-# the input must really have moved — the store path has to change:
-nix eval --raw .#nixosConfigurations.grafton-router.config.systemd.services.meter-relay.serviceConfig.ExecStart
+git status crates/meter-relay-rs     # untracked new files are invisible to Nix
+git add -A crates/meter-relay-rs     # at least stage any NEW file — see below
+git commit -m "…"                    # optional
+# (a standalone `nix build` of the package is in the crate README)
 sudo nixos-rebuild switch --flake .
-sudo nixos-confirm               # grafton-router has autoRollback — see the top
+sudo nixos-confirm                   # grafton-router has autoRollback — see the top
 systemctl status meter-relay && journalctl -u meter-relay -f
 ```
 
-- **A configuration-only change needs a rebuild, not a re-lock.** Editing the
-  `plant` attrset changes no Rust code, so `scripts/deploy-meter-relay.sh` will
-  correctly stop at "input source is unchanged — nothing to deploy" and *not*
-  switch — use `./scripts/deploy-meter-relay.sh --force`, or by hand
-  `sudo nixos-rebuild switch --flake . && sudo nixos-confirm`. There is no
-  restart-only path any more: the old `.env` shortcut is gone.
+- **A configuration-only change needs a rebuild, not a special path.** Editing
+  the `plant` attrset changes no Rust code, so the built `ExecStart` is
+  unchanged; `scripts/deploy-meter-relay.sh` will stop at "build is unchanged —
+  nothing to deploy" and *not* switch — use `./scripts/deploy-meter-relay.sh
+  --force`, or by hand `sudo nixos-rebuild switch --flake . && sudo
+  nixos-confirm`. There is no restart-only path any more: the old `.env`
+  shortcut is gone.
 - **Verify the running build, don't assume:** `grep ExecStart
   /etc/systemd/system/meter-relay.service` must show the same store path the
   `nix eval` above printed, and `curl -s http://127.0.0.1:8484/api/status`
@@ -589,13 +594,14 @@ systemctl status meter-relay && journalctl -u meter-relay -f
   `battery_power` 0 while the grid is off target. On 2026-09-26 the Solax reserve
   sat like that for five hours *during the Go window*, at 17% SOC, delivering
   0 W — so the plant charged at 3.6 kW instead of 4.6 kW and the reserve failed
-  to refill. Fixed in meter-relay-rs `ea54038` (re-locked here in `a6314f5`): a
+  to refill. Fixed in the relay (see `crates/meter-relay-rs/CONTROL-DESIGN.md`):
+  a
   silent plant is now offered a ladder of larger commands every 30 s, and the
   60 W/s authority probe integrates over real time instead of over the PID's
   clamped step — that second one was also why the same window's charge crawled
   at 7 W/s and took 17 minutes to reach its rating. Reasoning, the regression
-  table, and the diagnostic one-liner: `CONTROL-DESIGN.md` §2 and §7 in the
-  meter-relay-rs checkout. **A relay restart clears a collapsed estimate** (the
+  table, and the diagnostic one-liner: `crates/meter-relay-rs/CONTROL-DESIGN.md`
+  §2 and §7. **A relay restart clears a collapsed estimate** (the
   estimates initialise at the configured rating), which is the stopgap if it
   happens again before a rebuild.
 - **The main bank still has no discharge floor, and `MR_SOLIS_MIN_SOC` will not
@@ -608,19 +614,16 @@ systemctl status meter-relay && journalctl -u meter-relay -f
   raised `Discharging undervoltage` and YaMBMS zeroed the discharge request, so
   the house imported ~1 kW for hours against a saturated PID). Closing it needs
   the BMS's SOC ingested into the relay, not a config knob. See
-  `CONTROL-DESIGN.md` §2 "Known gap".
+  `crates/meter-relay-rs/CONTROL-DESIGN.md` §2 "Known gap".
 
-**Failure mode 1 — “I rebuilt but the host still runs the old code.”**
-A `path:` flake input is frozen at the `narHash` recorded in `flake.lock`, so
-`nixos-rebuild switch` happily rebuilds the *old* snapshot; because the
-resulting `ExecStart` is unchanged, systemd does not even restart the unit, and
-the service keeps running the previous binary with no warning. What makes this
-so misleading is that `nix build` **inside the Rust repo** succeeds and produces
-a fresh store path — it builds the working tree directly, while the host
-builds the locked snapshot. Always `nix flake update meter-relay-rs` first
-(or `scripts/deploy-meter-relay.sh`), then compare the store path as above.
-(Same rule for the other path inputs: `gc-rust-node`, `frigate-monitor`, the
-`llama.cpp` forks.)
+**Failure mode 1 — “I rebuilt but the input still runs the old code.”**
+This **no longer applies to meter-relay-rs** (it is built from this repo now),
+but it is still the rule for the other `path:` flake inputs (`gc-rust-node`,
+`frigate-monitor`, the `llama.cpp` forks). Such an input is frozen at the
+`narHash` recorded in `flake.lock`, so `nixos-rebuild switch` happily rebuilds
+the *old* snapshot; because the resulting `ExecStart` is unchanged, systemd does
+not even restart the unit, and the service keeps running the previous binary
+with no warning. `nix flake update <name>` first, then compare the store path.
 
 **Failure mode 2 — `vite build` / rustc says a new file does not exist.**
 `error during build: Could not resolve "./Tip" from "src/App.tsx"` was exactly
@@ -633,12 +636,11 @@ module that is plainly there in the working tree. Staging is enough; committing
 is tidier. This applies to anything the build reads — `src/*.rs`,
 `web/src/*.tsx`, `nix/package.nix`.
 
-Note the asymmetry: the `path:` *input* nixos-config consumes is **not**
-git-filtered — it copies that directory whole, untracked files, `.gitignore`d
-junk (`target/`, `web/node_modules/`, `.env`, `.git`) and all. So the deploy is
-never blocked by a missing stage; it is blocked by a stale lock (failure mode 1).
-Keep `git status` in the Rust repo clean-ish anyway, so the locked `narHash`
-corresponds to something reviewable.
+Note that because the crate now lives **inside** this repo, this flake *is*
+git-filtered: a new file must be staged (failure mode 2) and `.gitignore`d build
+junk (`target/`, `web/node_modules/`, `web/dist/`) is **not** copied into the
+build. Keep `git status` in the crate clean-ish, so the working tree that Nix
+reads corresponds to something reviewable.
 
 ## Known gotchas on this host
 
@@ -718,8 +720,8 @@ agent thread with no way to resume it. Follow this order:
   join code, re-lock the gc-rust-node input, `nixos-rebuild switch` +
   `nixos-confirm`, power-cycle the Pi, verify),
   `scripts/pi5-powercycle.sh` (HA relay: default full cycle, `--off`/`--on`),
-  `scripts/deploy-meter-relay.sh` (re-lock the `meter-relay-rs` path input,
-  rebuild grafton-router, confirm, verify — see that section).
+  `scripts/deploy-meter-relay.sh` (rebuild the `crates/meter-relay-rs` crate on
+  grafton-router, confirm, verify — see that section).
   Do not paste HA tokens/curls inline in agent sessions — call the script.
 - **Set timeouts on everything that talks to the network** (`timeout N cmd`);
   bare `ssh`/`curl`/`ping` to a flaky or dead host will stall the session.

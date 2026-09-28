@@ -9,12 +9,16 @@
 let
   inherit (import ../../../utils/convert.nix { inherit lib; }) convertToEnvFile;
 
-  # Built from /home/cjdell/Projects/meter-relay-rs via its own flake (see the
-  # meter-relay-rs input in flake.nix): a self-contained Rust binary — serial
-  # grid meter, Modbus TCP to the inverters, PID load balancing, HA/Influx
-  # publishing — with the Solid.js dashboard bundled in and served from the
-  # store (the wrapper sets MR_WEB_DIR).
-  meterRelay = inputs.meter-relay-rs.packages.${pkgs.hostPlatform.system}.default;
+  # Built from crates/meter-relay-rs via its nix/package.nix (folded into this
+  # repo's flake — no separate meter-relay-rs input any more): a self-contained
+  # Rust binary — serial grid meter, Modbus TCP to the inverters, PID load
+  # balancing, HA/Influx publishing — with the Solid.js dashboard bundled in and
+  # served from the store (the wrapper sets MR_WEB_DIR). It builds against this
+  # repo's nixpkgs; crane slices the cargo dependency graph (see the crane input
+  # in flake.nix).
+  meterRelay = pkgs.callPackage ../../../crates/meter-relay-rs/nix/package.nix {
+    craneLib = inputs.crane.mkLib pkgs;
+  };
 
   # ---------------------------------------------------------------------------
   # The entire relay configuration, declaratively.

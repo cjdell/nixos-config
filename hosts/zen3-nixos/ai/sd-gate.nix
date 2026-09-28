@@ -21,12 +21,12 @@ let
 
   # On-demand SD: always listens on 8084 (nginx /sd-api target), spawns
   # sd-server (8085) on the first request, kills it after --idle seconds of
-  # no traffic so the R9700 VRAM is freed. See sd-gate/.
+  # no traffic so the R9700 VRAM is freed. See crates/sd-gate/.
   sd-gate = pkgs.rustPlatform.buildRustPackage {
     pname = "sd-gate";
     version = "0.1.0";
-    src = ../../../sd-gate;
-    cargoLock.lockFile = ../../../sd-gate/Cargo.lock;
+    src = ../../../crates/sd-gate;
+    cargoLock.lockFile = ../../../crates/sd-gate/Cargo.lock;
     doCheck = false;
   };
 

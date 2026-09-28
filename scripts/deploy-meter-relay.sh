@@ -1,43 +1,42 @@
 #!/usr/bin/env bash
-# deploy-meter-relay.sh — deploy the meter-relay-rs Rust relay to grafton-router.
+# deploy-meter-relay.sh — deploy the crates/meter-relay-rs crate to grafton-router.
 #
-# The service is built from the `meter-relay-rs` path input
-# (/home/cjdell/Projects/meter-relay-rs) declared in this repo's flake.nix.
-# A `path:` input is FROZEN at the narHash recorded in flake.lock, so editing
-# the Rust repo changes nothing until that entry is rewritten. Without the
-# re-lock a plain `nixos-rebuild switch` rebuilds the old snapshot and systemd
-# does not even restart the unit (ExecStart is unchanged) — the host keeps
-# running the previous binary while `nix build` inside the Rust repo happily
-# reports a fresh build. This script drives the loop:
+# meter-relay-rs now lives IN this repo (crates/meter-relay-rs) and is built by
+# the root flake: hosts/grafton-router/services/meter-relay.nix calls its
+# nix/package.nix with this repo's nixpkgs + the `crane` input. There is no path
+# input and no separate flake.lock entry to refresh any more — editing the crate
+# and rebuilding is the whole loop.
 #
-#   1. sanity-check the Rust checkout (warns about untracked NEW files: when you
-#      `nix build` in that repo Nix reads it through the git fetcher, so a file
-#      that is not at least staged is invisible to the build; build it with
-#      `--no-link` so no stale ./result symlink is left behind)
-#   2. note the currently-deployed store path (nix eval … ExecStart)
-#   3. re-lock the input: nix flake update meter-relay-rs
-#   4. print the new store path and stop if it did not change
+# The one trap that remains is that Nix reads this repo through the *git*
+# fetcher: tracked files (modified or not) and staged files are visible, but a
+# file that is merely untracked is NOT. A new .rs/.tsx/.nix file must therefore
+# be `git add`ed (staging is enough) or the build fails on a file that is
+# plainly in the working tree.
+#
+#   1. sanity-check the crate checkout (warn about untracked NEW files)
+#   2. note the currently-deployed store path (from the live unit)
+#   3. evaluate the new store path from the working tree
+#   4. stop if it did not change (--force to switch anyway)
 #   5. sudo nixos-rebuild switch --flake .
 #   6. sudo nixos-confirm — grafton-router has autoRollback (see AGENTS.md)!
 #   7. verify the unit runs the new path and the dashboard answers on :8484
 #
 # Usage: ./scripts/deploy-meter-relay.sh [options]
-#   --no-rebuild   re-lock and report only; do not switch anything
-#   --force        switch even when the input's store path did not change
+#   --no-rebuild   evaluate and report only; do not switch anything
+#   --force        switch even when the store path did not change
 #   -h|--help      show this help
 #
 # Run WITHOUT sudo (sudo is used internally for the rebuild + confirm), from
 # this repo's checkout ON grafton-router. A switch only affects the machine it
 # runs on, so the script refuses to rebuild anywhere else (--no-rebuild still
-# works there, for refreshing the lock).
+# works there).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-MR_REPO="${MR_REPO:-/home/cjdell/Projects/meter-relay-rs}"
+CRATE="$REPO_ROOT/crates/meter-relay-rs"
 HOST="grafton-router"
-INPUT="meter-relay-rs"
 EXEC_START_ATTR=".#nixosConfigurations.${HOST}.config.systemd.services.meter-relay.serviceConfig.ExecStart"
 
 DO_REBUILD=1
@@ -48,7 +47,7 @@ while [ $# -gt 0 ]; do
     --no-rebuild) DO_REBUILD=0 ;;
     --force) FORCE=1 ;;
     -h | --help)
-      sed -n '2,30p' "${BASH_SOURCE[0]}"
+      sed -n '2,36p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -66,39 +65,47 @@ exec_start() {
   nix eval --raw "$EXEC_START_ATTR" 2>/dev/null
 }
 
-# --- 1. the Rust checkout -----------------------------------------------------
-[ -d "$MR_REPO/.git" ] || {
-  echo "ERROR: $MR_REPO is not a git checkout (set MR_REPO=…)" >&2
+# The path the currently-deployed unit runs (empty if the unit is absent, e.g.
+# on a machine that is not grafton-router).
+deployed_path() {
+  [ -e /etc/systemd/system/meter-relay.service ] || return 0
+  sed -n 's|^ExecStart=\(/nix/store/[^ ]*\)$|\1|p' /etc/systemd/system/meter-relay.service | head -1
+}
+
+# --- 1. the crate checkout ----------------------------------------------------
+[ -d "$CRATE/src" ] || {
+  echo "ERROR: $CRATE does not look like the meter-relay-rs crate" >&2
   exit 1
 }
-say "Rust checkout $MR_REPO (HEAD $(git -C "$MR_REPO" rev-parse --short HEAD))"
-if [ -n "$(git -C "$MR_REPO" status --porcelain --untracked-files=all | grep '^??' || true)" ]; then
-  echo "WARNING: untracked files in the Rust repo — Nix cannot see them when"
-  echo "         building from that repo directly (git fetcher = tracked +"
-  echo "         staged only). \`git add\` any new source file. The deploy"
-  echo "         below still sees them (a path input copies the whole tree):"
-  git -C "$MR_REPO" status --porcelain --untracked-files=all | grep '^??' || true
+say "crate $CRATE"
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$CRATE" | grep '^??' || true)" ]; then
+  echo "WARNING: untracked files in the crate — Nix cannot see them (the flake"
+  echo "         is read through the git fetcher = tracked + staged only)."
+  echo "         \`git add\` any new source file:"
+  git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- "$CRATE" | grep '^??' || true
 fi
 
 # --- 2. what is deployed now --------------------------------------------------
 cd "$REPO_ROOT"
-old="$(exec_start)"
-say "currently declared: $old"
+old="$(deployed_path)"
+if [ -n "$old" ]; then
+  say "currently deployed: $old"
+else
+  say "no live unit found (nothing deployed yet / not on $HOST)"
+fi
 
-# --- 3./4. re-lock and compare ------------------------------------------------
-say "re-locking the '$INPUT' path input"
-nix flake update "$INPUT"
+# --- 3./4. evaluate the working tree and compare ------------------------------
 new="$(exec_start)"
-say "after re-lock:       $new"
+say "from working tree:  $new"
 
-if [ "$old" = "$new" ] && [ "$FORCE" -eq 0 ]; then
-  echo "$INPUT source is unchanged — nothing to deploy."
+if [ -n "$old" ] && [ "$old" = "$new" ] && [ "$FORCE" -eq 0 ]; then
+  echo "meter-relay-rs build is unchanged — nothing to deploy."
   echo "(re-run with --force to switch anyway)"
   exit 0
 fi
 
 if [ "$DO_REBUILD" -eq 0 ]; then
-  echo "flake.lock updated; --no-rebuild so stopping here."
+  echo "--no-rebuild so stopping here."
   exit 0
 fi
 
@@ -106,7 +113,7 @@ fi
 if [ "$(hostname)" != "$HOST" ]; then
   echo "ERROR: refusing to \`nixos-rebuild switch\` on $(hostname) — that would" >&2
   echo "       switch THIS machine, not $HOST. Re-run on $HOST (or pass" >&2
-  echo "       --no-rebuild to only refresh flake.lock here)." >&2
+  echo "       --no-rebuild to only report here)." >&2
   exit 1
 fi
 
@@ -123,11 +130,11 @@ fi
 
 # --- 7. verify ----------------------------------------------------------------
 say "verifying"
-live="$(sed -n 's|^ExecStart=\(/nix/store/[^ ]*\)$|\1|p' /etc/systemd/system/meter-relay.service | head -1)"
+live="$(deployed_path)"
 printf 'unit ExecStart : %s\n' "$live"
 printf 'service        : %s\n' "$(systemctl is-active meter-relay)"
-if diff -q <(printf '%s' "$live") <(printf '%s' "$new") > /dev/null; then
-  echo "✓ the unit runs the newly locked build"
+if [ "$live" = "$new" ]; then
+  echo "✓ the unit runs the newly built crate"
 else
   echo "✗ unit still points elsewhere — expected $new" >&2
   exit 1

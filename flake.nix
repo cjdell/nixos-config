@@ -37,13 +37,11 @@
       url = "path:/home/cjdell/Projects/frigate-monitor";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # meter-relay-rs: Rust port of the solar-inverter meter relay
-    # (grafton-router, hosts/grafton-router/services/meter-relay.nix). Keeps its
-    # own nixpkgs pin (its flake.lock) and builds a self-contained binary with
-    # the bundled Solid.js dashboard. After editing that repo, refresh with:
-    #   nix flake lock --update-input meter-relay-rs
-    meter-relay-rs = {
-      url = "path:/home/cjdell/Projects/meter-relay-rs";
+    # crane: cargo build slicing used by the meter-relay-rs crate under
+    # crates/ (see crates/meter-relay-rs/nix/package.nix). It has no nixpkgs
+    # input of its own, so nothing to `follows`.
+    crane = {
+      url = "github:ipetkov/crane";
     };
     # The Raspberry Pi 5 netboot flake (Pi NixOS config + the gc-node worker it
     # runs). hosts/zen3-nixos/pi5-netboot.nix bind-mounts its pi5-netboot
@@ -123,7 +121,7 @@
       frigate-whisper,
       frigate-monitor,
       gc-rust-node,
-      meter-relay-rs,
+      crane,
       deepseek-harness,
       sops-nix,
       home-manager,

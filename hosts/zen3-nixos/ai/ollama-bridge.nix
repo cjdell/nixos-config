@@ -10,8 +10,8 @@ let
   ollama-bridge = pkgs.rustPlatform.buildRustPackage {
     pname = "ollama-bridge";
     version = "0.1.0";
-    src = ../../../ollama-bridge;
-    cargoLock.lockFile = ../../../ollama-bridge/Cargo.lock;
+    src = ../../../crates/ollama-bridge;
+    cargoLock.lockFile = ../../../crates/ollama-bridge/Cargo.lock;
     doCheck = false;
   };
 in

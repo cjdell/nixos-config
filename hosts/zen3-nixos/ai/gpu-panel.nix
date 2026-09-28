@@ -25,8 +25,8 @@ let
   gpu-panel = pkgs.rustPlatform.buildRustPackage {
     pname = "gpu-panel";
     version = "0.1.0";
-    src = ../../../gpu-panel;
-    cargoLock.lockFile = ../../../gpu-panel/Cargo.lock;
+    src = ../../../crates/gpu-panel;
+    cargoLock.lockFile = ../../../crates/gpu-panel/Cargo.lock;
     doCheck = false;
   };
 

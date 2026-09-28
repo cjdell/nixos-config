@@ -1,0 +1,26 @@
+[package]
+name = "meter-relay"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of meter-relay: share one grid meter between a Solis and a Solax inverter, with a live web dashboard"
+license = "MIT"
+
+[[bin]]
+name = "meter-relay"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.7"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dotenvy = "0.15"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-serial = "5"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
