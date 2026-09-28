@@ -14,6 +14,22 @@ in
     allowedBridges = [ "lan" ];
   };
 
+  # sops-nix mounts secret generations under /run/secrets.d and makes
+  # /run/secrets a symlink to the current one. virtiofsd's sandbox bind-mounts
+  # the shared directory with move_mount(..., MOVE_MOUNT_F_EMPTY_PATH), which
+  # refuses a symlink target (EINVAL) -> virtiofsd-secrets crash-loops and the
+  # microVM never starts. Give the VM share a stable real (bind-mounted) path.
+  system.activationScripts.secrets-vm = lib.stringAfter [ "setupSecrets" ] ''
+    target="$(${pkgs.coreutils}/bin/readlink -f /run/secrets)"
+    if [ -n "$target" ] && [ -d "$target" ]; then
+      ${pkgs.coreutils}/bin/mkdir -p /run/secrets-vm
+      if ${pkgs.util-linux}/bin/mountpoint -q /run/secrets-vm; then
+        ${pkgs.util-linux}/bin/umount /run/secrets-vm || true
+      fi
+      ${pkgs.util-linux}/bin/mount --bind "$target" /run/secrets-vm
+    fi
+  '';
+
   # journalctl -u grafton-hackspace-client-routes -f
   systemd.services.grafton-hackspace-client-routes = {
     description = "Grafton Hackspace Client Routes";
@@ -66,7 +82,10 @@ in
               proto = "virtiofs";
             }
             {
-              source = "/run/secrets";
+              # /run/secrets-vm is the resolved secrets dir, bind-mounted by
+              # the secrets-vm activation script above (see the comment there
+              # for why we can't hand virtiofsd the /run/secrets symlink).
+              source = "/run/secrets-vm";
               mountPoint = "/run/secrets";
               tag = "secrets";
               proto = "virtiofs";
