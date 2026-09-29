@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::net::TcpStream;
 use tokio::time::MissedTickBehavior;
 
 use crate::allocation::{Allocation, InverterState, ReserveState};
 use crate::config::{Config, InverterConfig};
 use crate::control::ControlLaw;
+use crate::diagnostics::{ConnectionState, ConnectionStats, Diagnostics, Role};
+use crate::discovery::Assignment;
 use crate::home_assistant::HomeAssistant;
 use crate::influx::InfluxWriter;
 use crate::inverter_controller::InverterController;
@@ -93,6 +94,8 @@ pub struct Controller {
     last_metrics_reset: Arc<Mutex<u64>>,
     last_reserve_state: Arc<Mutex<ReserveState>>,
     meter_cache: Arc<RegisterCache>,
+    /// Live per-connection health, served to the diagnostics page.
+    diagnostics: Arc<Diagnostics>,
 }
 
 impl Controller {
@@ -150,16 +153,72 @@ impl Controller {
             last_metrics_reset: Arc::new(Mutex::new(now_ms())),
             last_reserve_state: Arc::new(Mutex::new(ReserveState::PrimaryOnly)),
             meter_cache,
+            diagnostics: Diagnostics::new(),
         }))
     }
 
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         let cfg = Arc::clone(&self.cfg);
+        let connect_timeout = Duration::from_millis(cfg.discovery.connect_timeout_ms);
 
-        // --- Grid meter over the serial port ---
-        let serial = tokio_serial::SerialStream::open(&tokio_serial::new(&cfg.serial_device, 9600))
-            .with_context(|| format!("opening serial device {}", cfg.serial_device))?;
-        let meter_group = ModbusSlaveGroup::new(Box::new(serial), "Meter", SERIAL_TIMEOUT);
+        // --- Work out which endpoint actually is which, before trusting any ---
+        //
+        // The remote adapters re-enumerate, so the configured port numbers are
+        // hints at best. Nothing below connects to a named role until this has
+        // looked at the wires; see `discovery.rs` for how.
+        let layout = if cfg.discovery.mode.enabled() {
+            crate::discovery::discover(&cfg, Some(&self.diagnostics)).await
+        } else {
+            let layout = crate::discovery::configured_layout(&cfg);
+            self.diagnostics.set_discovery(layout.report.clone());
+            layout
+        };
+
+        tracing::info!(
+            mode = layout.report.mode,
+            attempts = layout.report.attempts,
+            duration_ms = layout.report.duration_ms,
+            candidates = layout.report.candidates,
+            assigned = layout.report.assigned,
+            unidentified = layout.report.unidentified,
+            "endpoint discovery finished"
+        );
+        for line in &layout.report.log {
+            tracing::info!(target: "meter_relay::discovery", "{line}");
+        }
+
+        let missing = layout.unidentified_required();
+        if !missing.is_empty() {
+            let message = format!(
+                "startup discovery could not identify {}: refusing to drive a line whose \
+                 polarity would be a guess (an inverter answered with another inverter's \
+                 reverse setting is driven backwards). Set MR_DISCOVERY_STRICT=false to \
+                 start anyway.",
+                missing.join(", ")
+            );
+            if cfg.discovery.strict {
+                anyhow::bail!("{message}");
+            }
+            tracing::error!("{message}");
+        }
+
+        // --- Grid meter over its serial port ---
+        let meter_assignment = layout.grid_meter().cloned();
+        let meter_stats = self.connection("meter", Role::GridMeter, 0, meter_assignment.as_ref());
+        let meter_endpoint = meter_stats.endpoint().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no grid meter endpoint is available ({}); discovery found no meter and the \
+                 configured device is not free",
+                cfg.serial_device
+            )
+        })?;
+        let meter_group = ModbusSlaveGroup::new(
+            meter_endpoint.clone(),
+            "Meter",
+            SERIAL_TIMEOUT,
+            Arc::clone(&meter_stats),
+            connect_timeout,
+        );
         ModbusSlaveProxy::new(
             Arc::clone(&meter_group),
             1,
@@ -167,18 +226,26 @@ impl Controller {
             METER_REGS,
         )
         .init();
-        tracing::info!(device = %cfg.serial_device, "serial grid meter connected");
+        tracing::info!(endpoint = %meter_endpoint, "grid meter connection started");
 
         // --- Inverter register stats socket, shared by every inverter ---
-        let stats_stream = TcpStream::connect((cfg.inverter_host.as_str(), cfg.stats_port))
-            .await
-            .with_context(|| {
-                format!(
-                    "connecting to inverter stats socket {}:{}",
-                    cfg.inverter_host, cfg.stats_port
-                )
-            })?;
-        let stats_group = ModbusSlaveGroup::new(Box::new(stats_stream), "Stats", SERIAL_TIMEOUT);
+        let stats_assignment = layout.stats().cloned();
+        let stats_connection = self.connection("stats", Role::StatsBus, 1, stats_assignment.as_ref());
+        let stats_endpoint = stats_connection.endpoint().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no stats endpoint is available ({}:{}); discovery found no stats bus and the \
+                 configured socket is not free",
+                cfg.inverter_host,
+                cfg.stats_port
+            )
+        })?;
+        let stats_group = ModbusSlaveGroup::new(
+            stats_endpoint.clone(),
+            "Stats",
+            SERIAL_TIMEOUT,
+            Arc::clone(&stats_connection),
+            connect_timeout,
+        );
         for inverter in &self.inverters {
             ModbusSlaveProxy::new(
                 Arc::clone(&stats_group),
@@ -189,27 +256,59 @@ impl Controller {
             .init();
         }
         tracing::info!(
-            host = %cfg.inverter_host,
+            endpoint = %stats_endpoint,
             inverters = self.inverters.len(),
-            "stats socket connected"
+            "stats bus connection started"
         );
 
-        // --- Inverter meter connections: the inverters act as Modbus masters ---
-        for inverter in &self.inverters {
-            let stream = TcpStream::connect((cfg.inverter_host.as_str(), inverter.cfg.port))
-                .await
-                .with_context(|| {
-                    format!(
-                        "connecting to {} at {}:{}",
-                        inverter.name(),
-                        cfg.inverter_host,
-                        inverter.cfg.port
-                    )
-                })?;
+        // --- Inverter meter lines: the inverters act as Modbus masters ---
+        for (index, inverter) in self.inverters.iter().enumerate() {
+            let assignment = layout.meter_line(inverter.id()).cloned();
+            let identified = assignment
+                .as_ref()
+                .map(|assignment| assignment.identified)
+                .unwrap_or(false);
+            let connection = self.connection(
+                inverter.id(),
+                Role::MeterEmulator,
+                2 + index as u32,
+                assignment.as_ref(),
+            );
+
+            let Some(endpoint) = connection.endpoint().cloned() else {
+                tracing::error!(
+                    inverter = inverter.id(),
+                    "no endpoint available for this inverter's meter line: it will not be \
+                     served, and the inverter will report a metering fault"
+                );
+                continue;
+            };
+
+            if !identified {
+                // Strict mode never reaches here (it has already refused to
+                // start). With discovery explicitly relaxed, the configured
+                // port is served as it was before discovery existed — but the
+                // diagnostics page keeps saying it is unverified.
+                tracing::warn!(
+                    inverter = inverter.id(),
+                    endpoint = %endpoint,
+                    "serving an unverified meter line because MR_DISCOVERY_STRICT is off"
+                );
+                connection.set_state(ConnectionState::Unidentified);
+            }
+
             spawn_modbus_master(
-                Box::new(stream),
+                endpoint.clone(),
                 inverter.name(),
                 inverter.controller.handler(),
+                Arc::clone(&connection),
+                connect_timeout,
+            );
+            tracing::info!(
+                inverter = inverter.id(),
+                endpoint = %endpoint,
+                identified,
+                "inverter meter line connection started"
             );
         }
 
@@ -230,7 +329,50 @@ impl Controller {
             tokio::spawn(async move { this.home_assistant_loop().await });
         }
 
-        crate::web::serve(Arc::clone(&self.telemetry), cfg.web_port, cfg.web_dir.clone()).await
+        crate::web::serve(
+            Arc::clone(&self.telemetry),
+            Arc::clone(&self.diagnostics),
+            cfg.web_port,
+            cfg.web_dir.clone(),
+        )
+        .await
+    }
+
+    /// The diagnostics row for one connection, carrying whatever discovery
+    /// concluded about it. `expected_identity` is the *configured* hint, not
+    /// the discovered identity, so a line whose port moved shows as a mismatch
+    /// on the diagnostics page instead of silently looking correct.
+    fn connection(
+        &self,
+        id: &str,
+        role: Role,
+        order: u32,
+        assignment: Option<&Assignment>,
+    ) -> Arc<ConnectionStats> {
+        let expected = assignment
+            .and_then(|assignment| assignment.hint.as_ref())
+            .and_then(|hint| match hint {
+                crate::discovery::Hint::Inverter(id) => Some(id.clone()),
+                _ => None,
+            });
+
+        let stats = ConnectionStats::new(
+            id,
+            role,
+            assignment.and_then(|assignment| assignment.endpoint.clone()),
+            expected,
+            order,
+        );
+        if let Some(assignment) = assignment {
+            stats.identify(
+                assignment.identity.clone(),
+                assignment.identification.clone(),
+            );
+            if !assignment.identified {
+                stats.set_state(ConnectionState::Unidentified);
+            }
+        }
+        self.diagnostics.register(stats)
     }
 
     async fn control_loop(self: Arc<Self>) {

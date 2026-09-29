@@ -140,10 +140,29 @@ else
   exit 1
 fi
 
-if curl -fsS --max-time 5 http://127.0.0.1:8484/api/status | head -c 120; then
+# Startup discovery listens on the serial endpoints for a few seconds before
+# anything is served, so the dashboard is *expected* to be silent for the first
+# ~3 s after activation. Poll for it rather than treating that window as a
+# failed deploy.
+dashboard=""
+for _ in $(seq 1 20); do
+  if dashboard="$(curl -fsS --max-time 5 http://127.0.0.1:8484/api/status 2>/dev/null)"; then
+    break
+  fi
+  sleep 1
+done
+
+if [ -n "$dashboard" ]; then
+  printf '%s\n' "$dashboard" | head -c 120
   echo
   echo "✓ dashboard answering on :8484"
+  if curl -fsS --max-time 5 http://127.0.0.1:8484/api/connections >/dev/null; then
+    echo "✓ /api/connections answering (see the dashboard's /#/diagnostics page)"
+  else
+    echo "✗ /api/connections did not answer" >&2
+    exit 1
+  fi
 else
-  echo "✗ dashboard did not answer on :8484" >&2
+  echo "✗ dashboard did not answer on :8484 within 20 s" >&2
   exit 1
 fi

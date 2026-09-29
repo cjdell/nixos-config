@@ -145,6 +145,13 @@ pub enum PacketKind {
     Response,
 }
 
+/// What one [`ModbusParser::push_counted`] found: the frames, and how many
+/// bytes were discarded as junk (line noise, or a frame whose CRC failed).
+pub struct Pushed {
+    pub packets: Vec<Vec<u8>>,
+    pub dropped: usize,
+}
+
 /// Incremental CRC-framed Modbus RTU packet scanner.
 pub struct ModbusParser {
     buffer: Vec<u8>,
@@ -160,6 +167,14 @@ impl ModbusParser {
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        self.push_counted(chunk).packets
+    }
+
+    /// As [`Self::push`], but also reports how many bytes were thrown away.
+    /// The transports surface that as a framing-error count: a bus that is
+    /// silently dropping bytes still *works*, so without this the first symptom
+    /// would be a rising timeout rate with nothing to explain it.
+    pub fn push_counted(&mut self, chunk: &[u8]) -> Pushed {
         self.buffer.extend_from_slice(chunk);
 
         let mut packets = Vec::new();
@@ -206,11 +221,15 @@ impl ModbusParser {
             }
         }
 
+        // Everything up to the last accepted frame leaves the buffer; what did
+        // not become a frame is the junk count.
+        let framed: usize = packets.iter().map(Vec::len).sum();
+        let dropped = trunc_point.saturating_sub(framed);
         if trunc_point > 0 {
             self.buffer.drain(..trunc_point);
         }
 
-        packets
+        Pushed { packets, dropped }
     }
 
     fn is_valid(&self, packet: &[u8]) -> bool {
@@ -221,6 +240,17 @@ impl ModbusParser {
                     return false;
                 }
                 let function_code = packet[1];
+                // A Modbus exception reply is five bytes: address, function
+                // code with the high bit set, the exception code, CRC. It is a
+                // real answer from a real device — and the only sign a register
+                // was refused rather than the device being absent — so it must
+                // not be discarded as junk.
+                if function_code & 0x80 != 0 {
+                    return matches!(
+                        function_code & 0x7f,
+                        FUNC_READ_HOLDING | FUNC_READ_INPUT
+                    ) && packet.len() == 5;
+                }
                 if function_code != FUNC_READ_HOLDING && function_code != FUNC_READ_INPUT {
                     return false;
                 }

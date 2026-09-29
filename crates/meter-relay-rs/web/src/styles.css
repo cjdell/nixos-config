@@ -497,3 +497,319 @@ footer a {
 footer a:hover {
   text-decoration: underline;
 }
+
+/* ------------------------------------------------------------------ */
+/* Page navigation                                                     */
+/* ------------------------------------------------------------------ */
+
+/* Sits at the end of the status row. It wraps on its own so that the two tabs
+   stay visible in a narrow window instead of the second one overflowing. */
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.nav-tab {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.78rem;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.nav-tab:hover {
+  color: var(--text);
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+.nav-tab.active {
+  color: var(--accent);
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+/* The Live page stays mounted so its chart history survives a tab switch;
+   only its visibility toggles. This must override the page's own display. */
+.page-hidden {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Diagnostics page                                                    */
+/* ------------------------------------------------------------------ */
+
+.diag-feed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.diag-feed.stale .diag-feed-text {
+  color: var(--red);
+}
+
+.diag-feed-text {
+  font-variant-numeric: tabular-nums;
+}
+
+.diag-cards {
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+}
+
+/* A connection whose discovered identity disagrees with the configuration:
+   the case where auto-detection overrode a stale configured port. */
+.diag-card.mismatch {
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.diag-label {
+  margin-left: 8px;
+}
+
+.badge.role {
+  color: var(--accent);
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.08);
+  text-transform: none;
+}
+
+.badge.warn {
+  color: var(--amber);
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.1);
+  text-transform: none;
+}
+
+.diag-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+}
+
+.diag-endpoint-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  background: rgba(8, 16, 30, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  overflow-wrap: anywhere;
+}
+
+.diag-conn-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.diag-conn-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.diag-mismatch {
+  border-left: 2px solid rgba(251, 191, 36, 0.6);
+  background: rgba(251, 191, 36, 0.07);
+  color: var(--text);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border-radius: 0 8px 8px 0;
+  margin-bottom: 14px;
+}
+
+.diag-mismatch strong {
+  color: var(--amber);
+}
+
+.diag-block {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.diag-block-title {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+}
+
+.diag-identity {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.diag-field-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.diag-field-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.diag-field-note {
+  align-self: end;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.diag-evidence {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+
+.diag-directional .metric-label {
+  color: var(--accent);
+}
+
+.diag-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.diag-none {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.diag-stat-sub {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.diag-log-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 12px 0 8px;
+}
+
+.diag-log {
+  margin: 0;
+  padding: 10px 12px 10px 30px;
+  list-style: decimal;
+  background: rgba(8, 16, 30, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-height: 260px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.diag-log li {
+  overflow-wrap: anywhere;
+}
+
+.diag-log li::marker {
+  color: var(--muted);
+}
+
+.diag-errors {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diag-errors li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed rgba(31, 51, 80, 0.7);
+}
+
+.diag-error-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+}
+
+.diag-error-kind {
+  text-transform: none;
+}
+
+.diag-error-detail {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}
+
+.diag-unavailable {
+  border-color: rgba(248, 113, 113, 0.45);
+  margin-bottom: 16px;
+}
+
+.diag-unavailable-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--red);
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.diag-unavailable-detail {
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+.diag-unavailable a,
+.diag-note a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.diag-unavailable a:hover,
+.diag-note a:hover {
+  text-decoration: underline;
+}

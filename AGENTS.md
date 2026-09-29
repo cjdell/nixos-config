@@ -508,8 +508,46 @@ over serial Modbus RTU, re-serves those registers to the inverters, nudges them
 with per-inverter PIDs so grid export tracks `MR_METER_TARGET_POWER`, charges the
 batteries in the Octopus Go window, publishes to Home Assistant + InfluxDB, and
 serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
-`/api/events` SSE, legacy `/stats`).
+`/api/events` SSE, `/api/connections`, legacy `/stats`) with a second
+`/#/diagnostics` page.
 
+- **The endpoint→role mapping is discovered at startup, because the ports are
+  not stable.** The inverter-pi (`192.168.49.30`, `ser2net`) bridges three (soon
+  four) *identical* CH340 USB adapters with no serial numbers onto TCP
+  2000/2001/2002/2003, so `/dev/ttyUSBn` — and therefore which inverter hangs off
+  which port — re-enumerates across reboots. `MR_*_PORT`/`MR_STATS_PORT` are
+  **hints**; at startup `src/discovery.rs` *listens* (read-only, 3 s, in
+  parallel) for each inverter's own meter polls and *probes* only the endpoints
+  that stayed silent (the stats bus and the local USB grid meter answer; a line
+  with an inverter polling on it is never probed, and a TCP endpoint is never
+  classified as the grid meter because an inverter answers the meter's own
+  registers too). `MR_DISCOVERY_STRICT=true` (the deployed setting) refuses to
+  start when a required connection cannot be placed — an inverter answered with
+  another inverter's `MR_<ID>_REVERSE` is driven *backwards* — and
+  `MR_DISCOVERY=off` restores the old trust-the-port behaviour.
+- **`MR_DISCOVERY_ONLY=1` asks what the wiring looks like without starting the
+  service**: it needs no credentials, prints the table, and exits non-zero if a
+  required connection is unidentified. Stop `meter-relay` first — `ser2net` is
+  `kickolduser: true`, so connecting displaces whatever holds the port.
+- **Every connection reconnects on its own** (250 ms backoff doubling to 10 s).
+  A dropped link used to leave the service running on a dead socket forever,
+  which is what `/api/connections` and the diagnostics page exist to make
+  visible: per connection, the discovered identity (and `mismatch` when it
+  disagrees with the configured hint), state, last rx/tx, frame and directional
+  counters, timeouts/CRC/exception/IO errors, reconnects and a windowed error
+  rate. `src/diagnostics.rs` owns those counters; nothing there is on the control
+  path.
+- **A new inverter of an already-known model** works from `MR_<ID>_DRIVER` +
+  `MR_<ID>_PORT` alone (its port is a candidate automatically; identical
+  fingerprints are told apart by the configured port, which is what the hint is
+  for). **A new model** also needs its meter-poll fingerprint —
+  `MR_<ID>_METER_POLL="4:0:76,4:342:2"`, and a row in `driver_meter_poll()`
+  (`src/config.rs`) — measured on the live line with
+  `crates/meter-relay-rs/scripts/capture-serial.py`. Capture both of an
+  inverter's states if it has them: a Solax with no meter scans for one
+  (`fc3 reg 11` at both candidate addresses) and only polls active power
+  (`fc4 reg 12`, `fc4 reg 74`) once it has found a meter. A model with no
+  fingerprint at all cannot be placed, and strict mode will refuse to start.
 - **The plant is a priority list, not two hardcoded inverters.** `MR_INVERTERS`
   orders it (default `solis,solax`) and each entry takes `MR_<ID>_*` overrides,
   so the existing `MR_SOLIS_*`/`MR_SOLAX_*` names still work. Entry 0 is the
@@ -552,6 +590,19 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
   follow). There is **no separate `meter-relay-rs` input or `flake.lock` entry
   any more**, so a plain `nixos-rebuild switch --flake .` always builds the
   working tree. Live logs: `journalctl -u meter-relay -f`.
+- **No Rust toolchain on grafton-router** (no `cargo`, no `rustc`, no `cc`), so
+  the crate cannot be built with a bare `cargo test`. One command supplies
+  everything for a fast edit/test loop — `cc` is needed to link build scripts and
+  the `udev.dev` output for `tokio-serial`'s `libudev`:
+
+  ```sh
+  nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#pkg-config nixpkgs#stdenv.cc \
+    nixpkgs#udev.dev nixpkgs#clippy --command bash -c \
+    'cd crates/meter-relay-rs && cargo test && cargo clippy --all-targets -- -D warnings'
+  ```
+
+  `web/` needs `npm install` once (network); `npm run typecheck && npm run build`
+  then work offline.
 
 ### Deploying a change (the step that gets missed)
 

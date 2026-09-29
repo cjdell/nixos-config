@@ -43,9 +43,35 @@ let
     # directions (the reserve is charged from the surplus the main bank's taper
     # cannot take, and discharged for demand the main bank cannot meet). Adding
     # a third inverter means another id here plus its MR_<ID>_* settings, and a
-    # driver if it is a new make/model.
+    # driver if it is a new make/model. Its MR_<ID>_PORT becomes a discovery
+    # candidate automatically; an inverter of a make/model the relay has never
+    # seen also needs its meter polls written down (MR_<ID>_METER_POLL, measured
+    # with crates/meter-relay-rs/scripts/capture-serial.py) or discovery cannot
+    # tell its meter line from another inverter's.
     MR_INVERTERS = "solis,solax";
     MR_INVERTER_HOST = "192.168.49.30";
+
+    # --- Which endpoint is which (startup auto-detection) --------------------
+    # The inverter-pi bridges three (soon four) identical CH340 USB adapters onto
+    # the TCP ports below. The adapters have no serial numbers, so the kernel
+    # names them ttyUSB0..2 in probe order and the port-to-inverter mapping is
+    # not stable across reboots: the port that was the Solis meter line
+    # yesterday can be the stats bus today. The MR_*_PORT values below are
+    # therefore *hints*, and at startup the relay works out which endpoint
+    # really is which — by listening for each inverter's own meter polls, then
+    # probing the endpoints that stayed silent (the stats bus and the USB grid
+    # meter answer; a line with an inverter polling on it is never probed at
+    # all). See crates/meter-relay-rs/src/discovery.rs.
+    MR_DISCOVERY = "auto";
+    # Refuse to start rather than serve a meter line whose polarity is a guess:
+    # the Solis reads its meter reversed, so answering its polls un-negated
+    # would drive the plant the wrong way. An endpoint that cannot be placed is
+    # reported on the diagnostics page (/#/diagnostics) instead, and `curl
+    # /api/connections` shows the same thing.
+    MR_DISCOVERY_STRICT = "true";
+    # Measured on this plant: four endpoints, settled in about 3 s.
+    MR_DISCOVERY_LISTEN_MS = "3000";
+
     MR_STATS_PORT = "2002";
 
     # --- Objective ----------------------------------------------------------
@@ -114,10 +140,22 @@ in
   # 192.168.49.30:2000/2001 (stats on :2002) and nudges them with PIDs so grid
   # export tracks MR_METER_TARGET_POWER. Serves a live web dashboard on :8484
   # (the old Express app's /stats port; /stats is kept for compatibility, plus
-  # /api/status, /api/history, /api/events SSE).
+  # /api/status, /api/history, /api/events SSE and /api/connections). The
+  # dashboard's second page, /#/diagnostics, shows what startup discovery
+  # decided each serial endpoint is, with per-connection health and error rates.
   #
   #   sudo systemctl restart meter-relay     # picks up a config change
   #   journalctl -u meter-relay -f
+  #
+  # After any change to the physical wiring, ask what the relay can see without
+  # starting it (it needs the unit's own environment; stop the service first —
+  # it holds those ports):
+  #
+  #   sudo systemctl stop meter-relay
+  #   sudo bash -c 'set -a; . /run/secrets/rendered/meter-relay.env; set +a; \
+  #     MR_DISCOVERY_ONLY=1 $(systemctl show -p ExecStart --value meter-relay \
+  #       | grep -o "/nix/store/[^ ]*meter-relay$")'
+  #   sudo systemctl start meter-relay
   #
   # There is no WorkingDirectory: the configuration arrives in the environment
   # (below), not from a file in the checkout, so the unit no longer depends on

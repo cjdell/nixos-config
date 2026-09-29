@@ -96,6 +96,23 @@ pub fn build(driver: &str, cache: Arc<RegisterCache>) -> anyhow::Result<Arc<dyn 
     }
 }
 
+/// The register a discovery probe can read to prove this driver is present.
+///
+/// Startup discovery deliberately does not build a driver to ask this — a
+/// driver needs a register cache and an answer already — so the answer lives
+/// here beside the register maps it belongs to. An inverter that answers its
+/// own power register is on the stats bus; it is the one thing that tells that
+/// bus apart from the meter lines, which never answer a slave request.
+pub fn probe_regs(driver: &str) -> anyhow::Result<(u8, u16)> {
+    match driver {
+        "solis" => Ok(SOLIS_BATTERY_POWER_REGS),
+        "solax" => Ok(SOLAX_POWER_REGS),
+        other => Err(anyhow!(
+            "unknown inverter driver {other:?}: add it to inverters::build()"
+        )),
+    }
+}
+
 pub struct SolisInverter {
     cache: Arc<RegisterCache>,
 }

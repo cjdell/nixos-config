@@ -1,10 +1,12 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 
 use crate::allocation::{AllocatorConfig, InverterPolicy};
 use crate::control::ControlConfig;
+use crate::endpoint::{self, Endpoint};
+use crate::inverters;
 
 /// Everything the controller needs to bring one inverter on line.
 ///
@@ -38,6 +40,13 @@ pub struct InverterConfig {
     /// dashboards reference them), so each driver keeps the names it has always
     /// published rather than being renamed by the generalisation.
     pub ha_prefix: String,
+    /// Register that proves this driver is present, read by startup discovery
+    /// to identify the stats bus without building a driver.
+    pub probe_regs: (u8, u16),
+    /// Meter polls this make/model is known to send, used by startup discovery
+    /// to tell one inverter's meter line from another's when the endpoint
+    /// enumeration has shuffled. `MR_<ID>_METER_POLL` overrides it.
+    pub meter_poll: Vec<(u8, u16, u16)>,
 }
 
 impl InverterConfig {
@@ -54,11 +63,22 @@ pub struct Config {
     pub influxdb_token: String,
 
     pub serial_device: String,
+    pub serial_baud: u32,
+    /// Every local serial candidate, always at least the configured device.
+    /// More than one lets discovery find the meter if a second USB adapter
+    /// enumerates ahead of it.
+    pub serial_devices: Vec<Endpoint>,
+    /// An explicit remote candidate list (`MR_ENDPOINTS`), if one was given.
+    /// Empty means "derive the candidates from the ports below".
+    pub endpoints: Vec<Endpoint>,
     pub inverter_host: String,
     /// The plant, in priority order: index 0 is the primary actuator.
     pub inverters: Vec<InverterConfig>,
     /// Shared socket both inverters are polled on for telemetry registers.
     pub stats_port: u16,
+
+    /// How startup works out which endpoint is which. See `discovery.rs`.
+    pub discovery: DiscoverySettings,
 
     pub web_port: u16,
     pub web_dir: PathBuf,
@@ -68,6 +88,62 @@ pub struct Config {
     pub meter_target_power: f64,
 
     pub control: ControlConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscoveryMode {
+    /// Listen and probe the serial endpoints at startup.
+    Auto,
+    /// Trust the configured ports exactly as before, and only report them.
+    Off,
+}
+
+impl DiscoveryMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn enabled(self) -> bool {
+        self == Self::Auto
+    }
+}
+
+/// Startup auto-detection settings.
+#[derive(Clone, Debug)]
+pub struct DiscoverySettings {
+    pub mode: DiscoveryMode,
+    /// How long each silent endpoint is listened to for inverter meter polls.
+    pub listen_ms: u64,
+    /// How long a probe waits for a reply.
+    pub probe_ms: u64,
+    /// How long opening an endpoint may take.
+    pub connect_timeout_ms: u64,
+    /// How many identify-and-retry rounds to run: an inverter may still be
+    /// booting when the relay starts.
+    pub attempts: u32,
+    /// Refuse to start when a required connection cannot be identified, rather
+    /// than serving a line whose polarity is a guess.
+    pub strict: bool,
+    /// Print what the endpoints are and exit without starting the service
+    /// (`MR_DISCOVERY_ONLY`). Needs no credentials: it touches only the wires.
+    pub only: bool,
+}
+
+impl Default for DiscoverySettings {
+    fn default() -> Self {
+        Self {
+            mode: DiscoveryMode::Auto,
+            listen_ms: 3_000,
+            probe_ms: 250,
+            connect_timeout_ms: 3_000,
+            attempts: 3,
+            strict: true,
+            only: false,
+        }
+    }
 }
 
 /// Make/model defaults: the meter port it connects to, the slave address it is
@@ -116,6 +192,73 @@ fn driver_defaults(driver: &str) -> anyhow::Result<DriverDefaults> {
              driver factory in inverters.rs"
         )),
     }
+}
+
+/// The meter polls a driver is *known* to send, taken from a capture of the
+/// live lines (`scripts/capture-serial.py`). Startup discovery matches what it
+/// hears against these to work out which shuffled endpoint belongs to which
+/// inverter.
+///
+/// **Adding an inverter model means adding its fingerprint here** (or setting
+/// `MR_<ID>_METER_POLL` on the host). An inverter with no fingerprint cannot be
+/// placed, and in strict mode that refuses to start — the diagnostics page and
+/// the capture script exist to make that a five-minute fix rather than a
+/// mystery.
+///
+/// The patterns are what the *other* driver does not send: the Solis's
+/// 76-register bulk read, and the Solax's small reads. A driver's traffic is
+/// not fixed — the Solax scans for its meter (`fc3 reg 11` at both candidate
+/// addresses, about 4 Hz) while it has none, then polls active power
+/// (`fc4 reg 12`) and `fc4 reg 74` once it does — so list every pattern seen in
+/// either state. Discovery scores a match on the patterns it recognises and
+/// ignores the ones this table has never heard of.
+fn driver_meter_poll(driver: &str) -> Vec<(u8, u16, u16)> {
+    match driver {
+        // A bulk input-register read of the whole meter map, plus the running
+        // energy total, alternating at about 1 Hz.
+        "solis" => vec![(4, 0, 76), (4, 342, 2)],
+        // Meter scan and normal running, measured on the live line.
+        "solax" => vec![(4, 12, 2), (3, 11, 1), (4, 74, 2)],
+        _ => Vec::new(),
+    }
+}
+
+/// `4:342:2,4:0:76` → `[(4, 342, 2), (4, 0, 76)]`.
+fn parse_meter_poll(spec: &str) -> anyhow::Result<Vec<(u8, u16, u16)>> {
+    let mut out = Vec::new();
+    for raw in spec.split(',') {
+        let item = raw.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = item.split(':').collect();
+        if parts.len() != 3 {
+            bail!("{item:?} is not fc:register:count");
+        }
+        let number = |value: &str, what: &str| -> anyhow::Result<u32> {
+            value
+                .trim()
+                .parse()
+                .with_context(|| format!("{item:?}: {what} must be a number"))
+        };
+        let function_code = number(parts[0], "the function code")?;
+        if function_code > u8::MAX as u32 {
+            bail!("{item:?}: function codes are one byte");
+        }
+        let register = number(parts[1], "the register")?;
+        if register > u16::MAX as u32 {
+            bail!("{item:?}: registers are 16 bits");
+        }
+        let count = number(parts[2], "the count")?;
+        if count > u16::MAX as u32 {
+            bail!("{item:?}: register counts are 16 bits");
+        }
+        out.push((function_code as u8, register as u16, count as u16));
+    }
+    if out.is_empty() {
+        bail!("no meter-poll patterns in {spec:?}");
+    }
+    Ok(out)
 }
 
 /// `solax2` -> `Solax2`, for a default display name.
@@ -190,6 +333,56 @@ impl Config {
 
         let inverters = load_inverters(&optional, &number, &port, &boolean, &optional_number)?;
 
+        // Serial candidates. The grid meter is a local USB device whose stable
+        // path is the configured default; naming several lets discovery find it
+        // if a second adapter ever enumerates ahead of it.
+        let serial_baud = port("MR_SERIAL_BAUD", endpoint::DEFAULT_BAUD as u16)? as u32;
+        let serial_device = optional(
+            "MR_SERIAL_DEVICE",
+            "/dev/serial/by-id/usb-FTDI_USB_Serial_Converter_FTB6SPL3-if00-port0",
+        );
+        let mut serial_devices = match optional("MR_SERIAL_DEVICES", "") {
+            spec if spec.trim().is_empty() => Vec::new(),
+            spec => endpoint::parse_specs(&spec, serial_baud)
+                .context("parsing MR_SERIAL_DEVICES")?,
+        };
+        let configured_device = Endpoint::serial(serial_device.clone(), serial_baud);
+        if !serial_devices.contains(&configured_device) {
+            serial_devices.insert(0, configured_device);
+        }
+
+        let endpoints = match optional("MR_ENDPOINTS", "") {
+            spec if spec.trim().is_empty() => Vec::new(),
+            spec => endpoint::parse_specs(&spec, serial_baud).context("parsing MR_ENDPOINTS")?,
+        };
+
+        let strict = boolean("MR_DISCOVERY_STRICT", true)?;
+        let discovery_only = boolean("MR_DISCOVERY_ONLY", false)?;
+        let discovery = DiscoverySettings {
+            mode: match optional("MR_DISCOVERY", "auto").trim().to_ascii_lowercase().as_str() {
+                "auto" | "on" | "1" | "true" | "yes" => DiscoveryMode::Auto,
+                "off" | "0" | "false" | "no" | "none" => DiscoveryMode::Off,
+                other => bail!("MR_DISCOVERY must be auto or off, got {other:?}"),
+            },
+            listen_ms: millis("MR_DISCOVERY_LISTEN_MS", 3_000)?,
+            probe_ms: millis("MR_DISCOVERY_PROBE_MS", 250)?,
+            connect_timeout_ms: millis("MR_CONNECT_TIMEOUT_MS", 3_000)?,
+            attempts: millis("MR_DISCOVERY_ATTEMPTS", 3)?.clamp(1, 20) as u32,
+            strict,
+            only: discovery_only,
+        };
+
+        // A discovery-only run touches nothing but the serial endpoints, so it
+        // must not require the publishing credentials: that is the whole point
+        // of being able to ask the question on its own.
+        let credential = |key: &str| -> anyhow::Result<String> {
+            if discovery_only {
+                Ok(String::new())
+            } else {
+                required(key)
+            }
+        };
+
         let defaults = AllocatorConfig::default();
         let allocator = AllocatorConfig {
             // The reserve gate is plant-level, not per-inverter: it decides when
@@ -224,18 +417,20 @@ impl Config {
         };
 
         Ok(Self {
-            home_assistant_api: required("MR_HOME_ASSISTANT_API")?,
-            home_assistant_bearer_token: required("MR_HOME_ASSISTANT_BEARER_TOKEN")?,
-            influxdb_url: required("MR_INFLUXDB_URL")?,
-            influxdb_token: required("MR_INFLUXDB_TOKEN")?,
+            home_assistant_api: credential("MR_HOME_ASSISTANT_API")?,
+            home_assistant_bearer_token: credential("MR_HOME_ASSISTANT_BEARER_TOKEN")?,
+            influxdb_url: credential("MR_INFLUXDB_URL")?,
+            influxdb_token: credential("MR_INFLUXDB_TOKEN")?,
 
-            serial_device: optional(
-                "MR_SERIAL_DEVICE",
-                "/dev/serial/by-id/usb-FTDI_USB_Serial_Converter_FTB6SPL3-if00-port0",
-            ),
+            serial_device,
+            serial_baud,
+            serial_devices,
+            endpoints,
             inverter_host,
             inverters,
             stats_port: port("MR_STATS_PORT", 2002)?,
+
+            discovery,
 
             web_port: port("MR_WEB_PORT", 8484)?,
             web_dir: PathBuf::from(optional("MR_WEB_DIR", "web/dist")),
@@ -308,9 +503,14 @@ fn load_inverters(
 
         let driver = optional(&var("DRIVER"), id).to_ascii_lowercase();
         let defaults = driver_defaults(&driver)?;
+        let meter_poll = match optional(&var("METER_POLL"), "") {
+            spec if spec.trim().is_empty() => driver_meter_poll(&driver),
+            spec => parse_meter_poll(&spec)
+                .with_context(|| format!("parsing {}", var("METER_POLL")))?,
+        };
 
         out.push(InverterConfig {
-            driver,
+            driver: driver.clone(),
             port: port(&var("PORT"), defaults.port)?,
             slave: number(&var("SLAVE"), defaults.slave as f64)? as u8,
             kp: number(&var("KP"), defaults.kp)?,
@@ -319,6 +519,8 @@ fn load_inverters(
             nudge_limit: number(&var("NUDGE_LIMIT"), defaults.nudge_limit)?,
             reverse: boolean(&var("REVERSE"), defaults.reverse)?,
             ha_prefix: optional(&var("HA_PREFIX"), defaults.ha_prefix),
+            probe_regs: inverters::probe_regs(&driver)?,
+            meter_poll,
             policy,
         });
     }
@@ -497,5 +699,87 @@ mod tests {
     fn a_duplicate_id_is_rejected() {
         let error = plant(&[("MR_INVERTERS", "solis,solax,solis")]).expect_err("duplicate id");
         assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn the_driver_defaults_carry_the_discovery_fingerprints() {
+        let inverters = plant(&[]).expect("defaults should load");
+
+        assert_eq!(inverters[0].probe_regs, (4, 33149));
+        assert_eq!(inverters[0].meter_poll, vec![(4, 0, 76), (4, 342, 2)]);
+        assert_eq!(inverters[1].probe_regs, (4, 0x02));
+        assert_eq!(
+            inverters[1].meter_poll,
+            vec![(4, 12, 2), (3, 11, 1), (4, 74, 2)]
+        );
+    }
+
+    #[test]
+    fn a_second_inverter_on_the_same_driver_shares_its_fingerprint() {
+        let inverters = plant(&[
+            ("MR_INVERTERS", "solis,solax,solax2"),
+            ("MR_SOLAX2_DRIVER", "solax"),
+            ("MR_SOLAX2_PORT", "2003"),
+            ("MR_SOLAX2_SLAVE", "3"),
+        ])
+        .expect("a third inverter should configure");
+
+        // Two Solaxes are indistinguishable by listening; startup discovery
+        // falls back to the configured ports for exactly this case.
+        assert_eq!(inverters[2].meter_poll, inverters[1].meter_poll);
+        assert_eq!(inverters[2].port, 2003);
+    }
+
+    #[test]
+    fn a_meter_poll_override_teaches_discovery_a_new_driver() {
+        let inverters = plant(&[
+            ("MR_INVERTERS", "solis,solax"),
+            ("MR_SOLAX_METER_POLL", "4:99:1,3:11:1"),
+        ])
+        .expect("the override should parse");
+
+        assert_eq!(inverters[1].meter_poll, vec![(4, 99, 1), (3, 11, 1)]);
+        // The other inverter is untouched.
+        assert_eq!(inverters[0].meter_poll, vec![(4, 0, 76), (4, 342, 2)]);
+    }
+
+    #[test]
+    fn a_malformed_meter_poll_override_is_a_startup_error() {
+        // `anyhow`'s Display prints the outermost context only, so the useful
+        // part of the chain has to be read with the debug format.
+        let error = plant(&[("MR_SOLAX_METER_POLL", "4:99")]).expect_err("should be rejected");
+        let chain = format!("{error:?}");
+        assert!(chain.contains("parsing MR_SOLAX_METER_POLL"), "{chain}");
+        assert!(chain.contains("fc:register:count"), "{chain}");
+
+        let error = plant(&[("MR_SOLAX_METER_POLL", "4:x:1")]).expect_err("should be rejected");
+        let chain = format!("{error:?}");
+        assert!(chain.contains("must be a number"), "{chain}");
+    }
+
+    #[test]
+    fn meter_poll_specs_round_trip_through_the_parser() {
+        assert_eq!(
+            parse_meter_poll(" 4:342:2 , 4:0:76 ").unwrap(),
+            vec![(4, 342, 2), (4, 0, 76)]
+        );
+        assert!(parse_meter_poll("").is_err());
+        assert!(parse_meter_poll("4:0:76,4:1:1:1").is_err());
+        assert!(parse_meter_poll("300:0:1").is_err());
+    }
+
+    #[test]
+    fn discovery_defaults_are_auto_and_strict() {
+        let defaults = DiscoverySettings::default();
+        assert_eq!(defaults.mode, DiscoveryMode::Auto);
+        assert!(defaults.mode.enabled());
+        assert!(defaults.strict, "an unverified line must not be driven by default");
+        assert!(defaults.attempts >= 1);
+        assert!(
+            defaults.listen_ms >= 2_000,
+            "a Solis polls at about 1 Hz, so a short window would see nothing"
+        );
+        assert_eq!(DiscoveryMode::Off.as_str(), "off");
+        assert!(!DiscoveryMode::Off.enabled());
     }
 }

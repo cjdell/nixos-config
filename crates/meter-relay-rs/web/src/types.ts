@@ -104,3 +104,172 @@ export interface StatusSnapshot {
   use_octopus_go: boolean;
   charging: boolean;
 }
+
+/* ------------------------------------------------------------------ */
+/* Connections / diagnostics                                           */
+/*                                                                     */
+/* Everything below is served by GET /api/connections. The relay may   */
+/* add fields to that payload; nothing here depends on anything that   */
+/* is not documented, and every timestamp is milliseconds since the    */
+/* Unix epoch. `null` or an absent key means "never".                  */
+/* ------------------------------------------------------------------ */
+
+/** What part of the relay a connection plays. */
+export type ConnectionRole =
+  | "grid_meter"
+  | "stats_bus"
+  | "meter_emulator"
+  | "unknown";
+
+/** Transport under the connection. */
+export type ConnectionKind = "tcp" | "serial";
+
+/** Lifecycle state as reported by the relay; `null`/absent becomes "unknown". */
+export type ConnectionState =
+  | "online"
+  | "connecting"
+  | "listening"
+  | "down"
+  | "unidentified"
+  | "unknown";
+
+/**
+ * How the relay decided which endpoint is which. Present once discovery has
+ * run; `mismatch` is the interesting one — it means auto-detection kept a
+ * different identity than the one the configuration expected, typically
+ * because the configured port had gone stale.
+ */
+export interface ConnectionIdentification {
+  /** e.g. "listen_fingerprint", "probe", "configured". */
+  method: string;
+  /** 0..1. */
+  confidence: number;
+  /** Human-readable justification, e.g. "100% match the solis fingerprint". */
+  evidence: string;
+  mismatch: boolean;
+}
+
+/** One connection-level error, newest first in `recent_errors`. */
+export interface RecentError {
+  /** Milliseconds since the Unix epoch. */
+  at: number;
+  /** e.g. "timeout", "crc", "exception", "io". */
+  kind: string;
+  detail: string;
+}
+
+/**
+ * One serial/Modbus connection. Counters are cumulative for the life of the
+ * process; `error_rate` is per the `window_secs` window.
+ *
+ * `requests_in`/`responses_out` are the meter-emulator direction (inverters
+ * poll us); `polls_out`/`responses_in` are the master direction (we poll the
+ * grid meter and the stats bus). The unused pair reads zero.
+ */
+export interface ConnectionReport {
+  id: string;
+  role: ConnectionRole;
+  label: string;
+  /** e.g. "tcp://192.168.49.30:2002" or "serial:/dev/serial/by-id/...". */
+  endpoint: string;
+  kind: ConnectionKind;
+  state: ConnectionState;
+  healthy: boolean;
+  /** What discovery found at the other end, if anything. */
+  identity: string | null;
+  /** What the configuration says should be there. */
+  expected_identity: string | null;
+  identification: ConnectionIdentification;
+  /** Epoch ms this connection last came up; `null` if it never has. */
+  connected_since: number | null;
+  last_rx: number | null;
+  last_tx: number | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_frames: number;
+  tx_frames: number;
+  requests_in: number;
+  responses_out: number;
+  polls_out: number;
+  responses_in: number;
+  timeouts: number;
+  crc_errors: number;
+  exceptions: number;
+  io_errors: number;
+  reconnects: number;
+  /** Fraction, 0..1, over the last `window_secs`. */
+  error_rate: number;
+  window_secs: number;
+  recent_errors: RecentError[];
+}
+
+/** The startup discovery pass, summarised. `null` if it has not completed. */
+export interface DiscoveryReport {
+  /** e.g. "auto". */
+  mode: string;
+  /** Epoch ms the pass started. */
+  ran_at: number;
+  duration_ms: number;
+  listen_ms: number;
+  /** Endpoints considered / matched to a known device / left unknown. */
+  candidates: number;
+  assigned: number;
+  unidentified: number;
+  /** The human-readable decision log, one line per step. */
+  log: string[];
+}
+
+export interface ConnectionsResponse {
+  /** Epoch ms this payload was produced. */
+  ts: number;
+  discovery: DiscoveryReport | null;
+  connections: ConnectionReport[];
+}
+
+/** A field the relay might serialise with a different case than we expect. */
+export type WireValue = string | null | undefined;
+
+/** Runtime helpers for the frozen /api/connections shape. */
+
+export function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+export function parseConnectionState(value: WireValue): ConnectionState {
+  switch ((value ?? "").toLowerCase()) {
+    case "online":
+      return "online";
+    case "connecting":
+      return "connecting";
+    case "listening":
+      return "listening";
+    case "down":
+      return "down";
+    case "unidentified":
+      return "unidentified";
+    default:
+      return "unknown";
+  }
+}
+
+export function parseConnectionKind(value: WireValue): ConnectionKind {
+  return (value ?? "").toLowerCase() === "tcp" ? "tcp" : "serial";
+}
+
+export function parseConnectionRole(value: WireValue): ConnectionRole {
+  switch ((value ?? "").toLowerCase()) {
+    case "grid_meter":
+    case "stats_bus":
+    case "meter_emulator":
+      return (value ?? "").toLowerCase() as ConnectionRole;
+    default:
+      return "unknown";
+  }
+}
+
+export function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
