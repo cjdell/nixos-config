@@ -43,7 +43,7 @@
 
     environment.systemPackages = with pkgs; [
       opencode
-      nodejs
+      # nodejs moved to the user profile: users/cjdell/home.nix (home.packages)
     ];
 
     # zram swap: the llama-swap r9700 RAM prompt cache (`-cram 65536` in
