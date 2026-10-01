@@ -112,8 +112,8 @@ towards its configured rating at 60 W/s, but only after a 20 s hold and only
 while the loop is leaning on the estimate, so an idle direction does not drift
 upwards unattended.
 
-Two properties of that rule are load-bearing, and both were learned in the field
-on 2026-09-26:
+Three properties of that rule are load-bearing, and they were learned in the
+field on 2026-09-26 and 2026-10-01:
 
 * **The probe is integrated over real time, not over the PID's step.** 60 W/s is
   a physical rate, so it is multiplied by the loop's *actual* elapsed time.
@@ -139,6 +139,22 @@ on 2026-09-26:
   caps each inverter at what the demand needs — so the only command it actually
   raises is the open-loop Go-window charge, which is the one that must not be
   left asking for too little.
+
+* **The progress test must be smaller than any real ramp.** A deficit is only a
+  refusal when the delivery *stops closing* the gap, so the rule resets the
+  confirm clock whenever delivery rises by `DELIVERY_PROGRESS_W`. The first
+  value, 50 W, demanded ~17 W/s inside the 3 s confirm window — faster than the
+  live Solis charges. On 2026-10-01 its learned charge limit crawled from
+  ~1.4 kW to its 3.6 kW rating at ~6 W/s in **both** the Go window and midday
+  PV, at ~7 minutes each way, so a sunny-cloudy afternoon exported the surplus
+  instead of storing it. Because the command *is* the estimate (the central loop
+  is saturated on it), collapse pinned the command ~150 W above the plant and
+  the plant then only ramped as fast as that small gap drove it — a
+  self-limiting ratchet, indistinguishable from an inverter soft-start except
+  that the Go window (where the command is open-loop full) showed the same
+  crawl. 10 W is above the smoothed battery-power noise floor and below a
+  6 W/s ramp's progress in a confirm window, so the probe now runs at its own
+  rate and the plant ramps at whatever rate it can actually sustain.
 
 Those estimates *are* the central loop's output clamp, refreshed every tick
 (`ControlLaw::tick_balance` → `Allocator::limits`):
@@ -278,6 +294,7 @@ reading the rule:
 | --- | --- |
 | `a_load_step_does_not_collapse_the_estimate` | the plant's own response time read as a shortfall |
 | `a_lagging_plant_is_not_mistaken_for_a_refusing_one` | a transport delay + lag read as refusal (2026-09-23: the loop clamped to a fraction of a 3.6 kW rating with ~1 kW of import held for minutes) |
+| `a_slow_charging_plant_is_not_throttled_to_its_own_lag` | a *slow* ramp read as refusal (2026-10-01: the Solis charge limit crawled 1.4→3.6 kW at 6 W/s, ~7 min, in the Go window and midday PV) |
 | `a_slow_tick_does_not_slow_the_authority_probe` | the probe integrated over the PID's clamped step instead of real time (2026-09-26: a 17-minute ramp) |
 | `a_silent_plant_is_offered_a_command_it_can_act_on` | a device pinned at the margin floor forever because it will not act on so small a command (2026-09-26: the reserve dead at 150 W for five hours) |
 | `authority_collapses_when_the_battery_refuses_charge` | a genuine refusal must still collapse — the anti-windup the estimator exists for |
@@ -287,7 +304,10 @@ reading the rule:
 Both 2026-09-26 rows are load-bearing in a way a reader would not guess: the
 first is why a charge can crawl for a fifth of the Go window, and the second is
 why a healthy inverter can be invisible to the plant for hours. Neither raises
-an error anywhere — the only symptom is a number sitting still.
+an error anywhere — the only symptom is a number sitting still. The 2026-10-01
+row is the same class again: a healthy Solis charging correctly, throttled by
+the estimator's own conservatism, visible only as a charge limit that climbs a
+few watts a second.
 
 Operationally, watch:
 

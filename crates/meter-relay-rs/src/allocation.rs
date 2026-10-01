@@ -64,7 +64,18 @@ const AUTHORITY_RELAX_W_PER_S: f64 = 60.0;
 /// bank sat at ~1 kW. A refusal is a gap that stops closing; a gap that is
 /// closing is the plant following a moving command. Requiring delivery to be
 /// stationary separates the two without tolerating a genuine refusal.
-const DELIVERY_PROGRESS_W: f64 = 50.0;
+///
+/// It must be small enough that *any* real ramp counts as progress. The first
+/// value, 50 W, demanded ~17 W/s inside the 3 s confirm window and so read a
+/// slow-but-live charge as a refusal: on 2026-10-01 the Solis's learned charge
+/// limit crawled from ~1.4 kW to its 3.6 kW rating at ~6 W/s (seven minutes) in
+/// both the Go window and midday PV. Because the command is the estimate, the
+/// collapse pinned the command ~150 W above the plant, and the plant could then
+/// only ramp as fast as that small gap drove it — a self-limiting ratchet, not
+/// the inverter's own soft-start. See `a_slow_charging_plant_...` and
+/// `a_load_step_does_not_collapse_the_estimate`: 10 W is above the smoothed
+/// battery-power noise floor and below a 6 W/s ramp's progress in the window.
+const DELIVERY_PROGRESS_W: f64 = 10.0;
 /// After a downward revision, wait this long before probing upwards again (ms).
 const AUTHORITY_HOLD_MS: u64 = 20_000;
 /// A command within this distance of an estimate counts as leaning on it (W).
@@ -1384,6 +1395,50 @@ mod tests {
         }
         assert_eq!(out.target("solax"), 0.0);
         assert!((out.target("solis") + 4_000.0).abs() < 1.0);
+    }
+
+    /// A plant whose own response is slow must not have that slowness read as
+    /// refusal, or the estimate's downward revision caps the command at
+    /// `delivered + AUTHORITY_MARGIN_W` and the plant can then only ramp as fast
+    /// as that small gap drives it. On 2026-10-01 the Solis's charge limit
+    /// crawled from ~1.4 kW to its 3.6 kW rating at ~6 W/s — seven minutes — in
+    /// both the Go window and midday PV, because the probe was collapsing on
+    /// the plant's own lag. The command here *is* the estimate (the central
+    /// loop is saturated on it), which is exactly the field case.
+    #[test]
+    fn a_slow_charging_plant_is_not_throttled_to_its_own_lag() {
+        let mut limit = AuthorityLimit::new(3_600.0);
+        limit.value = AUTHORITY_MARGIN_W; // start from the collapsed floor
+        let mut delivered = 0.0f64;
+        let dt = TICK_MS as f64 / 1000.0;
+        let tau = 20.0; // a genuinely slow charge response
+        let mut now = 0u64;
+        let mut collapses = 0u32;
+        let mut reached_at: Option<u64> = None;
+
+        for _ in 0..12_000 {
+            let commanded = limit.limit();
+            delivered += (commanded - delivered) * (dt / tau).min(1.0);
+            let before = limit.limit();
+            limit.observe(commanded, delivered, now, dt);
+            now += TICK_MS;
+            if limit.limit() + 1.0 < before {
+                collapses += 1;
+            }
+            if reached_at.is_none() && limit.limit() > 3_599.0 {
+                reached_at = Some(now);
+            }
+        }
+
+        assert_eq!(
+            collapses, 0,
+            "a plant that is still moving towards the command must not be collapsed"
+        );
+        let reached = reached_at.expect("the estimate should reach the ceiling");
+        assert!(
+            reached <= 60_000,
+            "recovery took {reached} ms: the probe must run at its own rate, not the plant's"
+        );
     }
 
     #[test]

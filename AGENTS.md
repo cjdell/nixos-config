@@ -656,6 +656,21 @@ systemctl status meter-relay && journalctl -u meter-relay -f
   §2 and §7. **A relay restart clears a collapsed estimate** (the
   estimates initialise at the configured rating), which is the stopgap if it
   happens again before a rebuild.
+- **A healthy inverter can be throttled by the estimator's own conservatism.**
+  Because the central loop's ceiling *is* the learned authority, a plant whose
+  charge ramps slower than the estimator's `DELIVERY_PROGRESS_W` (50 W inside the
+  3 s confirm window = ~17 W/s) is read as refusing, the estimate collapses to
+  `delivered + 150 W`, and the command then sits only ~150 W above the plant —
+  so the plant ramps at ~6 W/s and the estimate can never grow faster. On
+  2026-10-01 the Solis's `charge_limit` crawled 1.4→3.6 kW at ~6 W/s in **both**
+  the Go window and midday PV; because the command tracked the estimate, actual
+  `battery_power` tracked it too, and a sunny-cloudy afternoon exported surplus
+  it could have stored. Diagnose with `solis_charge_limit` rising a few watts a
+  second while the central PID is saturated (`saturated: true`, output ==
+  min_output) and the grid exports. Fixed by lowering the progress threshold to
+  10 W (`crates/meter-relay-rs/CONTROL-DESIGN.md` §2); the regression is
+  `a_slow_charging_plant_is_not_throttled_to_its_own_lag`. A relay restart still
+  clears a collapsed estimate as a stopgap.
 - **The main bank still has no discharge floor, and `MR_SOLIS_MIN_SOC` will not
   give it one.** The Solis exposes no SOC register, so the relay cannot see the
   pack's state of charge at all (`"percentage": null`); it discharges until the
