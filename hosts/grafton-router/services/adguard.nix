@@ -35,7 +35,17 @@ in
         ratelimit = 0;
         cache_size = 67108864;
         max_goroutines = 500;
-        use_http3_upstreams = true;
+        # DoH3 (HTTP/3) upstream connections wedge: dnsproxy keeps reusing a
+        # stale QUIC connection and every query on it fails with
+        # "Get_0rtt ... timeout: no recent network activity" for 10-30s
+        # (AdGuardHome#6937/#7390, dnsproxy#461). On 2026-10-02 the Quad9 H3
+        # upstream hung for hours and load_balance kept picking it, so LAN
+        # lookups stalled until the client gave up (llama.ai.chrisdell.info,
+        # api.deepseek.com). Use DoH over HTTP/2, and query all upstreams in
+        # parallel so one stalled upstream cannot add its full upstream_timeout
+        # to every lookup.
+        use_http3_upstreams = false;
+        upstream_mode = "parallel";
 
         upstream_dns = [
           "https://dns.quad9.net/dns-query"

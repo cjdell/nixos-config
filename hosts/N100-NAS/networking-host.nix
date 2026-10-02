@@ -207,7 +207,11 @@
         ratelimit = 0;
         cache_size = 67108864;
         max_goroutines = 500;
-        use_http3_upstreams = true;
+        # See hosts/grafton-router/services/adguard.nix: DoH3 upstreams wedge
+        # (stale QUIC connection, "Get_0rtt ... timeout: no recent network
+        # activity"); use HTTP/2 DoH and query upstreams in parallel.
+        use_http3_upstreams = false;
+        upstream_mode = "parallel";
         upstream_dns = [
           # you may prefer to use your own ISPs DNS
           "https://dns.quad9.net/dns-query"
