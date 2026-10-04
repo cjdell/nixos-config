@@ -42,7 +42,8 @@
     # 74:56:3c:6f:aa:16
 
     environment.systemPackages = with pkgs; [
-      opencode
+      xxd
+      # opencode
       # nodejs moved to the user profile: users/cjdell/home.nix (home.packages)
     ];
 

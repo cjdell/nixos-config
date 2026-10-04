@@ -170,6 +170,9 @@ in
           [Swift-Qwen3.8-27B-Q5_K_M]
           spec-type = draft-mtp
           ctx-size = ${toString (256 * 1024)}
+          [K2-Horizon-MoVA-36B-A4B-Q5_K_M]
+          spec-type = draft-mtp
+          ctx-size = ${toString (128 * 1024)}
         '';
 
         # Native Nix structure representing the llama-swap YAML config: one
