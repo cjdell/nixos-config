@@ -92,6 +92,27 @@ stdenv.mkDerivation (finalAttrs: {
     }"
   ];
 
+  # #606 fix is incomplete upstream (0.1.39): the commit "q8_1 activations:
+  # keep the block's fp16 scale and sum finite" clamped two of the three q8_1
+  # activation quantizers (iq_kernels.cu q8_1_store and native_mmvq.cu
+  # native_quantize_q8_1_kernel) but missed native_swiglu_quantize_q8_1_kernel
+  # in the same file. Its block's `sum` (and `d = amax / 127`) still round to
+  # +inf past fp16's 65504, and the dot product then reads inf * 0 = NaN; a
+  # NaN in the residual makes the model answer one token (`!`) forever -- the
+  # very degeneracy the guard in serve/server.py:2319 exists to end. SwiGLU is
+  # where massive activations are largest, so it is the likeliest block to
+  # overflow (see upstream f8fe938, "the saturated FP16 SwiGLU product...").
+  # Apply the same clamp/quantise/store helpers its sibling now uses.
+  postPatch = ''
+    substituteInPlace src/kernels/cuda/native_mmvq.cu \
+      --replace-fail 'const float d = amax / 127.0f;' \
+                     'const float d = q8_1_finite(amax / 127.0f);   // #606 (SwiGLU): keep the block scale finite' \
+      --replace-fail 'const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);' \
+                     'const int8_t q = q8_1_quant(xi, d, amax);' \
+      --replace-fail 'y[i / Q8K].ds = make_half2(d, sum);' \
+                     'y[i / Q8K].ds = q8_1_ds(d, sum);'
+  '';
+
   # Upstream has no install() rules for `strata`; install the binary and the
   # Python serve layer by hand. `strata-server` is what systemd runs
   # (`python -m serve.server`); the model pack / GGUF / MTP runtime stay
