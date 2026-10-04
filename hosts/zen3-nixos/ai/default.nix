@@ -5,6 +5,8 @@
 # locations + its public *.ai.chrisdell.info subdomain vhost), so the proxy
 # for a service lives with that service:
 #   llama-swap.nix      - llama.cpp router matrix + llama./llm. subdomains
+#                         (DISABLED while ./strata.nix runs - see the import list)
+#   strata.nix          - Strata engine (HIP/gfx1201) + serve + strata. subdomain
 #   sd-gate.nix         - on-demand stable-diffusion.cpp server + sd. subdomain
 #   llama-log-viewer.nix- log viewer web app + logs. subdomain
 #   ollama-bridge.nix   - legacy Ollama-compatible bridge (no proxy)
@@ -23,7 +25,12 @@
     # ./diamcp.nix
     ./gpu-panel.nix
     # ./llama-log-viewer.nix
-    ./llama-swap.nix
+    # llama-swap is DISABLED while the Strata experiment runs: both want the
+    # R9700's VRAM and tens of GB of RAM, and Strata exists to run a model
+    # llama.cpp cannot fit. Re-enable this import together with
+    # ./strata.nix's to switch back.
+    # ./llama-swap.nix
+    ./strata.nix
     # ./ollama-bridge.nix
     # ./recallium.nix
     # ./sd-gate.nix

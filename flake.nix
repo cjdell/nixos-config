@@ -369,6 +369,14 @@
         };
     in
     {
+      # Build the Strata engine + serve wrapper on its own:
+      #   nix build .#strata
+      # (the NixOS module in hosts/zen3-nixos/ai/strata.nix callPackages the
+      # same file for the service).
+      packages.x86_64-linux.strata =
+        (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-package.nix
+          { };
+
       nixosConfigurations =
         # Find configs in `hosts` folder and use the folder name as the host name
         (
