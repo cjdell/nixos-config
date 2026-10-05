@@ -709,6 +709,47 @@ junk (`target/`, `web/node_modules/`, `web/dist/`) is **not** copied into the
 build. Keep `git status` in the crate clean-ish, so the working tree that Nix
 reads corresponds to something reviewable.
 
+## Strata (Qwen3.8-Flash-Next on the R9700, live)
+
+The serving engine is **Strata 0.1.39**, a separate stack from llama.cpp:
+`hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
+`hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
+`strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
+`Qwen3.8-Flash-Next-IQ3_XXS` (GSQ-RCO GGUF, no MTP head). Docs:
+[`docs/strata.md`](docs/strata.md).
+
+- **A long-context reply can collapse to one repeated token (or a thinking-only
+  turn with no answer).** This is the **fp16-overflow #606 class**, not a model
+  quality issue: a `q8_1` activation block stores its scale and 32-value sum as
+  fp16 (`max 65504`), and a block sum or scale can round to `+inf`, giving
+  `inf * 0 = NaN` in the dot product (`ggml-org/llama.cpp#23606` is the same).
+  The int8 KV cache has the same shape (a 64-value group's `amax/127` as fp16).
+  Upstream 0.1.39 clamps only *some* sites; the rest are clamped in
+  `strata-package.nix`'s `postPatch` (`substituteInPlace`, bit-identical for
+  finite blocks). Full incident history, the exact sites, and verification
+  commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
+- **Two incidents, two sites.** Incident 1 (`!` ×256, ~156K context) was fixed
+  by commit `437a753` (fused-SwiGLU `q8_1` store in `native_mmvq.cu`). Incident
+  2 (`索` ×256, 132.9K context, Pi session `01a1099d-927e-76ba-87c0-9abc71fa1df9`)
+  hit **despite** `437a753` — the fix here also clamps the int8 KV scale
+  (`kv_q8.cu`, `prefill/kernels.cu`) and the gfx906-only fused gate/up store
+  (`iq_kernels.cu`, latent on gfx1201).
+- **A Pi session "crash" here is usually a folded reply, not an engine crash.**
+  The reply comes back with `finish_reason: "length"` (repeat guard ends it
+  after 256) and too few tokens, so Pi treats it as a recoverable truncated
+  response: it omits the turn and starts a compact-and-retry loop that never
+  recovers. Look in `bili.log` for a *degenerate terminal turn* retry before
+  assuming Pi or the host died — there is no `crashes.json`, OOM, or coredump.
+- **Verify the running engine, don't assume:**
+  `systemctl show strata -p ExecStart` and `readlink /proc/$(pgrep -f '[b]in/strata --serve')/exe`
+  must show the store path from the latest build (the build is offline and the
+  host has no gcc, so it cannot be rebuilt on the box). `bin/strata-server` is a
+  tiny wrapper — compare the native `bin/strata` when diffing builds.
+- **Deploy:** edit `strata-package.nix`, `nix build .#strata --no-link`, then
+  `sudo nixos-rebuild switch --flake .` (zen3-nixos has autoRollback commented
+  out — no `nixos-confirm`). The switch restarts `strata`; the model load takes
+  ~30 s and can make the box sluggish for 1–3 min.
+
 ## Known gotchas on this host
 
 - **GPU pinning (single router, still Vulkan).** The mesa

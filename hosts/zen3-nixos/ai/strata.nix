@@ -119,6 +119,14 @@ let
       # BDF 03:00.0, UUID 47ff7551-…) so the engine never probes the iGPU.
       backend = "hip";
       env.HIP_VISIBLE_DEVICES = "0";
+      # Local #879 instrumentation (see strata-package.nix): when the finiteness
+      # guard trips, dump the first non-finite (layer, row, col, raw bits) per
+      # grouped-expert stage. Tracks down whether our fire is the same
+      # 0x7FFFFFFF routed-expert data-path garbage the CUDA reporter saw.
+      # Costs an extra scan per stage per layer -> mostly prefill; set to "0"
+      # (or drop the key) once we have a capture. The guard itself stays on
+      # regardless (STRATA_NAN_GUARD defaults to on).
+      env.STRATA_KERNEL_AUDIT = "1";
     }
   );
 

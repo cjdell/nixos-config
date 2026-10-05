@@ -1,0 +1,436 @@
+diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
+index e68f7b3..fcb8d4e 100644
+--- a/include/strata/core/verify.hpp
++++ b/include/strata/core/verify.hpp
+@@ -345,6 +345,8 @@ private:
+     float* tail_snap_ = nullptr;                              // per QSA layer
+     int32_t* sel_ = nullptr;
+     float *logits_ = nullptr, *w_ = nullptr, *shared_ = nullptr, *parts_ = nullptr, *hit_out_ = nullptr;
++    int32_t* lay_flags_ = nullptr;   // local audit port (2026-10-05): 7 per-layer poison signals, 2 recorders
++    int64_t lay_flags_n_ = 0;
+     int32_t *ids_ = nullptr, *hit_slot_ = nullptr, *hit_dst_ = nullptr, *hit_count_ = nullptr;
+     int32_t* plan_ = nullptr;                                     // device copy of the plan block
+     uint8_t* staging_ = nullptr;                                  // VRAM slots for the PCIe share of the misses
+diff --git a/include/strata/kernels/iq_kernels.hpp b/include/strata/kernels/iq_kernels.hpp
+index 2c38f6f..0c56602 100644
+--- a/include/strata/kernels/iq_kernels.hpp
++++ b/include/strata/kernels/iq_kernels.hpp
+@@ -52,6 +52,11 @@ bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_
+ 
+ /// Bytes of scratch `native_expert_grouped` needs for `cap_entries` entries.
+ size_t native_expert_scratch_bytes(int64_t cap_entries, int64_t n_ff);
++// local diagnostic port (2026-10-05, from our 0.1.35 audit build): which pipeline stage first shows poison
++void native_stage_audit_alloc();   // call outside stream capture
++void native_stage_audit_reset(void* stream);
++void native_stage_audit_layer(int layer);
++bool native_stage_audit_get(int out[8]);
+ 
+ /// Grouped experts in the native format: group g's blob at device address grp_ptr[g]; its entries
+ /// [grp_start[g], grp_start[g+1]) read token ent_tok[e]'s q8_1 activation (n_embd/32 blocks per token in x_q8_1)
+diff --git a/include/strata/kernels/sampler.hpp b/include/strata/kernels/sampler.hpp
+index a740101..8b5bf7c 100644
+--- a/include/strata/kernels/sampler.hpp
++++ b/include/strata/kernels/sampler.hpp
+@@ -39,6 +39,19 @@ struct SamplerParams {
+ // recent tokens that row's pick follows, with any unused slots set to -1; only the last `p.penalty_last_n` of
+ // each row are counted, and ids outside [0, n_vocab) are ignored.  Pass nullptr and 0 when no penalties apply.
+ // A verify window's rows need DIFFERENT histories: row t follows the window's drafts 1..t (`penalty_rows`).
++// Local fix, not upstream (2026-10-05, ported from our 0.1.35 audit build): flags 1 into `flag` (device or
++// mapped memory) if any logit is non-finite.  Cheap enough to run every verify window.
++void logits_nonfinite(const float* logits, long long n, int* flag, void* stream);
++
++// Local fix, not upstream (2026-10-05): records the first non-finite value's (row, col, raw bits) of a row
++// block into `meta` (4 ints: flag, row, col, bits).  First writer wins (atomicCAS).
++void record_first_nonfinite(const float* rows, int k, int n, int* meta, void* stream);
++
++// Local fix, not upstream (2026-10-05): records the first non-finite value among the plan's OWN dst rows of
++// hit_out (meta 6 ints: flag, row, col, bits, expert id, layer) - a stale row outside the plan cannot fire it.
++void audit_hit_rows(const float* hit_out, const int32_t* dst, const int32_t* count, const int32_t* ids,
++                    int64_t entries, int n_embd, int layer, int* meta, void* stream);
++
+ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* history, int history_len,
+                    const SamplerParams& p, int* out, void* stream);
+ 
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index dd5362b..ed5df7b 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -436,6 +436,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+         sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
+         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
+         hist_snap_ = b.take<float>(T * HS);
++        lay_flags_n_ = 9 * (g.n_layers + 1) + 6;   // local audit: 7 signal rows + 2 recorder blocks
++        lay_flags_ = b.take<int32_t>(lay_flags_n_);
+     };
+     Bump count;
+     carve(count);
+@@ -444,6 +446,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+         return false;
+     }
+     cudaMemset(arena_, 0, count.used);
++    strata::kernels::native_stage_audit_alloc();   // local audit: must allocate outside stream capture
+     if (g_trace && trace_h_ == nullptr) {   // #649: the breadcrumbs, mapped so they read while the GPU hangs
+         trace_n_ = (size_t) (g.n_layers + 1) * kProfPer * 2;
+         if (!mapped(trace_n_ * 8, (void**) &trace_h_, (void**) &trace_m_)) {
+@@ -570,6 +573,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+     // a batch window: row t is slot t, whose state lives in its own session
+     auto slot_ss = [&](int t) -> SessionState& { return batch_rec_ ? *slots_[(size_t) brow_[t]] : ss; };
+     const int hrow0 = batch_rec_ ? row_base_ : 0;   // a slot group's own hand-off rows
++    if (lay_flags_ != nullptr)   // local audit: zeroed at every graph launch, so the dump reads THIS window
++        cudaMemsetAsync(lay_flags_, 0, (size_t) lay_flags_n_ * 4, cs);
++    strata::kernels::native_stage_audit_reset(cs);   // local audit: same per-launch reset
+ 
+     // ---- the window's inputs, from mapped staging
+     copy_i32_from_mapped(tok_, m_tok_, T, cs);
+@@ -694,6 +700,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+                                 (int) (l * kProfPer + (half == 0 ? 27 : 30)));
+         };
+         gr_read_group(0, pending, inj2_, inj_);
++        if (lay_flags_ != nullptr)   // local audit: the layer's input (the folded residual); NaN = born upstream
++            strata::kernels::logits_nonfinite(xn_ + (size_t) tb * HC * N, (long long) (te - tb) * HC * N,
++                                              lay_flags_ + l, cs);
+         stamp(l, 1, grp);
+         float* xm = mixed_ + tb * N;
+         try {
+@@ -898,6 +907,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+             err = "verify layer " + std::to_string(l) + ": " + e.what();
+             return false;
+         }
++        if (lay_flags_ != nullptr)   // local audit: the attention block's own output (GDN ssm_out / QSA attn out)
++            strata::kernels::logits_nonfinite(bo_ + (size_t) tb * N, (long long) (te - tb) * N,
++                                              lay_flags_ + (g.n_layers + 1) + l, cs);
+         stamp(l, 16, grp);
+         gr_read_group(1, true, inj_, inj2_);
+         static const bool sh_stream_env = [] {
+@@ -983,6 +995,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+                 err = std::string("verify shared expert: ") + e.what();
+                 return false;
+             }
++            if (lay_flags_ != nullptr)   // local audit: the shared expert's output alone (its own stream: ordered)
++                strata::kernels::logits_nonfinite(shared_ + (size_t) tb * N, (long long) (te - tb) * N,
++                                                  lay_flags_ + 2 * (g.n_layers + 1) + l, sh_stream);
+             if (sh_fork) cudaEventRecord(ev_join_, sh_cs_);
+         }
+         if (strata::kernels::cpu::expert_layout().native)
+@@ -1001,6 +1016,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+     const bool fuse_head_gr = fuse_head_gr_env && (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
+                               !cvec().covers(g.n_layers - 1);
+     auto post = [&](int64_t l, int grp) -> bool {
++        strata::kernels::native_stage_audit_layer((int) l);   // local audit: stamped into the captured launches
+         const int tb = tb_[grp], te = te_[grp], n = te - tb;
+         const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
+         const int64_t cap = (int64_t) n * K, capx = (int64_t) max_t_ * K;
+@@ -1044,6 +1060,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+             }
+             stamp(l, 19, grp);
+             grouped(p_ptr, p_start, p_counts, 0, hit_out);
++            if (lay_flags_ != nullptr)   // local audit: only the rows this layer's plan actually computed on the GPU
++                strata::kernels::audit_hit_rows(hit_out, p_dst, p_counts + 1, ids_ + (size_t) tb * K,
++                                                cap, (int) N, (int) l, lay_flags_ + 9 * (g.n_layers + 1), cs);
+             stamp(l, 20, grp);
+             if (device_plan_) wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
+             else wait_flag_ge(m_flagB_, ring, cs);                 // the PCIe share is in staging (DMA) or mapped
+@@ -1073,7 +1092,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+                 else
+                     copy_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
+             }
++            if (lay_flags_ != nullptr) {   // local audit: the CPU miss rows alone, BEFORE the hit add folds the GPU rows in
++                strata::kernels::logits_nonfinite(parts_out, (long long) n * K * N,
++                                                  lay_flags_ + 6 * (g.n_layers + 1) + l, cs);
++                strata::kernels::record_first_nonfinite(parts_out, (int) n * (int) K, (int) N,
++                                                        lay_flags_ + 7 * (g.n_layers + 1), cs);
++            }
+             moe_hit_add(parts_out, hit_out, p_dst, p_counts + 1, cap, N, cs);
++            if (lay_flags_ != nullptr) {   // after the fold: the routed total, and the GPU cache-hit rows alone
++                strata::kernels::logits_nonfinite(parts_out, (long long) n * K * N,
++                                                  lay_flags_ + 3 * (g.n_layers + 1) + l, cs);
++                strata::kernels::logits_nonfinite(hit_out, (long long) n * K * N,
++                                                  lay_flags_ + 5 * (g.n_layers + 1) + l, cs);
++                strata::kernels::record_first_nonfinite(hit_out, (int) n * (int) K, (int) N,
++                                                        lay_flags_ + 8 * (g.n_layers + 1), cs);
++            }
+         }
+         if (!prof_on_ && sh_cs_ != nullptr && ev_fork_ != nullptr && ev_join_ != nullptr) {
+             cudaStreamWaitEvent(cs, ev_join_, 0);
+@@ -1090,6 +1123,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+         }
+         if (remote_opt_) remote_opt_->combine(bo_ + tb * N, y_dummy_ + tb * N, tb, n,
+                               device_plan_ ? skip_ + grp : nullptr, ring, cs);
++        if (lay_flags_ != nullptr)   // local audit: the layer's whole contribution (attn + shared + routed): NaN = born here
++            strata::kernels::logits_nonfinite(bo_ + (size_t) tb * N, (long long) (te - tb) * N,
++                                              lay_flags_ + 4 * (g.n_layers + 1) + l, cs);
+         stamp(l, 24, grp);
+         if (l == g.n_layers - 1) {
+             if (!fuse_head_gr) {
+@@ -1529,9 +1565,90 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+     // itself stays a blocking sync: a cudaStreamQuery poll here cost IQ3_S ~3% decode (a core calling the driver
+     // beside the expert workers).
+     trace_ev("SYNC", -1, -1, 0);
++    // Local fix, not upstream (2026-10-05, ported from our 0.1.35 audit build): scan the window's logits for
++    // non-finite values and fail the window instead of sampling an all-NaN row - which returns the vocabulary's
++    // first non-special token every time and produced thousands of consecutive '!' (#606's symptom).  The flag
++    // rides in m_out_'s 16 spare bytes and is read after the sync below, so it costs no extra synchronization.
++    // STRATA_NAN_GUARD=0 turns it off.
++    static const bool nan_guard = [] {
++        const char* e = std::getenv("STRATA_NAN_GUARD");
++        return e == nullptr || e[0] != '0';
++    }();
++    int32_t* const nan_flag = nan_guard ? m_out_ + T : nullptr;
++    if (nan_flag != nullptr) {
++        cudaMemsetAsync(nan_flag, 0, sizeof(int32_t), cs_);
++        strata::kernels::logits_nonfinite(head_logits_, (long long) T * (long long) n_vocab_, nan_flag, cs_);
++    }
+     const cudaError_t se = cudaStreamSynchronize(cs_);
+     trace_ev("SYNCED", -1, -1, (int64_t) se);
+     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
++    if (nan_flag != nullptr && *(volatile int32_t*) nan_flag != 0) {
++        std::fprintf(stderr, "strata verify: non-finite logits at position %lld, rows %d (window failed rather than sampled)\n",
++                     (long long) pos0, T);
++        {   // local audit dump: which layer and which side of the routed-expert path first shows the poison
++            const ModelGeometry& g = *g_;
++            SessionState& ss = *ss_;
++            if (h_ymiss_ != nullptr) {   // the pool's mapped miss rows, host-visible; zeroed for GPU-handled rows
++                const int64_t kn = (int64_t) T * (int64_t) ss.k * g.n_embd;
++                int64_t c = 0, pr = -1, pc = -1; uint32_t bits = 0; double mx = 0;
++                for (int64_t i = 0; i < kn; ++i) {
++                    const float x = h_ymiss_[(size_t) i];
++                    if (!std::isfinite(x)) { if (pr < 0) { pr = i / g.n_embd; pc = i % g.n_embd; std::memcpy(&bits, &x, 4); } ++c; }
++                    else mx = std::max(mx, (double) std::fabs((double) x));
++                }
++                std::fprintf(stderr, "strata verify:   mapped miss rows: %lld of %lld non-finite, max|x| %.4g; "
++                                     "first at row %lld col %lld, bits 0x%08x\n",
++                             (long long) c, (long long) kn, mx, (long long) pr, (long long) pc, bits);
++            }
++            if (lay_flags_ != nullptr) {
++                std::vector<int32_t> lf((size_t) lay_flags_n_);
++                if (cudaMemcpy(lf.data(), lay_flags_, lf.size() * 4, cudaMemcpyDeviceToHost) == cudaSuccess) {
++                    const int64_t L = g.n_layers;
++                    auto kind = [&](int64_t l) { return is_qsa_layer(g, l) ? "QSA" : "GDN"; };
++                    const char* names[7] = {"input", "attn block", "shared expert", "routed total (hits+misses)",
++                                            "combined", "GPU cache-hit rows", "CPU miss rows"};
++                    for (int s = 0; s < 7; ++s) {
++                        int64_t first = -1;
++                        for (int64_t l = 0; l < L; ++l)
++                            if (first < 0 && lf[(size_t) (s * (L + 1) + l)] != 0) first = l;
++                        std::fprintf(stderr, "strata verify:   layer trace: first poisoned %s at layer %lld (%s)\n",
++                                     names[s], (long long) first, first >= 0 ? kind(first) : "-");
++                    }
++                    const int32_t* meta = lf.data() + 7 * (L + 1);
++                    if (meta[0] != 0)
++                        std::fprintf(stderr, "strata verify:   first non-finite MISS value: row %d (token %d, "
++                                             "expert slot %d), col %d, bits 0x%08x\n",
++                                     meta[1], meta[1] / (int) ss.k, meta[1] % (int) ss.k, meta[2],
++                                     (unsigned) (uint32_t) meta[3]);
++                    const int32_t* meta2 = lf.data() + 8 * (L + 1);
++                    if (meta2[0] != 0)
++                        std::fprintf(stderr, "strata verify:   first non-finite HIT value: row %d (token %d, "
++                                             "expert slot %d), col %d, bits 0x%08x\n",
++                                     meta2[1], meta2[1] / (int) ss.k, meta2[1] % (int) ss.k, meta2[2],
++                                     (unsigned) (uint32_t) meta2[3]);
++                    {   // local diagnostic: which pipeline stage first shows the non-finite value
++                        int sa[8] = {0};
++                        static const char* stages[4] = {"gate (gu kernel)", "up (gu kernel)", "swiglu", "down out"};
++                        if (strata::kernels::native_stage_audit_get(sa))
++                            std::fprintf(stderr, "strata verify:   kernel-stage audit: first non-finite in %s of layer "
++                                                 "%d, flat %lld, bits 0x%08x\n",
++                                         stages[sa[4] >= 0 && sa[4] < 4 ? sa[4] : 0], sa[6],
++                                         (long long) sa[1] + (long long) sa[2] * 1000000000LL,
++                                         (unsigned) (uint32_t) sa[3]);
++                    }
++                    const int32_t* meta3 = lf.data() + 9 * (L + 1);
++                    if (meta3[0] != 0)
++                        std::fprintf(stderr, "strata verify:   planned-GPU-row audit: layer %d, row %d (token %d, slot %d), "
++                                             "col %d, bits 0x%08x, expert %d\n",
++                                     meta3[5], meta3[1], meta3[1] / (int) ss.k, meta3[1] % (int) ss.k, meta3[2],
++                                     (unsigned) (uint32_t) meta3[3], meta3[4]);
++                }
++            }
++        }
++        std::fflush(stderr);
++        err = "verify: non-finite logits";
++        return false;
++    }
+     commit_pending_ = false;
+     progress_at("verify window: waiting for the expert copies", (int64_t) T);
+     if (copy_used_) {
+diff --git a/src/kernels/cuda/iq_kernels.cu b/src/kernels/cuda/iq_kernels.cu
+index 5c552fa..e981952 100644
+--- a/src/kernels/cuda/iq_kernels.cu
++++ b/src/kernels/cuda/iq_kernels.cu
+@@ -2445,6 +2445,59 @@ bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
+ 
+ void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
+ 
++// Local diagnostic (2026-10-05, ported from our 0.1.35 audit build): which stage of the grouped expert
++// pipeline first shows a non-finite value.  Env-gated (STRATA_KERNEL_AUDIT=1); off by default.
++namespace {
++__global__ void audit_flat_kernel(const float* __restrict__ rows, long long total, int stage, int layer,
++                                  int* __restrict__ meta) {
++    const long long stride = (long long) gridDim.x * blockDim.x;
++    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total; i += stride)
++        if (!isfinite(rows[i])) {
++            if (atomicCAS(meta, 0, 1) == 0) {
++                meta[1] = (int) (i % 1000000000LL);
++                meta[2] = (int) (i / 1000000000LL);
++                float v = rows[i];
++                int b;
++                memcpy(&b, &v, 4);
++                meta[3] = b;
++                meta[4] = stage;
++                meta[5] = layer;
++            }
++            return;
++        }
++}
++int* g_stage_audit = nullptr;
++int g_stage_layer = -1;
++bool stage_audit_on() {
++    static const bool on = [] { const char* e = std::getenv("STRATA_KERNEL_AUDIT"); return e != nullptr && e[0] == '1'; }();
++    return on;
++}
++void stage_audit(const float* rows, long long total, int stage, cudaStream_t s) {
++    if (!stage_audit_on() || total <= 0) return;
++    if (g_stage_audit == nullptr) return;   // native_stage_audit_alloc did not run: never audit unallocated
++    audit_flat_kernel<<<256, 256, 0, s>>>(rows, total, stage, g_stage_layer, g_stage_audit);
++}
++}  // namespace
++
++void native_stage_audit_alloc() {   // must run OUTSIDE stream capture (cudaMalloc is not capturable)
++    if (!stage_audit_on() || g_stage_audit != nullptr) return;
++    if (cudaMalloc((void**) &g_stage_audit, 8 * sizeof(int)) != cudaSuccess) { cudaGetLastError(); g_stage_audit = nullptr; }
++}
++
++void native_stage_audit_reset(void* stream) {
++    if (!stage_audit_on() || g_stage_audit == nullptr) return;
++    cudaMemsetAsync(g_stage_audit, 0, 8 * sizeof(int), (cudaStream_t) stream);
++}
++
++void native_stage_audit_layer(int layer) { g_stage_layer = layer; }
++
++bool native_stage_audit_get(int out[8]) {
++    if (!stage_audit_on() || g_stage_audit == nullptr) return false;
++    if (cudaMemcpy(out, g_stage_audit, 8 * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
++    out[6] = g_stage_layer;
++    return out[0] != 0;
++}
++
+ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
+                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
+                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
+@@ -2521,6 +2574,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+     }
+ #endif
+     check("native_expert_grouped/gu");
++    stage_audit(gate, (long long) cap_entries * L.n_ff, 0, s);
++    stage_audit(up,   (long long) cap_entries * L.n_ff, 1, s);
+     const long long nh = (long long) cap_entries * L.n_ff;
+ #if defined(STRATA_HIP_GFX906)
+     // gfx906: the separate SwiGLU and q8_1 passes stay the default (the A/B baseline); the RDNA one-pass
+@@ -2533,6 +2588,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+     if (sw_v1) {
+         swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
+         quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
++        stage_audit(h, nh, 2, s);
+     } else {
+         swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, grp_start, n_groups,
+                                                                                 (int) L.n_ff, hq);
+@@ -2573,6 +2629,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
+     }
+     check("native_expert_grouped/down");
++    stage_audit(out, (long long) cap_entries * L.n_embd, 3, s);
+ }
+ 
+ }  // namespace strata::kernels
+diff --git a/src/kernels/cuda/sampler.cu b/src/kernels/cuda/sampler.cu
+index 8982a28..79c4b88 100644
+--- a/src/kernels/cuda/sampler.cu
++++ b/src/kernels/cuda/sampler.cu
+@@ -1078,4 +1078,87 @@ void coupled_draft_sample(float* logits, int nv, const int32_t* sub_to_id, const
+     coupled_check("coupled_draft merge");
+ }
+ 
++// Local fix, not upstream (2026-10-05, ported from our 0.1.35 audit build): the device-side half of the
++// streaming NaN guard.  One int out, so the caller can put it in a mapped slot and read it after a sync it
++// was already going to do.
++__global__ void logits_nonfinite_kernel(const float* __restrict__ logits, long long n, int* __restrict__ flag) {
++    const long long stride = (long long) gridDim.x * blockDim.x;
++    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
++        if (!isfinite(logits[i])) {
++            *flag = 1;
++            return;
++        }
++    }
++}
++
++void logits_nonfinite(const float* logits, long long n, int* flag, void* stream) {
++    if (logits == nullptr || n <= 0 || flag == nullptr) return;
++    const int threads = 256;
++    const long long want = (n + threads - 1) / threads;
++    const int blocks = (int) (want < 512 ? (want > 0 ? want : 1) : 512);
++    logits_nonfinite_kernel<<<blocks, threads, 0, (cudaStream_t) stream>>>(logits, n, flag);
++}
++
++// Local fix, not upstream (2026-10-05, ported from our 0.1.35 audit build): records the FIRST non-finite value
++// of a row block - (row, col, raw bits) - so a failure dump can tell a computed canonical NaN from garbage read
++// through a stale path.
++__global__ void record_first_nonfinite_kernel(const float* __restrict__ rows, int k, int n,
++                                              int* __restrict__ meta) {
++    const long long total = (long long) k * (long long) n;
++    const long long stride = (long long) gridDim.x * blockDim.x;
++    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total; i += stride)
++        if (!isfinite(rows[i])) {
++            if (atomicCAS(meta, 0, 1) == 0) {
++                meta[1] = (int) (i / n);
++                meta[2] = (int) (i % n);
++                float v = rows[i];
++                int b;
++                memcpy(&b, &v, 4);
++                meta[3] = b;
++            }
++            return;
++        }
++}
++
++void record_first_nonfinite(const float* rows, int k, int n, int* meta, void* stream) {
++    if (rows == nullptr || k <= 0 || n <= 0 || meta == nullptr) return;
++    const int threads = 256;
++    const long long want = ((long long) k * n + threads - 1) / threads;
++    const int blocks = (int) (want < 512 ? (want > 0 ? want : 1) : 512);
++    record_first_nonfinite_kernel<<<blocks, threads, 0, (cudaStream_t) stream>>>(rows, k, n, meta);
++}
++
++// Local fix, not upstream (2026-10-05, ported from our 0.1.35 audit build): audits ONLY the rows the GPU plan
++// computed this layer (the plan's dst entries), so a stale row the engine never reads cannot be mistaken for
++// a poisoned one.
++__global__ void audit_hit_rows_kernel(const float* __restrict__ hit_out, const int32_t* __restrict__ dst,
++                                      const int32_t* __restrict__ count, const int32_t* __restrict__ ids,
++                                      int n_embd, int layer, int* __restrict__ meta) {
++    const int j = blockIdx.y;
++    if (j >= *count) return;
++    const int row = dst[j];
++    const float* r = hit_out + (size_t) row * (size_t) n_embd;
++    for (int c = blockIdx.x * blockDim.x + threadIdx.x; c < n_embd; c += gridDim.x * blockDim.x)
++        if (!isfinite(r[c])) {
++            if (atomicCAS(meta, 0, 1) == 0) {
++                meta[1] = row;
++                meta[2] = c;
++                float v = r[c];
++                int b;
++                memcpy(&b, &v, 4);
++                meta[3] = b;
++                meta[4] = ids != nullptr ? ids[row] : -1;
++                meta[5] = layer;
++            }
++            return;
++        }
++}
++
++void audit_hit_rows(const float* hit_out, const int32_t* dst, const int32_t* count, const int32_t* ids,
++                    int64_t entries, int n_embd, int layer, int* meta, void* stream) {
++    if (hit_out == nullptr || meta == nullptr || entries <= 0 || n_embd <= 0) return;
++    const dim3 grid((unsigned) ((n_embd + 255) / 256), (unsigned) (entries < 4096 ? entries : 4096));
++    audit_hit_rows_kernel<<<grid, 256, 0, (cudaStream_t) stream>>>(hit_out, dst, count, ids, n_embd, layer, meta);
++}
++
+ }  // namespace strata::kernels

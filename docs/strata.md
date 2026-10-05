@@ -153,6 +153,11 @@ reuse the KV cache, so the quadratic cost is paid once per conversation.
 
 ## Gotchas
 
+- **A long-context reply can collapse to one repeated token** (or a thinking-only
+  turn with no answer). This is the fp16-overflow #606 class, not a model
+  quality issue; the quantizer clamps live in `strata-package.nix`'s
+  `postPatch`. Full write-up, the two incidents, and the verification commands:
+  [`strata-degeneration.md`](./strata-degeneration.md).
 - **The GSQ-RCO GGUF has no MTP head.** It must always be fetched from the
   BF16 checkpoint (`mtp_fetch.py` needs Hugging Face and is SHA-256 checked;
   a mirror that ignores Range requests is caught by `verify`, exit 3).
