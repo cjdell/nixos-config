@@ -7,9 +7,75 @@ llama.cpp could only do at ~6.5 tok/s. It replaces llama-swap on this box
 half hand-prepared outside Nix), the config, and the measured context /
 memory ceilings that were the point of the exercise.
 
-Upstream pinned: **v0.1.39**, rev `6f32ec070f23ced9f50e704d854d775da52591ab`
-(`hosts/zen3-nixos/ai/strata-package.nix`). It builds its own ggml from a
-pinned llama.cpp (`3cf03257f219afbe7334045ff7c6a06ac68c627d`).
+Upstream pinned: **v0.1.40.1**, rev `82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`
+(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-06 from v0.1.39
+(`6f32ec070f23ced9f50e704d854d775da52591ab`). It builds its own ggml from a
+pinned llama.cpp (`3cf03257f219afbe7334045ff7c6a06ac68c627d`) — **unchanged by
+0.1.40** (`setup.py:93 LLAMA_CPP_COMMIT`), so `strata-package.nix`'s `llama`
+fetch stays as it is.
+
+## 0.1.40 / 0.1.40.1 (updated 2026-10-06)
+
+Built and verified on this box (`nix build .#strata` ->
+`/nix/store/vl353xnf6ccdlckjs2mm8j428s6zp28s-strata-0.1.40.1`, HIP/gfx1201,
+`STRATA_PREFILL_MMQ=ON`, build phase 2 min 8 s). Not yet switched on the live
+service — see "Deploy" at the bottom.
+
+What actually changed for us (read off the two trees, not the changelog):
+
+- **The two q8_1 clamps our 0.1.39 build carried are fixed upstream** ("the fused
+  SwiGLU q8_1 quantizers keep their scale finite"): `native_mmvq.cu:172`
+  (`native_swiglu_quantize_q8_1_kernel`) and `iq_kernels.cu:3342` (the fused
+  gate/up block store) now use `q8_1_finite/q8_1_quant/q8_1_ds`. Those two
+  `substituteInPlace` clamps are **removed** from `strata-package.nix` — their
+  target strings no longer exist and `--replace-fail` would fail the build. The
+  int8-KV clamps (`kv_q8.cu:55`, `prefill/kernels.cu:1340`) are **still ours**:
+  upstream still writes `amax / 127` to fp16 unclamped there. Details:
+  [`strata-degeneration.md`](./strata-degeneration.md).
+- **`#871`**: the residency-table upload waits for its own copy before the
+  verifier reads it, the 100 %-resident verify graph runs only while every expert
+  is in VRAM, and a stale plan now fails the window (`verify.cpp`:
+  `"verify: the all-resident plan met an expert that is not in VRAM …"`) instead
+  of printing `!!!!`. Upstream could **not** reproduce #879 and asked both
+  reporters to retry on 0.1.40.
+- **HIP decode**: `sh_stream_on()` (the shared-expert stream fork) is new in
+  0.1.40 and returns **false under `STRATA_USE_HIP`** by default — "brings decode
+  back to 0.1.38 speed" (#826, #816). `STRATA_SH_STREAM=1` re-enables it.
+- **Live switch, 2026-10-06 14:39 BST** (`/nix/store/vl353xnf6ccdlckjs2mm8j428s6zp28s-strata-0.1.40.1/bin/strata`,
+  unit `strata`, engine pid 506234): experts loaded 39.97 GiB at 3.33 GiB/s (18 s),
+  GPU expert cache 15,558 experts / 25.24 GiB, and on real agent traffic
+  **56–60 tok/s** decode (was ~41 tok/s on 0.1.39) with 94–98 % expert-cache hit.
+  The first request re-read a 45,073-token prompt in 29 s (~1,550 tok/s), so the
+  cache rebuild cost one turn, not a regression. No `verify: non-finite logits` fire
+  so far on 0.1.40.1.
+- **gfx1151 (Strix Halo) auto-tuning does NOT touch us**: `src/core/arch_defaults.cpp`
+  returns its 18 switches only for gfx1151, so `STRATA_EXPERT_V2` / `STRATA_QFUSE`
+  (the new S26 kernels) stay off on our gfx1201.
+- **Conversation caches from 0.1.39 are rebuilt on first use** (the cache version
+  key changed): the first request after the switch re-reads its prompt. Expect one
+  slow turn, not a regression.
+- **Behaviour changes that matter for agent traffic**: empty assistant turns are no
+  longer rendered into the next prompt (#886, `STRATA_KEEP_EMPTY_TURNS=1` restores);
+  OpenAI `stop` / Anthropic `stop_sequences` are honoured on every path (#454);
+  `tool_choice none/required` fixed (#790).
+- **0.1.40.1 is a serve-layer hotfix** (engine identical to 0.1.40): a quoted
+  `<tool_call>` in thinking or in a code fence stays text (#804, #1058), and —
+  relevant to our NaN guard, which kills the engine mid-session — requests waiting
+  during an engine restart no longer hang or die with `list.remove(x): x not in
+  list` (#1012); a waiting request now continues on the new engine or ends at once
+  with a 503 so the client can retry.
+- **Upstream rewrote the repo history on 2026-10-06**: our old pin `6f32ec0` has
+  no common ancestor with `main` (GitHub's compare API 404s), and `v0.1.39` is
+  `a1641e9f`, not `6f32ec0`. Diff two archives, not `git log`. A git checkout of
+  Strata needs `git fetch origin && git reset --hard origin/main` once.
+- **Unchanged for us**: `data/expert-profile.bin` and `data/draft_vocab.bin` are
+  byte-identical (md5 `ff1bc654…` / `4135aad3…`), the pack index format is still
+  v3 / 19 fields (no re-pack needed), every engine arg in `strata.nix` is still
+  parsed (`--spec-min-p` at `generate.cpp:1697`, absent from `--help` in both
+  versions), and `serve/server.py`'s two error-body strings our `installPhase`
+  rewrite targets are still verbatim (now at lines 4242 and 4250).
+- `setup.py`'s tested ROCm is `7.10.0a20251120` (`setup.py:1493`); our build uses
+  nixpkgs ROCm **7.2.3** and still compiles clean for gfx1201.
 
 ## Why llama-swap is off
 

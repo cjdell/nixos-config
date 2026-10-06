@@ -47,13 +47,17 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.1.39";
+  version = "0.1.40.1";
 
+  # v0.1.40.1 (2026-10-06).  NOTE: upstream rewrote this repo's history on
+  # 2026-10-06 (the 0.1.40.1 release notes say so), so the old pin 6f32ec0 has no
+  # common ancestor with main and GitHub's compare API cannot diff them - diff the
+  # two trees instead.  The tag v0.1.39 is also not 6f32ec0 (it is a1641e9f).
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "6f32ec070f23ced9f50e704d854d775da52591ab";
-    hash = "sha256-9jqmV+AbGKiOqW1DvKjqBLVXmJCI9o6WI85QoHj5vBI=";
+    rev = "82f46a8c8f475f001ad76d92f58f4a4f8ffb0253";
+    hash = "sha256-y+0Qn2KhyVFfQrZi1L9BzR7iqQoRHjkXO9W48VJO2QQ=";
   };
 
   nativeBuildInputs = [
@@ -93,8 +97,14 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   # Local HIP port of the upstream #879 finiteness instrumentation + guard
-  # (gist 66419118nnn/7c9399d982d98229c61fcefaaa0b9215, on top of our exact pin
-  # 6f32ec070f23ced9f50e704d854d775da52591ab).  #879 proved the repeated-token
+  # (gist 66419118nnn/7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact
+  # pin 82f46a8c (v0.1.40.1) on 2026-10-06: 6 of its 11 verify.cpp hunks needed new
+  # anchors (0.1.40 added the STRATA_QFUSE fused-read returns, the S26 kernels, the
+  # #871 all-resident plan error and new arena buffers), and the stage-audit /
+  # sampler / header hunks apply with pure offsets.  It was regenerated from the
+  # patched tree, so every hunk now applies with --fuzz=0; do not re-apply the old
+  # file with fuzz (fuzz 3 put the arena carve inside the mapped() chain and the
+  # input audit inside the PLE try block).  #879 proved the repeated-token
   # degeneration is NOT the fp16-overflow class the postPatch clamps below fix:
   # the first poisoned value is garbage 0x7FFFFFFF bits written into a
   # routed-expert output row (a data-path defect in native_expert_grouped).  This
@@ -108,42 +118,48 @@ stdenv.mkDerivation (finalAttrs: {
   #     rows.  HIP-safe: pure cuda* shims + <<<>>> the tree already builds.
   patches = [ ./strata-nan-guard.diff ];
 
-  # Activation quantizers must keep their fp16 scale and sum finite. Upstream's
-  # #606 fix ("q8_1 activations: keep the block's fp16 scale and sum finite",
-  # 0.1.39) clamped only two of the q8_1 activation quantizers (iq_kernels.cu
-  # q8_1_store and native_mmvq.cu native_quantize_q8_1_kernel). In every
-  # remaining case a value past fp16's 65504 rounds to +inf, the dequantised
-  # dot product then reads inf * 0 = NaN, and a NaN in the residual makes the
-  # model answer one token forever -- the degeneracy the guard in
-  # serve/server.py:2319 exists to end (upstream #606; ggml-org/llama.cpp#23606
-  # is the same defect). Clamp each one to the largest finite half with the
-  # same q8_1_finite/q8_1_quant/q8_1_ds helpers the fixed siblings use (or this
-  # file's hf_sat). A block that was finite before is stored bit for bit as
-  # before -- values in (65504, 65520) round to 65504 anyway, and a finite
-  # block's |x / d| is at most 127 -- and a NaN stays NaN, so STRATA_DBG_NAN
-  # still finds it.
+  # Activation quantizers must keep their fp16 scale and sum finite: a value past
+  # fp16's 65504 rounds to +inf, the dequantised dot product then reads inf * 0 =
+  # NaN, and a NaN in the residual makes the model answer one token forever -- the
+  # degeneracy the guard in serve/server.py exists to end (upstream #606;
+  # ggml-org/llama.cpp#23606 is the same defect).
+  #
+  # STATUS ON 0.1.40.1 (checked against the tree, not the changelog): the two sites
+  # our 0.1.39 build clamped itself are FIXED UPSTREAM in 0.1.40 ("the fused SwiGLU
+  # q8_1 quantizers keep their scale finite") - native_mmvq.cu
+  # native_swiglu_quantize_q8_1_kernel (line 172) and the iq_kernels.cu fused gate/up
+  # block store (line 3342) both use q8_1_finite/q8_1_quant/q8_1_ds now.  Those two
+  # clamps are therefore GONE here: their target strings no longer exist and
+  # --replace-fail would break the build.  What is still unclamped upstream:
+  #   * the int8 KV cache block scale, decode (kv_q8.cu:55) and prompt
+  #     (prefill/kernels.cu:1340) - never covered by #606, and the site our
+  #     incident-2 132,947-token prompt was fixed by.  Still ours, still live.
+  #   * the new S26 fused swiglu+q8_1 kernel (iq_kernels.cu s26_swiglu_q8_1_kernel,
+  #     ~line 2326) - latent for us: it is behind STRATA_EXPERT_V2, which 0.1.40
+  #     turns on by default ONLY on gfx1151 (src/core/arch_defaults.cpp), not on our
+  #     gfx1201.  Clamped for the same reason the old gfx906-only site was.
+  # Deliberately NOT clamped (same class, also opt-in and off on gfx1201, and the
+  # clamp family is not what closes #879): fused_gr.cu gr_q8_tail (~line 198) and
+  # verify_kernels.cu gdn_q8_1_store (~line 184), both behind STRATA_QFUSE (qcnt_ is
+  # only allocated under g_qfuse()).  Re-visit if STRATA_QFUSE is ever turned on.
+  #
+  # Clamp each to the largest finite half with the same q8_1_finite/q8_1_quant/
+  # q8_1_ds helpers the fixed siblings use (or this file's hf_sat). A block that was
+  # finite before is stored bit for bit as before -- values in (65504, 65520) round
+  # to 65504 anyway, and a finite block's |x / d| is at most 127 -- and a NaN stays
+  # NaN, so STRATA_DBG_NAN still finds it.
   postPatch = ''
-    # (1) the decode fused-SwiGLU expert quantizer, missed upstream.
-    substituteInPlace src/kernels/cuda/native_mmvq.cu \
-      --replace-fail 'const float d = amax / 127.0f;' \
-                     'const float d = q8_1_finite(amax / 127.0f);   // #606 (SwiGLU): keep the block scale finite' \
-      --replace-fail 'const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);' \
-                     'const int8_t q = q8_1_quant(xi, d, amax);' \
-      --replace-fail 'y[i / Q8K].ds = make_half2(d, sum);' \
-                     'y[i / Q8K].ds = q8_1_ds(d, sum);'
-
-    # (2) the same block store in the fused gate/up kernel (mode 7). Its launch
-    # is gfx906-only today, so it is latent for the R9700's gfx1201 build, but a
-    # gfx906 build would otherwise reintroduce the NaN.
+    # (1) the S26 fused swiglu + q8_1 kernel (opt-in STRATA_EXPERT_V2; latent on
+    # gfx1201).  The only q8_1 activation store left unclamped in this file.
     substituteInPlace src/kernels/cuda/iq_kernels.cu \
       --replace-fail 'const float d = amax / 127.0f;' \
-                     'const float d = q8_1_finite(amax / 127.0f);' \
+                     'const float d = q8_1_finite(amax / 127.0f);   // #606 (S26 swiglu): keep the block scale finite' \
       --replace-fail 'const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);' \
                      'const int8_t q = q8_1_quant(xi, d, amax);' \
-      --replace-fail 'if (lane == 0) y->ds = make_half2(d, sum);' \
-                     'if (lane == 0) y->ds = q8_1_ds(d, sum);'
+      --replace-fail 'if (iqs == 0) y[ib].ds = make_half2(d, sum);' \
+                     'if (iqs == 0) y[ib].ds = q8_1_ds(d, sum);'
 
-    # (3) the int8 KV cache block scale (--kv int8): a 64-value group's
+    # (2) the int8 KV cache block scale (--kv int8): a 64-value group's
     # amax / 127 is stored fp16, so it saturates to inf past amax = 8.3M and the
     # gather's q * inf = NaN poisons attention for every later token. Decode
     # append here; the prompt append is in prefill/kernels.cu (patched below).
@@ -151,13 +167,13 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail 'const uint16_t sbits = f16_from_f32(amax / 127.0f);' \
                      'const uint16_t sbits = f16_from_f32(fabsf(amax / 127.0f) > 65504.0f ? (amax < 0.0f ? -65504.0f : 65504.0f) : amax / 127.0f);'
 
-    # (4) the prompt path's int8 KV append, which uses this file's own hf().
+    # (3) the prompt path's int8 KV append, which uses this file's own hf().
     # hf_sat is the saturating form already used for the SwiGLU products.
     substituteInPlace src/prefill/kernels.cu \
       --replace-fail 'const uint16_t sb = hf(amax / 127.0f);' \
                      'const uint16_t sb = hf_sat(amax / 127.0f);'
 
-    # (5) Make the finiteness guard's mid-stream error RETRYABLE for the coding
+    # (4) Make the finiteness guard's mid-stream error RETRYABLE for the coding
     # agent. Pi's agent-level auto-retry (retry.enabled, on by default) decides
     # from the error message TEXT alone: it matches transient patterns such as
     # `server.?error`, and "verify: non-finite logits" matches none of them, so a
@@ -185,7 +201,7 @@ stdenv.mkDerivation (finalAttrs: {
     install -Dm755 strata $out/bin/strata
     cp -r ${finalAttrs.src}/serve ${finalAttrs.src}/tools ${finalAttrs.src}/data $out/share/strata/
 
-    # (5, cont.) the retryable-guard rewrite, on the installed copy (see the
+    # (4, cont.) the retryable-guard rewrite, on the installed copy (see the
     # postPatch comment). substituteInPlace only uses sed, so it is safe here.
     substituteInPlace $out/share/strata/serve/server.py \
       --replace-fail \

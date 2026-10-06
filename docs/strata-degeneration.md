@@ -1,13 +1,16 @@
 # Strata repeated-token degeneration (#606 fp16-overflow class + #879 data-path defect)
 
-Status: **clamps + a finiteness guard deployed 2026-10-05.** The clamps fixed the
+Status: **clamps + a finiteness guard deployed 2026-10-05; engine switched to
+0.1.40.1 on 2026-10-06 14:39 BST.** The clamps fixed the
 long-context site (the ~132K prompt completes), but a third fire at ~100K and upstream
 [#879](https://github.com/Niko1221/Strata/issues/879) showed the underlying defect is a
 data-path bug, not fp16 overflow — so a HIP port of the upstream finiteness guard
 (binary-attached audit + clean window failure) is now also deployed, and a guard fire
 auto-retries (the client reloads the engine and repeats the turn — see "Auto-retry"
-below). The
-engine is Strata 0.1.39 on the R9700 (HIP/gfx1201), serving Qwen3.8-Flash-Next IQ3_XXS — see
+below). 0.1.40 fixed the two q8_1 sites our 0.1.39 build clamped itself and changed
+three things upstream says touch #879, so the guard diff and the clamp set were re-based
+(see "Update 2026-10-06" near the end). The
+engine is Strata 0.1.40.1 on the R9700 (HIP/gfx1201), serving Qwen3.8-Flash-Next IQ3_XXS — see
 [`strata.md`](./strata.md) for the install and config. This doc records why a
 long-context request can leave the engine answering **one token forever** (and
 wiping the agent session that asked), the three incidents on this box, and the
@@ -179,6 +182,25 @@ Sites 3 and 4 are the leading explanation for incident 2: they run during prompt
 prefill of a long context, exactly when the degeneration started, and were never
 touched by #606.
 
+### The clamp set on 0.1.40.1 (2026-10-06)
+
+Checked against the 0.1.40.1 tree, not the changelog:
+
+| # | File:line | Site | Status on 0.1.40.1 |
+| --- | --- | --- | --- |
+| — | `src/kernels/cuda/native_mmvq.cu:172` | `native_swiglu_quantize_q8_1_kernel` | **fixed upstream** (0.1.40: "the fused SwiGLU q8_1 quantizers keep their scale finite") → our clamp **deleted**; its target strings are gone, so keeping it would fail `--replace-fail` |
+| — | `src/kernels/cuda/iq_kernels.cu:3342` | `native_gu_fused_kernel` (mode 7) block store | **fixed upstream** (`q8_1_ds`) → our clamp **deleted** |
+| 1 | `src/kernels/cuda/iq_kernels.cu:2326-2330` | `s26_swiglu_q8_1_kernel` (new S26 fused swiglu+q8_1) | **ours, latent**: behind `STRATA_EXPERT_V2`, which 0.1.40 turns on by default only on gfx1151 (`src/core/arch_defaults.cpp`), not on gfx1201. Clamped with `q8_1_finite/q8_1_quant/q8_1_ds` for the same reason the old gfx906-only site was |
+| 2 | `src/kernels/cuda/kv_q8.cu:55` | `kv_append_q8_kernel` int8 KV scale | **ours, live** — still unclamped upstream |
+| 3 | `src/prefill/kernels.cu:1340` | prompt int8 KV append | **ours, live** — still `hf(amax / 127)`, clamped to `hf_sat(...)` |
+
+Deliberately **not** clamped (same fp16-ds class, but opt-in and off on gfx1201, and
+the clamp family is not what closes #879): `fused_gr.cu:198` (`gr_q8_tail`) and
+`verify_kernels.cu:184` (`gdn_q8_1_store`), both behind `STRATA_QFUSE` — `qcnt_` is only
+allocated under `g_qfuse()` (`verify.cpp:597`), so neither runs on this box. Re-visit if
+`STRATA_QFUSE` is ever turned on. Also still unclamped and not ours to fix: the CPU-side
+`kernels/cpu/expert.cpp:94` and `core/native_dense.cpp:70` (fp32 scales, no fp16 store).
+
 ### Verification
 
 ```sh
@@ -198,10 +220,12 @@ not the wrapper (the wrapper differs by 32 bytes of embedded store paths alone).
 
 ## Finiteness guard — deployed 2026-10-05 (mitigation + instrumentation)
 
-`hosts/zen3-nixos/ai/strata-nan-guard.diff` (26 KB, a HIP-adapted copy of the upstream
-reporter's `local-patches-20261005-0139b.diff`, generated on our exact pin `6f32ec0`) is
-applied as `patches = [ ./strata-nan-guard.diff ]` in `strata-package.nix` — `patches`
-run in `patchPhase`, **before** the `postPatch` clamps above, so both apply. It compiles
+`hosts/zen3-nixos/ai/strata-nan-guard.diff` (430 lines, a HIP-adapted copy of the upstream
+reporter's `local-patches-20261005-0139b.diff`) is applied as `patches = [ ./strata-nan-guard.diff ]`
+in `strata-package.nix` — `patches` run in `patchPhase`, **before** the `postPatch` clamps
+above, so both apply. It was generated on our 0.1.39 pin `6f32ec0` and **re-generated on
+2026-10-06 against `82f46a8c` (0.1.40.1)**; see "Update 2026-10-06" below for what had to
+move. It compiles
 on gfx1201/HIP unchanged (pure `cuda*` shims + `<<<>>>`, `atomicCAS`, device `memcpy`,
 `isfinite` — all already used by the tree).
 
@@ -329,8 +353,78 @@ the reload; bump `maxRetries` if several consecutive fires are a concern.
 ~1.5–3 min at ~1000 tok/s), plus Pi discarding the poisoned turn. The turn continues
 by itself — no user action, no lost session.
 
+## Update 2026-10-06: 0.1.40.1, upstream's answer, and the patch re-base
+
+**Our #879 follow-up was posted** (issue #879 comment, 2026-10-05T10:51:41Z — the
+HIP/RDNA4 data point, the full clamp set in place, the 100,134-token thinking-channel
+fire, and the note that the clamps closed the 132.9K site). It linked
+`hosts/zen3-nixos/ai/strata-package.nix` as our workaround. It predates the first
+guard fire (12:47), so the `0x7fc00000` HIP raw-bit signature has **not** been posted.
+
+**Upstream's reply (2026-10-06T06:41:22Z):** 0.1.40 changes three things that touch
+this — (1) the residency-table uploads wait for their own copy before the verifier
+reads the table (PR #550), (2) a window no longer runs the 100 %-resident graph while
+any expert is out of VRAM (#871), (3) a Stop sent during the prompt read now reaches
+the engine at once. They ran *stop → edit → resend* 8× on 0.1.39 and 8× on 0.1.40
+(Q2_0, partial residency, RTX 5070, `STRATA_DBG_NAN=1`) and saw **no degeneration and
+no non-finite values**, so they could not reproduce it. Their ask: **retry on 0.1.40**,
+if it still fires send the log with `STRATA_DBG_NAN=1`, and try `--adapt-every 100000`
+and **no** `--resident-budget-gib` (we pass neither, so only the retry is actionable).
+
+**The reporter's addendum (2026-10-05T03:55:09Z)** — worth keeping because it changes
+how a fire should be read: a near-deterministic repro (send a long task → hit **Stop**
+→ the engine keeps generating through the "stopped" window → edit → resend; degenerates
+into `!` spam within a few rounds, on three different clients), the `0x7FFFFFFF` =
+`INT32_MAX` sentinel-as-float hypothesis, a **deferred-abort teardown/setup race**
+(request N's teardown runs while N+1 reuses the same buffers), and the claim that the
+poison is **session-scoped, not engine-global**: a new session recovers without
+reloading, because the `!` tail sits in that session's KV and self-sustains. Their
+suggested fix direction is KV-block epoch/canary checks and *auto truncate-KV-tail +
+regenerate* rather than a fatal guard. Our own incident 3 (a fire at 100K with 141K–149K
+prompts serving fine right after) fits that model.
+
+**What moved in the guard diff.** Applied to 0.1.40.1 unchanged, 6 of its 11
+`src/core/verify.cpp` hunks fail: 0.1.40 added the `STRATA_QFUSE` fused-read return
+values (`const bool q8_attn = gr_read_group(...)`, `const bool q8_ffn = ...`), the S26
+kernels, the #871 all-resident plan error after the sync, and new arena buffers
+(`arg_scratch_`, `one_`, `ple_key_/ple_val_`) between `head_logits_` and `hist_snap_`.
+The `iq_kernels.cu` (stage audit), `sampler.cu` and the three header hunks apply with
+pure offsets (+926 … +955). The re-base re-anchored those six by hand and the diff was
+**regenerated from the patched tree**, so it now applies with `--fuzz=0` and reproduces
+the tree byte-for-byte.
+
+⚠️ **Do not re-apply this diff with fuzz.** With `--fuzz=3` patch "succeeds" and puts
+the arena `carve` insertion *inside the `mapped(...)` chain* and the input audit *inside
+the PLE `try` block* — it looks applied and is wrong. Always `patch -p1 --fuzz=0` and
+fix rejects by hand.
+
+**Build check (2026-10-06, `nix build .#strata`, no switch):**
+`/nix/store/vl353xnf6ccdlckjs2mm8j428s6zp28s-strata-0.1.40.1/bin/strata` from drv
+`qrbdsi6a6ygl3mhzsyk5x052qd7szs7x-strata-0.1.40.1.drv` (HIP/gfx1201, build phase 2 min
+8 s, 11.18 MB vs 9.01 MB for 0.1.39). Verified: `patchPhase` patched all 6 files with no
+`.rej`; the binary carries `verify: non-finite logits`, the `strata verify:   layer
+trace: …` / `kernel-stage audit: …` / `planned-GPU-row audit: …` format strings and the
+`native_stage_audit_*` symbols; the drv env carries the three remaining clamps; the
+installed `serve/server.py` carries the `"server error: "` prefixes at lines 4242 and
+4250. `--replace-fail` is a build failure if a clamp string is missing, so a green build
+*is* the proof the clamps landed.
+
+**`STRATA_DBG_NAN=1` — do not enable it permanently.** Upstream asks for it on a fire,
+but in `verify.cpp` it copies the whole `head_logits_` (`T × n_vocab` ≈ 2.4 MB) D2H on
+every window *until it has reported once* (`static bool reported`), i.e. a blocking
+per-window copy on the decode hot path forever if nothing fires. Our guard's GPU-side
+flag is the cheap equivalent; set `STRATA_DBG_NAN=1` only for a deliberate diagnostic
+run.
+
 ## Still open
 
+- **Retry #879 on 0.1.40.1 — in progress.** Switched 2026-10-06 14:39 BST: the live
+  engine is `/nix/store/vl353xnf6ccdlckjs2mm8j428s6zp28s-strata-0.1.40.1/bin/strata`
+  (0.1.39 `/nix/store/nn01k1m5…` is now only a generation). Watch for a
+  `verify: non-finite logits` fire. If it fires, capture the audit lines and post them
+  (our `0x7fc00000` GPU-cache-HIT signature is still unposted upstream). If it does
+  *not* fire again over long agentic sessions, #879 is plausibly closed for HIP by the
+  #550/#871/Stop fixes.
 - **Confirmed (partly).** The clamp fixed the incident-2 long-context site (the
   ~132K prompt now completes). But incident 3 at ~100K, and upstream #879, show
   the general degeneration is a **GPU routed-expert data-path defect** that the

@@ -711,7 +711,10 @@ reads corresponds to something reviewable.
 
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
-The serving engine is **Strata 0.1.39**, a separate stack from llama.cpp:
+The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
+**0.1.40.1** (`82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`, updated 2026-10-06 from
+0.1.39 `6f32ec0`; **switched live 2026-10-06 14:39 BST** —
+`/nix/store/vl353xnf6ccdlckjs2mm8j428s6zp28s-strata-0.1.40.1/bin/strata`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -724,16 +727,29 @@ The serving engine is **Strata 0.1.39**, a separate stack from llama.cpp:
   fp16 (`max 65504`), and a block sum or scale can round to `+inf`, giving
   `inf * 0 = NaN` in the dot product (`ggml-org/llama.cpp#23606` is the same).
   The int8 KV cache has the same shape (a 64-value group's `amax/127` as fp16).
-  Upstream 0.1.39 clamps only *some* sites; the rest are clamped in
-  `strata-package.nix`'s `postPatch` (`substituteInPlace`, bit-identical for
-  finite blocks). Full incident history, the exact sites, and verification
+  **0.1.40 fixed upstream the two fused-SwiGLU sites our 0.1.39 build clamped
+  itself**, so those two `postPatch` clamps are gone; what is left is the int8 KV
+  scale (`kv_q8.cu:55`, `prefill/kernels.cu:1340` — still unclamped upstream, still
+  live here) plus the opt-in S26 swiglu kernel (`iq_kernels.cu`, latent on gfx1201).
+  Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
+- **The local finiteness guard is `hosts/zen3-nixos/ai/strata-nan-guard.diff`**
+  (`patches = [...]`, applied before `postPatch`): it fails a verify window with
+  `verify: non-finite logits` instead of emitting the degenerate token, and dumps
+  per-stage layer/row/col/raw bits (`STRATA_KERNEL_AUDIT=1`). It was re-based onto
+  0.1.40.1 on 2026-10-06 (6 of its 11 `verify.cpp` hunks needed new anchors) and is
+  regenerated to apply with `--fuzz=0`. **Never re-apply it with fuzz** — `--fuzz=3`
+  "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
+  inside the PLE `try` block.
 - **Two incidents, two sites.** Incident 1 (`!` ×256, ~156K context) was fixed
-  by commit `437a753` (fused-SwiGLU `q8_1` store in `native_mmvq.cu`). Incident
+  by commit `437a753` (fused-SwiGLU `q8_1` store in `native_mmvq.cu` — upstream
+  fixed the same site in 0.1.40, so that clamp no longer exists here). Incident
   2 (`索` ×256, 132.9K context, Pi session `01a1099d-927e-76ba-87c0-9abc71fa1df9`)
   hit **despite** `437a753` — the fix here also clamps the int8 KV scale
   (`kv_q8.cu`, `prefill/kernels.cu`) and the gfx906-only fused gate/up store
-  (`iq_kernels.cu`, latent on gfx1201).
+  (`iq_kernels.cu`, latent on gfx1201). Incident 3 (`!` ×255 at ~100K, in the
+  *thinking* channel) fired **with every clamp in place**, which is what proved the
+  root cause is a GPU routed-expert data-path defect (#879), not an fp16 scale.
 - **A Pi session "crash" here is usually a folded reply, not an engine crash.**
   The reply comes back with `finish_reason: "length"` (repeat guard ends it
   after 256) and too few tokens, so Pi treats it as a recoverable truncated
