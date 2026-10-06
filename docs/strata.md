@@ -1,11 +1,36 @@
-# Strata on zen3-nixos (Qwen3.8-Flash-Next IQ3_XXS)
+# Strata on zen3-nixos (Qwen3.8-Flash-Next IQ3_S)
 
-Status: **live** (2026-10-04). Strata (`github.com/Niko1221/Strata`) is the
-engine that runs the 76 GB GSQ-RCO IQ3_XXS model on the 32 GiB R9700 that
-llama.cpp could only do at ~6.5 tok/s. It replaces llama-swap on this box
-(see "Why llama-swap is off" below). This doc records the install (which is
-half hand-prepared outside Nix), the config, and the measured context /
-memory ceilings that were the point of the exercise.
+Status: **live on IQ3_S** (2026-10-06, up from IQ3_XXS). Strata
+(`github.com/Niko1221/Strata`) is the engine that runs the ~84 GB GSQ-RCO
+model on the 32 GiB R9700 that llama.cpp could only do at ~6.5 tok/s. It
+replaces llama-swap on this box (see "Why llama-swap is off" below). This doc
+records the install (which is half hand-prepared outside Nix), the config, and
+the measured context / memory ceilings that were the point of the exercise.
+
+## IQ3_XXS -> IQ3_S (2026-10-06)
+
+We moved to the **highest** GSQ-RCO quant, IQ3_S (3.50 bpw non-uniform), from
+IQ3_XXS (3.00 bpw). Only shard 1 differs: shard 2 is the 26.82 GiB
+`per_layer_token_embd` (PLE) table and is **byte-identical across every GSQ-RCO
+quant** (LFS sha256 `316b46f3…`), so it is hardlinked beside the IQ3_S shard and
+read from disk either way.
+
+| | IQ3_XXS | IQ3_S |
+| --- | ---: | ---: |
+| shard 1 (experts+dense) | 43.81 GiB | 51.05 GiB |
+| shard 2 (PLE table) | 26.82 GiB | 26.82 GiB (identical) |
+| experts loaded to RAM | 39.97 GiB | **46.84 GiB** |
+| VRAM expert cache | 15764 slots | **13103 slots** (24.87 GiB) |
+| decode cache hit rate | 96-98 % | **97.2-97.9 %** |
+| engine RSS | ~46 GiB | **~51 GiB** |
+
+The repack is `scripts/repack-strata-iq3s.sh` (verifies the shard sha, derives
+the engine python from `.#strata`, materialises the pinned llama.cpp `gguf-py`,
+runs `tools/iq_pack.py` -> `/home/cjdell/Strata/pack/iq3s`). `conversions.json`
+reports `tensors: []` - the GSQ-RCO file is already in the engine's read form,
+no `--compat-bf16` needed. The next rungs up are Unsloth's UD-* family
+(UD-Q3_K_XL 90 GB, UD-IQ4_XS 94 GB, UD-Q4_K_XL 111 GB); the last does not fit
+93 GiB of RAM, and the middle two squeeze the PLE page cache.
 
 Upstream pinned: **v0.1.40.1**, rev `82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`
 (`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-06 from v0.1.39
@@ -89,8 +114,8 @@ never be imported at once.
 
 | Piece | Path |
 | --- | --- |
-| GGUFs (2 shards, 75.8 GB) | `/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` |
-| pack (index + dense + tokenizer) | `/home/cjdell/Strata/pack/iq3xxs/` (~1.5 GB) |
+| GGUFs (4 quants, IQ3_S in use) | `/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` |
+| pack (index + dense + tokenizer) | `/home/cjdell/Strata/pack/iq3s/` (~1.5 GB) |
 | MTP fetch source | `/home/cjdell/Strata/mtp/mtp-q2_0.gguf` + `tensors/` |
 | MTP draft runtime | `/home/cjdell/Strata/mtp/rt/` (`experts.bin`, `dense.bin`, `draft_vocab.bin`) |
 | Nix package (engine + serve) | `hosts/zen3-nixos/ai/strata-package.nix`, flake attr `.#strata` |
@@ -124,7 +149,8 @@ export STRATA_GGUF_PY=/nix/store/<llama-cpp-src>/gguf-py   # the pinned rev
 cd /tmp/strata-result/share/strata/tools                    # packages.x86_64-linux.strata
 
 # 1. pack: reads every shard, skips the PLE table, writes ~1.5 GB
-$PY iq_pack.py --gguf <ggufDir>/...-00001-of-00002.gguf --out /home/cjdell/Strata/pack/iq3xxs
+$PY iq_pack.py --gguf <ggufDir>/...-00001-of-00002.gguf --out /home/cjdell/Strata/pack/iq3s
+# (or just `scripts/repack-strata-iq3s.sh`, which wraps the whole thing)
 
 # 2. MTP draft runtime (the GSQ-RCO GGUF ships NO MTP head, so the 31 mtp.*
 #    tensors always come from the BF16 checkpoint Qwen/Qwen3.8-Flash-Next,

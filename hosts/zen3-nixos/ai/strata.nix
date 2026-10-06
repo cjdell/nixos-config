@@ -12,13 +12,18 @@
 #
 # The engine + serve layer are packaged by ./strata-package.nix. Model data
 # stays OUT of the store and is prepared ONCE by hand before this unit will
-# start (IQ3_XXS = the ISTA-DASLab GSQ-RCO file, which DID download to
-# ggufDir; Unsloth's UD-IQ3_XXS is EXPLICITLY unsupported by Strata, see
-# upstream setup.py SUPPORTED_GGUFS):
+# start. We run the *highest* GSQ-RCO quant, IQ3_S (3.50 bpw non-uniform),
+# up from IQ3_XXS (3.00 bpw) as of 2026-10-06. Only shard 1 differs between
+# the two: shard 2 is the single per_layer_token_embd (PLE) table and is
+# byte-identical across every GSQ-RCO quant (LFS sha256 316b46f3…), so it is
+# hardlinked beside the IQ3_S shard below and read from disk either way.
+# The PLE table is 26.82 GiB; shard 1 grows 43.81 -> 51.05 GiB, i.e. ~+7 GiB
+# of routed-expert bytes that live in RAM (experts ~40 -> ~47 GiB). Unsloth's
+# UD-* files are a different (packable, but larger) family - see docs/strata.md:
 #
-#   1. the two GGUF shards (75.8 GB) are already in ggufDir, from
+#   1. the two GGUF shards are in ggufDir, from
 #      https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
-#      (37.04 + 44.6 GiB; shard 2 is the single per_layer_token_embd table).
+#      (shard 1 = experts/dense, shard 2 = the per_layer_token_embd table).
 #      Because the pack tools need numpy + the pinned llama.cpp gguf-py, run
 #      them with the engine's own python and STRATA_GGUF_PY:
 #
@@ -45,9 +50,9 @@ let
   # the hand-prepared pack and MTP runtime live under modelDir.
   ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF";
   modelDir = "/home/cjdell/Strata";
-  packDir = "${modelDir}/pack/iq3xxs";
-  nativeGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf";
-  pleGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf";
+  packDir = "${modelDir}/pack/iq3s";
+  nativeGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf";
+  pleGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf";
   mtpDir = "${modelDir}/mtp/rt";
 
   # The profile ships in the repo; the copy in the store is fine (the engine
@@ -98,13 +103,13 @@ let
   # its args, and the tokenizer. Kept read-only in the store for now; edit
   # this file and rebuild to change engine args (the web Settings view would
   # need a writable copy in /var/lib/strata instead).
-  configFile = pkgs.writeText "strata-iq3xxs.json" (
+  configFile = pkgs.writeText "strata-iq3s.json" (
     builtins.toJSON {
       exe = "${strata}/bin/strata";
       args = engineArgs;
       cwd = "/var/lib/strata";
       tokenizer = "${packDir}/tokenizer";
-      model_name = "qwen3.8-flash-next-iq3xxs";
+      model_name = "qwen3.8-flash-next-iq3s";
       log = "/var/lib/strata/strata.log";
       # nginx proxies with the client's original Host header, and the serve
       # layer refuses any name it was not told about (DNS-rebinding guard) -
