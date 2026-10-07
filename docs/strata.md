@@ -32,6 +32,11 @@ no `--compat-bf16` needed. The next rungs up are Unsloth's UD-* family
 (UD-Q3_K_XL 90 GB, UD-IQ4_XS 94 GB, UD-Q4_K_XL 111 GB); the last does not fit
 93 GiB of RAM, and the middle two squeeze the PLE page cache.
 
+When IQ3_S is trusted, reclaim the old files with
+`scripts/cleanup-strata-iq3xxs.sh --yes` (~46 GB: shard 1 and the iq3xxs pack;
+shard 2 is a hardlink, so unlinking it frees nothing). It refuses unless the
+engine is live and serving IQ3_S, and defaults to a dry run.
+
 Upstream pinned: **v0.1.40.1**, rev `82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`
 (`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-06 from v0.1.39
 (`6f32ec070f23ced9f50e704d854d775da52591ab`). It builds its own ggml from a
