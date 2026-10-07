@@ -104,6 +104,29 @@ u32 pctv_usb_endpoint_maxpkt(const struct usb_endpoint_descriptor *ep)
 	return usb_endpoint_maxp(ep);
 }
 
+/* kmalloc/kfree are macros in linux/slab.h - invisible to bindgen. */
+void *pctv_kmalloc(size_t size)
+{
+	return kmalloc(size, GFP_KERNEL);
+}
+
+void pctv_kfree(void *p)
+{
+	kfree(p);
+}
+
+/*
+ * usb_alloc_coherent() hands back a buffer that is already DMA-mapped; tell
+ * the HCD so it neither maps it again nor unmaps it on completion.  Leaving a
+ * stale transfer_dma behind makes usb_free_coherent() free pages that were
+ * never ours (BUG: Bad page state).
+ */
+void pctv_urb_use_coherent(struct urb *urb, dma_addr_t dma)
+{
+	urb->transfer_dma = dma;
+	urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+}
+
 const struct firmware *pctv_request_fw(struct device *dev, const char *name)
 {
 	const struct firmware *fw = NULL;

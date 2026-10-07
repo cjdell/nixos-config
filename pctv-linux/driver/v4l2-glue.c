@@ -393,7 +393,7 @@ struct vb2_buffer *pctv_glue_next_buffer(struct pctv_glue *glue)
 }
 
 void pctv_glue_buffer_done(struct pctv_glue *glue, struct vb2_buffer *vb,
-			   u32 state, u32 length)
+			   u32 length)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 
@@ -402,7 +402,18 @@ void pctv_glue_buffer_done(struct pctv_glue *glue, struct vb2_buffer *vb,
 
 	vb2_set_plane_payload(vb, 0, length);
 	vbuf->sequence = glue->sequence++;
-	vb2_buffer_done(vb, (enum vb2_buffer_state)state);
+	/* The state is chosen here, not passed from the Rust core: the core must
+	 * not have to mirror enum vb2_buffer_state (a stale copy of
+	 * VB2_BUF_STATE_DONE is exactly what broke the first streaming run).
+	 */
+	vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
+}
+
+void pctv_glue_buffer_requeue(struct pctv_glue *glue, struct vb2_buffer *vb)
+{
+	if (!vb)
+		return;
+	vb2_buffer_done(vb, VB2_BUF_STATE_QUEUED);
 }
 
 /* ------------------------------------------------------------- ioctl table */
@@ -515,6 +526,10 @@ struct pctv_glue *pctv_glue_create(struct usb_interface *intf,
 		.lock = &glue->lock,
 		.min_queued_buffers = 2,
 		.gfp_flags = GFP_KERNEL,
+		/* Without an explicit timestamp type vb2_queue_init() warns and
+		 * leaves the buffer timestamps as TIMESTAMP_UNKNOWN.
+		 */
+		.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
 	};
 
 	ret = vb2_queue_init(&glue->queue);

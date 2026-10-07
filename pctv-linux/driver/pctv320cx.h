@@ -151,6 +151,10 @@ void pctv_usb_fill_bulk_urb(struct urb *urb, struct usb_device *dev,
 u8 pctv_usb_endpoint_num(const struct usb_endpoint_descriptor *ep);
 bool pctv_usb_endpoint_is_in(const struct usb_endpoint_descriptor *ep);
 u32 pctv_usb_endpoint_maxpkt(const struct usb_endpoint_descriptor *ep);
+void *pctv_kmalloc(size_t size);
+void pctv_kfree(void *p);
+/* Mark an URB's transfer buffer as already DMA-mapped (usb_alloc_coherent). */
+void pctv_urb_use_coherent(struct urb *urb, dma_addr_t dma);
 
 /* gfp_t values, so the Rust side does not need the kernel's gfp macros. */
 unsigned int pctv_gfp_kernel(void);
@@ -167,7 +171,15 @@ void *pctv_glue_buffer_addr(struct vb2_buffer *vb);
 u32 pctv_glue_buffer_size(struct vb2_buffer *vb);
 struct vb2_buffer *pctv_glue_next_buffer(struct pctv_glue *glue);
 void pctv_glue_buffer_done(struct pctv_glue *glue, struct vb2_buffer *vb,
-			   u32 state, u32 length);
+			   u32 length);
+
+/*
+ * Give a buffer currently owned by the driver back to videobuf2 in QUEUED
+ * state.  Used when streaming stops while the deframer is halfway through a
+ * buffer, so the buffer is not left ACTIVE (videobuf2 warns and the buffer
+ * leaks otherwise).
+ */
+void pctv_glue_buffer_requeue(struct pctv_glue *glue, struct vb2_buffer *vb);
 
 /*
  * Streaming control, called from the Rust core.  @atomic is true when the

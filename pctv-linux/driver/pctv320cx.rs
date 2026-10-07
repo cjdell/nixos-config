@@ -156,6 +156,15 @@ const ACTIVE_PIXEL_BYTES: usize = 1440;
 /// comfortably more than the 2 s videobuf2 timeout.
 const NUM_URBS: usize = 8;
 const URB_BYTES: usize = 65536;
+/// Bulk-IN endpoint number that carries the analog capture stream (the
+/// in-tree dib0700 devices table uses stream endpoint 2 for this card;
+/// FINDINGS.md section 11.2: only 0x82 ever delivers).
+const CAPTURE_EP_NUM: u8 = 2;
+/// Staging buffer for the bulk-OUT writes.  The USB core refuses to DMA from
+/// the stack (hcd.c: transfer buffer is on stack) and from the vmalloc'd
+/// firmware blob, so every bulk-OUT payload is copied here first.  A firmware
+/// record is at most 4 + 255 + 1 bytes.
+const FW_BUF_BYTES: usize = 512;
 
 // TV standard selector.  The C glue translates between v4l2_std_id and this;
 // the card has no RF tuner, so it only picks the decoder's line/colour
@@ -178,8 +187,11 @@ const CID_CONTRAST: u32 = 0x009a0903;
 const CID_SATURATION: u32 = 0x009a0904;
 const CID_HUE: u32 = 0x009a0905;
 
-// videobuf2 buffer states (enum vb2_buffer_state).
-const VB2_BUF_STATE_DONE: u32 = 0;
+// videobuf2 buffer states are NOT mirrored here: the glue picks the state
+// itself (pctv_glue_buffer_done() always completes with VB2_BUF_STATE_DONE)
+// so the Rust side never has to know this kernel enum.  A hand-copied value
+// is what broke the first streaming run (it was 0 = DEQUEUED, and
+// vb2_buffer_done() then warned and returned the frames as ERROR).
 
 // ---------------------------------------------------------------------------
 // Driver state
@@ -190,6 +202,11 @@ const VB2_BUF_STATE_DONE: u32 = 0;
 struct Urb {
     urb: *mut bindings::urb,
     buffer: *mut u8,
+    /// DMA handle returned by usb_alloc_coherent() for @buffer.  It has to be
+    /// the one handed to usb_free_coherent(), and it has to be written into
+    /// the URB (URB_NO_TRANSFER_DMA_MAP) or the HCD maps the buffer a second
+    /// time and leaves a different address in transfer_dma.
+    dma: bindings::dma_addr_t,
     parent: *mut Pctv320cxInner,
 }
 
@@ -198,6 +215,7 @@ impl Urb {
         Self {
             urb: core::ptr::null_mut(),
             buffer: core::ptr::null_mut(),
+            dma: 0,
             parent: core::ptr::null_mut(),
         }
     }
@@ -220,6 +238,10 @@ struct Pctv320cxInner {
 
     /// Capture URB pool.
     urbs: [Urb; NUM_URBS],
+
+    /// DMA-safe staging buffer for the bulk-OUT writes (firmware records,
+    /// jumpram).  Allocated with the URB pool, freed with it.
+    fw_buf: *mut u8,
 
     /// Streaming state, read by the URB completion (softirq) and written by
     /// start/stop (process context).
@@ -309,10 +331,25 @@ impl Pctv320cxInner {
     }
 
     /// Is the bridge's microcontroller running?  A cold device (no firmware)
-    /// NACKs this request.
+    /// stalls this request.  Exactly the in-tree form: vendor IN, request
+    /// 0x15, wValue = wIndex = 0, 16 byte reply
+    /// (hw / rom / ram / fwtype versions).
     unsafe fn firmware_loaded(&self) -> bool {
-        let mut rx = [0u8; 4];
-        self.ctrl_rd(RQ_GET_VERSION, 0x0281, 0x0300, &mut rx) > 0
+        let mut rx = [0u8; 16];
+        let ret = self.ctrl_rd(RQ_GET_VERSION, 0, 0, &mut rx);
+        if ret < 0 {
+            kernel::pr_info!("GET_VERSION: errno {} - bridge is cold\n", ret);
+            false
+        } else {
+            kernel::pr_info!(
+                "GET_VERSION: hw 0x{:08x} rom 0x{:08x} ram 0x{:08x} fw 0x{:08x}\n",
+                u32::from_be_bytes([rx[0], rx[1], rx[2], rx[3]]),
+                u32::from_be_bytes([rx[4], rx[5], rx[6], rx[7]]),
+                u32::from_be_bytes([rx[8], rx[9], rx[10], rx[11]]),
+                u32::from_be_bytes([rx[12], rx[13], rx[14], rx[15]]),
+            );
+            true
+        }
     }
 
 
@@ -326,9 +363,12 @@ impl Pctv320cxInner {
         ])
     }
 
-    /// Bridge PLL: 72 MHz, clock output on, 2 x 24 = 48 (dib0700_ctrl_clock()).
+    /// Bridge PLL: 72 MHz, clock output on GP3
+    /// (dib0700_ctrl_clock(d, 72, 1) -> buf[1] = (en_pll<<7)|(pll_src<<6)|
+    /// (pll_range<<5)|(gp3<<4) = 0xb0, prediv 2, loopdiv 24, free_div 0,
+    /// scaler 0x4c).  This is the form `pctv_probe clock` proved on this card.
     unsafe fn set_clock(&self) -> c_int {
-        self.ctrl_wr(&[RQ_SET_CLOCK, 0xf0, 0x00, 0x02, 0x00, 0x18, 0x00, 0x00, 0x00, 0x4c])
+        self.ctrl_wr(&[RQ_SET_CLOCK, 0xb0, 0x00, 0x02, 0x00, 0x18, 0x00, 0x00, 0x00, 0x4c])
     }
 
     /// I2C bus timing, in kHz (dib0700_i2c_set_params()).
@@ -352,6 +392,15 @@ impl Pctv320cxInner {
     }
 
     /// ANALOG framing on the bulk-IN pipe (dib0700_enable_video()).
+    /// byte1 = (on<<4) | mode, byte2 = channel byte (0x01), byte3 = 0.
+    ///
+    /// The kernel/vendor only know mode 0 (MPEG2) and mode 1 ("analog"), but
+    /// mode 1 hands over just the active part of each line (1444-byte blocks,
+    /// 15.3 MB/s) and cannot carry a PAL signal in real time (27.0 MB/s), so
+    /// the bridge drops a third of the lines.  **Mode 2 (`0x12`) sends the
+    /// whole BT.656 line (EAV + blanking + SAV + active = 1728 bytes) at
+    /// 25.6 MB/s = ~95% of lines** - FINDINGS.md section 11.  The deframer
+    /// below is written for exactly that 1728-byte framing.
     unsafe fn enable_video(&self, mode: u8) -> c_int {
         self.ctrl_wr(&[RQ_ENABLE_VIDEO, mode, 0x01, 0x00])
     }
@@ -367,13 +416,23 @@ impl Pctv320cxInner {
     }
 
     /// Bulk OUT, used for the firmware records and the jumpram request.
+    ///
+    /// The payload goes through the driver's own DMA-safe staging buffer:
+    /// the bridge blob comes from request_firmware(), which for a 33 KiB
+    /// image hands back vmalloc memory, and the USB core refuses to DMA-map
+    /// that (usb_hcd_map_urb_for_dma: rejecting DMA map of vmalloc memory).
+    /// An on-stack buffer is refused too, so this cannot be a local array.
     unsafe fn bulk_write(&self, endpoint: u8, data: &[u8]) -> c_int {
+        if self.fw_buf.is_null() || data.len() > FW_BUF_BYTES {
+            return -EOVERFLOW;
+        }
+        core::ptr::copy_nonoverlapping(data.as_ptr(), self.fw_buf, data.len());
         let pipe = bindings::pctv_usb_sndbulkpipe(self.udev, endpoint);
         let mut actual = 0i32;
         bindings::usb_bulk_msg(
             self.udev,
             pipe,
-            data.as_ptr() as *mut c_void,
+            self.fw_buf as *mut c_void,
             data.len() as c_int,
             &mut actual,
             2000,
@@ -433,13 +492,32 @@ impl Pctv320cxInner {
         ret
     }
 
-    /// Read one CX25843 register.  The 16-bit sub-address travels in wIndex.
+    /// Read one CX25843 register.  Two I2C transactions behind one gate:
+    /// a sub-address write (start, **no stop**) followed by the read (repeated
+    /// start implied, stop, 1 byte).  wIndex carries the bus byte (0x10 =
+    /// frontend bus), *not* the register - the register only travels in the
+    /// sub-address write.  This is the form `pctv_probe cxr` proved on this
+    /// card; putting the register in wIndex makes the firmware look at the
+    /// EEPROM bus instead.
     unsafe fn cx_r(&self, reg: u16) -> c_int {
-        let mut out = [0u8; 1];
-        let value: u16 = (((I2C_CTRL_START | I2C_CTRL_STOP) as u16 | 1) << 8)
-            | ((CX_I2C_ADDR << 1) as u16);
+        let mut record = [0u8; 6];
+        record[0] = RQ_NEW_I2C_WRITE;
+        record[1] = (CX_I2C_ADDR << 1) as u8;
+        record[2] = I2C_CTRL_START | 2; // start, no stop, 2 address bytes
+        record[3] = (I2C_BUS_NEW << 4) & 0x30;
+        record[4] = (reg >> 8) as u8;
+        record[5] = (reg & 0xff) as u8;
         self.i2c_gate(true, CX_I2C_ADDR);
-        let ret = self.ctrl_rd(RQ_NEW_I2C_READ, value, reg, &mut out);
+        let ret = self.ctrl_wr(&record);
+        if ret < 0 {
+            self.i2c_gate(false, 0);
+            return ret;
+        }
+        let mut out = [0u8; 1];
+        let value: u16 = (((I2C_CTRL_STOP | 1) as u16) << 8)
+            | ((CX_I2C_ADDR << 1) as u16);
+        let index: u16 = ((I2C_BUS_NEW << 4) & 0x30) as u16;
+        let ret = self.ctrl_rd(RQ_NEW_I2C_READ, value, index, &mut out);
         self.i2c_gate(false, 0);
         if ret < 0 {
             ret
@@ -475,35 +553,52 @@ impl Pctv320cxInner {
             return Ok(());
         }
 
-        let dev = bindings::pctv_dev_get_drvdata(self.intf as *mut bindings::device)
-            as *mut bindings::device;
+        // The firmware loader keys its search (and its devm bookkeeping) off
+        // the interface's struct device - not off the interface itself, and
+        // not off the driver cookie that drvdata will hold once probe
+        // finishes (which has not happened yet at this point).
+        let dev = &mut (*self.intf).dev as *mut bindings::device;
         let fw = bindings::pctv_request_fw(dev, BRIDGE_FIRMWARE.as_char_ptr() as *const i8);
         if fw.is_null() {
             return Err(Error::from_errno(-ENODEV));
         }
         let blob =
             unsafe { core::slice::from_raw_parts((*fw).data, (*fw).size as usize) };
+        kernel::pr_info!("bridge firmware blob: {} bytes\n", blob.len());
 
         let mut pos = 0usize;
+        let mut records = 0usize;
         while let Some(len) = fw_record_len(blob, pos) {
             let rec = &blob[pos..pos + len + 5];
-            if self.bulk_write(EP_FW_OUT, rec) < 0 {
+            let ret = self.bulk_write(EP_FW_OUT, rec);
+            if ret < 0 {
+                kernel::pr_warn!(
+                    "fw record at {} ({} bytes) failed: errno {}\n",
+                    pos,
+                    rec.len(),
+                    ret
+                );
                 bindings::pctv_release_fw(dev, fw);
                 return Err(Error::from_errno(-EIO));
             }
+            records += 1;
             if rec[3] == 0x01 {
                 break;
             }
             pos += len + 5;
         }
+        kernel::pr_info!("downloaded {} firmware records ({} bytes)\n", records, pos);
 
         // jumpram -> 0x70000000, then give the 8051 time to start.
-        if self.bulk_write(EP_FW_OUT, &[0x08, 0x00, 0x00, 0x00, 0x70, 0x00, 0x00, 0x00]) < 0 {
+        let ret = self.bulk_write(EP_FW_OUT, &[0x08, 0x00, 0x00, 0x00, 0x70, 0x00, 0x00, 0x00]);
+        if ret < 0 {
+            kernel::pr_warn!("jumpram request failed: errno {}\n", ret);
             return Err(Error::from_errno(-EIO));
         }
         bindings::pctv_release_fw(dev, fw);
         fsleep(time::Delta::from_millis(500));
         if !self.firmware_loaded() {
+            kernel::pr_warn!("bridge did not answer GET_VERSION after jumpram\n");
             return Err(Error::from_errno(-EIO));
         }
         Ok(())
@@ -515,7 +610,13 @@ impl Pctv320cxInner {
         self.set_clock();
         self.set_i2c_param(100);
 
-        self.gpio(6, 1, 0);
+        /* GPIO6 is the bridge's power/enable line (the in-tree driver leaves
+         * the device "on GPIO6", and its board init for this family is
+         * GPIO6=1, 9=1, 4=1, 7=1, 10 pulse, [0=1]).  The Windows trace's
+         * first write is 6=0, but that is the *pre-download* pair; the
+         * post-download sequence that actually runs the chip drives it high.
+         */
+        self.gpio(6, 1, 1);
         fsleep(time::Delta::from_millis(20));
         self.gpio(9, 1, 1);
         self.gpio(4, 1, 1);
@@ -551,6 +652,7 @@ const CX_REG_HBLANK: u16 = 0x470;
 /// CX25843 register: standard select (0x49f).
 const CX_REG_STD: u16 = 0x49f;
 /// CX25843 registers: status (0x40d/0x40e: bit 0x20 of 0x40e = signal detect).
+const CX_REG_STATUS_A: u16 = 0x40d;
 const CX_REG_STATUS_B: u16 = 0x40e;
 const CX_STATUS_SIGNAL: u8 = 0x20;
 /// CX25843 registers: parallel video output enable (0x115/0x116).
@@ -638,8 +740,7 @@ impl Pctv320cxInner {
     /// Load the decoder's microcode through the bridge's I2C tunnel.  The
     /// blob is streamed into the 0x802 window in 46-byte bursts.
     unsafe fn load_decoder_firmware(&self) -> Result {
-        let dev = bindings::pctv_dev_get_drvdata(self.intf as *mut bindings::device)
-            as *mut bindings::device;
+        let dev = &mut (*self.intf).dev as *mut bindings::device;
         let fw = bindings::pctv_request_fw(dev, DECODER_FIRMWARE.as_char_ptr() as *const i8);
         if fw.is_null() {
             return Err(Error::from_errno(-ENODEV));
@@ -810,6 +911,52 @@ impl Pctv320cxInner {
         v >= 0 && ((v as u8) & CX_STATUS_SIGNAL) != 0
     }
 
+    /// Log the decoder's lock state (0x40d = detected format, 0x40e bit 0x20
+    /// = video signal present).  0x40e only settles once the colour killer
+    /// has made up its mind, so poll briefly before reporting.  Without a
+    /// lock the bridge has nothing to stream - a locked state is a
+    /// prerequisite for frames, and the input connector on these cards is
+    /// known to be intermittent (FINDINGS.md section 10).
+    unsafe fn log_signal_state(&self, stage: &str) -> bool {
+        let mut a = 0;
+        let mut b = 0;
+        let mut locked = false;
+        for _ in 0..10 {
+            a = self.cx_r(CX_REG_STATUS_A);
+            b = self.cx_r(CX_REG_STATUS_B);
+            locked = b >= 0 && ((b as u8) & CX_STATUS_SIGNAL) != 0;
+            if locked {
+                break;
+            }
+            fsleep(time::Delta::from_millis(20));
+        }
+        if a < 0 || b < 0 {
+            kernel::pr_warn!(
+                "signal check ({}): decoder did not answer (0x40d errno {}, 0x40e errno {})\n",
+                stage,
+                a,
+                b
+            );
+            return false;
+        }
+        if locked {
+            kernel::pr_info!(
+                "signal check ({}): 0x40d = 0x{:02x} 0x40e = 0x{:02x} -> LOCKED\n",
+                stage,
+                a as u8,
+                b as u8
+            );
+        } else {
+            kernel::pr_warn!(
+                "signal check ({}): 0x40d = 0x{:02x} 0x40e = 0x{:02x} -> NO SIGNAL (capture will be empty)\n",
+                stage,
+                a as u8,
+                b as u8
+            );
+        }
+        locked
+    }
+
     /// The DiB7000P demod shares the bridge's 8-bit parallel bus with the
     /// decoder.  Unless its output drivers are tri-stated the two drivers
     /// fight over the bus and nothing reaches the FIFO: this is the one step
@@ -837,12 +984,24 @@ impl Pctv320cxInner {
     /// Full decoder bring-up: microcode, standard, input, controls.
     unsafe fn decoder_setup(&self) -> Result {
         let id = self.cx_r(0x100);
+        if id < 0 {
+            kernel::pr_warn!("CX25843 did not answer the I2C tunnel (reg 0x100: errno {})\n", id);
+        } else {
+            kernel::pr_info!("CX25843 chip id (reg 0x100) = 0x{:02x}\n", id);
+        }
         if id != 0x34 {
+            kernel::pr_warn!("CX25843 not detected (reg 0x100 = 0x{:02x})\n", id);
+        } else {
+            // 0x34 is the CX25843 chip id: the part is there, so (re)load the
+            // microcode and program the post-firmware registers.  The
+            // microcode lives in RAM and is lost on power-cycle, so this runs
+            // on every probe (same as the in-tree cx25840 driver).
             self.load_decoder_firmware()?;
             self.decoder_post_firmware();
         }
         self.std_setup(self.std_sel);
         self.input_setup(self.input);
+        self.log_signal_state("bring-up");
         Ok(())
     }
 }
@@ -856,24 +1015,26 @@ const SAV0: u8 = 0xff;
 const SAV1: u8 = 0x00;
 const SAV2: u8 = 0x00;
 /// Status byte bit 0 is H: 0 for a start-of-active-video switch, 1 for the
-/// end-of-active-video switch.
+/// end-of-active-video switch.  Bit 6 is F: which field this line belongs to.
 const SAV_STATUS_H: u8 = 0x01;
+const SAV_STATUS_F: u8 = 0x40;
 
 /// Deframer state, only touched from the URB completion (softirq) and reset
 /// when streaming starts.
 ///
 /// The CX25843 as configured here emits a valid SAV switch per line but does
-/// not put a usable line number in the status word, so lines are placed in
-/// arrival order: the first `lines_per_field` lines of a frame are the first
-/// field, the next ones the second field.  The decoder trims blanking, so
+/// not put a usable line number in the status word.  The F bit of the status
+/// byte is reliable though, so each line goes to its field's interleaved slot
+/// (even rows = field 0, odd rows = field 1) - which is what
+/// V4L2_FIELD_INTERLACED means to userspace.  The decoder trims blanking, so
 /// every line it emits is an active line.
 struct Deframer {
     /// Buffer currently being filled (from the vb2 handoff), and its address.
     vb: *mut bindings::vb2_buffer,
     addr: *mut u8,
     size: u32,
-    /// Active lines written into the current buffer.
-    lines: u32,
+    /// Active lines written so far, per field (0 = even/top field).
+    lines: [u32; 2],
     lines_needed: u32,
 }
 
@@ -883,7 +1044,7 @@ impl Deframer {
             vb: core::ptr::null_mut(),
             addr: core::ptr::null_mut(),
             size: 0,
-            lines: 0,
+            lines: [0, 0],
             lines_needed: 0,
         }
     }
@@ -930,10 +1091,13 @@ impl Pctv320cxInner {
                 }
                 d.addr = bindings::pctv_glue_buffer_addr(d.vb) as *mut u8;
                 d.size = bindings::pctv_glue_buffer_size(d.vb);
-                d.lines = 0;
+                d.lines = [0, 0];
             }
 
-            let off = (d.lines as usize) * ACTIVE_PIXEL_BYTES;
+            // Even rows are field 0 (F=0), odd rows field 1 (F=1).
+            let field = ((data[pos + 3] & SAV_STATUS_F) != 0) as usize;
+            let line = d.lines[field] as usize;
+            let off = (2 * line + field) * ACTIVE_PIXEL_BYTES;
             if d.addr != core::ptr::null_mut() && off + ACTIVE_BYTES <= d.size as usize {
                 core::ptr::copy_nonoverlapping(
                     data.as_ptr().add(pos + SYNC_BYTES),
@@ -941,14 +1105,13 @@ impl Pctv320cxInner {
                     ACTIVE_BYTES,
                 );
             }
-            d.lines += 1;
-            if d.lines >= d.lines_needed {
-                bindings::pctv_glue_buffer_done(
-                    glue,
-                    d.vb,
-                    VB2_BUF_STATE_DONE,
-                    off as u32 + ACTIVE_BYTES as u32,
-                );
+            d.lines[field] += 1;
+            if d.lines[0] + d.lines[1] >= d.lines_needed {
+                // Report the whole frame, not just up to the last line that
+                // arrived: the fields interleave, so the last line written is
+                // not necessarily the last row of the buffer, and a variable
+                // bytesused makes raw dumps impossible to frame-align.
+                bindings::pctv_glue_buffer_done(glue, d.vb, d.size);
                 d.vb = core::ptr::null_mut();
                 d.addr = core::ptr::null_mut();
             }
@@ -968,6 +1131,12 @@ impl Pctv320cxInner {
 impl Pctv320cxInner {
     /// Allocate the capture URBs and their coherent buffers.
     unsafe fn alloc_urbs(&mut self) -> Result {
+        if self.fw_buf.is_null() {
+            self.fw_buf = bindings::pctv_kmalloc(FW_BUF_BYTES) as *mut u8;
+            if self.fw_buf.is_null() {
+                return Err(Error::from_errno(-ENOMEM));
+            }
+        }
         for i in 0..NUM_URBS {
             let urb = bindings::usb_alloc_urb(0, bindings::pctv_gfp_kernel());
             if urb.is_null() {
@@ -987,6 +1156,7 @@ impl Pctv320cxInner {
             self.urbs[i] = Urb {
                 urb,
                 buffer,
+                dma: dma as bindings::dma_addr_t,
                 parent: core::ptr::null_mut(),
             };
         }
@@ -1004,21 +1174,30 @@ impl Pctv320cxInner {
                     self.udev,
                     URB_BYTES,
                     u.buffer as *mut c_void,
-                    (*u.urb).transfer_dma,
+                    u.dma,
                 );
                 u.buffer = core::ptr::null_mut();
             }
             bindings::usb_free_urb(u.urb);
             u.urb = core::ptr::null_mut();
         }
+        if !self.fw_buf.is_null() {
+            bindings::pctv_kfree(self.fw_buf as *mut c_void);
+            self.fw_buf = core::ptr::null_mut();
+        }
     }
 
     /// Arm the bridge and submit the capture URBs.
     unsafe fn stream_start(&mut self) -> c_int {
-        // ANALOG framing (0x12): the bridge pushes the decoder's BT.656 bytes
-        // straight into the bulk-IN pipe.  MPEG framing (0x11) would run them
-        // through the TS multiplexer instead and produce nothing.
+        // ANALOG framing, MODE 2 (0x12): whole BT.656 lines (1728 bytes) at
+        // ~25.6 MB/s.  Mode 1 (0x11, what the vendor/kernel use) delivers only
+        // the active part of each line and cannot sustain PAL; mode 0 (0x10)
+        // runs the data through the TS multiplexer and yields no BT.656 at
+        // all.  See FINDINGS.md section 11.
         self.release_channels();
+        if !self.log_signal_state("stream-start") {
+            kernel::pr_warn!("arming the bridge anyway, but no signal is locked\n");
+        }
         if self.enable_video(0x12) < 0 {
             return -EIO;
         }
@@ -1042,6 +1221,7 @@ impl Pctv320cxInner {
                 Some(Pctv320cxInner::urb_complete),
                 ctx as *mut c_void,
             );
+            bindings::pctv_urb_use_coherent(urb, self.urbs[i].dma);
             if bindings::usb_submit_urb(urb, bindings::pctv_gfp_kernel()) < 0 {
                 break;
             }
@@ -1051,6 +1231,11 @@ impl Pctv320cxInner {
             self.stream_stop();
             return -EIO;
         }
+        kernel::pr_info!(
+            "streaming on endpoint 0x{:02x}: {} URBs submitted\n",
+            self.ep_in,
+            submitted
+        );
         0
     }
 
@@ -1064,6 +1249,17 @@ impl Pctv320cxInner {
         }
         // 0x0f/0x00: streaming off.
         self.enable_video(0x00);
+
+        // If the deframer was halfway through a buffer, hand it back to
+        // videobuf2 in QUEUED state - otherwise it stays ACTIVE forever and
+        // videobuf2 warns ("stop_streaming operation is leaving buffer N in
+        // active state") and the buffer leaks.
+        let mut d = self.deframer.lock();
+        if !d.vb.is_null() {
+            bindings::pctv_glue_buffer_requeue(self.glue, d.vb);
+            d.vb = core::ptr::null_mut();
+            d.addr = core::ptr::null_mut();
+        }
     }
 
     /// Bulk-IN completion (softirq context).
@@ -1234,6 +1430,7 @@ unsafe fn find_bulk_in_ep(intf: *mut bindings::usb_interface) -> c_int {
     }
     let count = (*alt).desc.bNumEndpoints as usize;
     let eps = core::slice::from_raw_parts((*alt).endpoint, count);
+    let mut first: c_int = -ENODEV;
     for ep in eps {
         if !bindings::pctv_usb_endpoint_is_in(&ep.desc) {
             continue;
@@ -1242,9 +1439,18 @@ unsafe fn find_bulk_in_ep(intf: *mut bindings::usb_interface) -> c_int {
             continue;
         }
         let num = bindings::pctv_usb_endpoint_num(&ep.desc);
-        return (num | 0x80) as c_int;
+        // The 320cx exposes three bulk-IN endpoints (0x81/0x82/0x83) and only
+        // **EP 2 (0x82)** ever carries the capture stream - FINDINGS.md
+        // section 11.2, and the in-tree dib0700 devices table (stream
+        // endpoint 2).  Reading 0x81 simply never completes a URB.
+        if num == CAPTURE_EP_NUM {
+            return (num | 0x80) as c_int;
+        }
+        if first < 0 {
+            first = (num | 0x80) as c_int;
+        }
     }
-    -ENODEV
+    first
 }
 
 /// Static description of the device for the C glue.
@@ -1289,7 +1495,7 @@ unsafe fn probe(intf: *mut bindings::usb_interface) -> Result {
     }
     let ep_in = find_bulk_in_ep(intf);
     if ep_in < 0 {
-        kernel::pr_warn!("pctv320cx: no bulk-IN endpoint found\n");
+        kernel::pr_warn!("no bulk-IN endpoint found\n");
         return Err(Error::from_errno(ep_in));
     }
 
@@ -1300,6 +1506,7 @@ unsafe fn probe(intf: *mut bindings::usb_interface) -> Result {
             glue: core::ptr::null_mut(),
             ep_in: ep_in as u8,
             urbs: [const { Urb::empty() }; NUM_URBS],
+            fw_buf: core::ptr::null_mut(),
             streaming: Atomic::new(false),
             dropped: Atomic::new(0),
             deframer <- new_spinlock!(Deframer::new(), "pctv320cx-deframe"),
@@ -1353,11 +1560,9 @@ unsafe fn probe(intf: *mut bindings::usb_interface) -> Result {
         &mut (*intf).dev as *mut bindings::device,
         cookie,
     );
-    kernel::pr_info!("pctv320cx: Pinnacle PCTV 320cx analog capture ready\n");
+    kernel::pr_info!("Pinnacle PCTV 320cx analog capture ready\n");
     if let Err(e) = hw {
-        kernel::pr_warn!(
-            "pctv320cx: decoder bring-up failed (is v4l-cx25840.fw installed?)\n"
-        );
+        kernel::pr_warn!("analog bring-up incomplete - capture will stay dark\n");
         let _ = e;
     }
 
@@ -1367,9 +1572,22 @@ unsafe fn probe(intf: *mut bindings::usb_interface) -> Result {
 }
 
 unsafe fn probe_hardware(inner: &mut Pctv320cxInner) -> Result {
-    inner.load_bridge_firmware()?;
-    inner.board_init()?;
-    inner.decoder_setup()?;
+    // Stage by stage: a single errno at the end of probe cannot tell a dead
+    // I2C tunnel apart from a missing firmware file, and both look the same
+    // in the boot log.
+    if let Err(e) = inner.load_bridge_firmware() {
+        kernel::pr_warn!("DiB0700 firmware download failed (errno {})\n", e.to_errno());
+        return Err(e);
+    }
+    kernel::pr_info!("DiB0700 bridge microcontroller is running\n");
+    if let Err(e) = inner.board_init() {
+        kernel::pr_warn!("board init failed (errno {})\n", e.to_errno());
+        return Err(e);
+    }
+    if let Err(e) = inner.decoder_setup() {
+        kernel::pr_warn!("CX25843 bring-up failed (errno {})\n", e.to_errno());
+        return Err(e);
+    }
     inner.demod_release_bus();
     inner.decoder_ready = true;
     Ok(())
@@ -1420,7 +1638,7 @@ impl kernel::Module for Pctv320cx {
     fn init(_module: &'static ThisModule) -> Result<Self> {
         let ret = unsafe { bindings::pctv_usb_register() };
         if ret < 0 {
-            kernel::pr_err!("pctv320cx: USB driver registration failed ({})\n", ret);
+            kernel::pr_err!("USB driver registration failed ({})\n", ret);
             return Err(Error::from_errno(ret));
         }
         Ok(Pctv320cx {})
