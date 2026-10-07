@@ -49,8 +49,14 @@ in
   # --- Batch transcription job (timer-driven) ---------------------------------
   systemd.services.frigate-transcribe = {
     description = "VAD + whisper transcription of Frigate camera recordings";
-    after = [ "network-online.target" "postgresql.service" ];
-    wants = [ "network-online.target" "postgresql.service" ];
+    after = [
+      "network-online.target"
+      "postgresql.service"
+    ];
+    wants = [
+      "network-online.target"
+      "postgresql.service"
+    ];
     serviceConfig = {
       Type = "oneshot";
       User = "frigate-whisper";
@@ -74,7 +80,10 @@ in
       FW_MAX_RUN_SECONDS = "1500";
     };
     # ffmpeg/ffprobe + whisper.cpp binaries are not in the default service PATH
-    path = [ pkgs.ffmpeg-headless pkgs.whisper-cpp ];
+    path = [
+      pkgs.ffmpeg-headless
+      pkgs.whisper-cpp
+    ];
   };
 
   systemd.timers.frigate-transcribe = {
@@ -92,8 +101,14 @@ in
   systemd.services.frigate-whisper-web = {
     description = "frigate-whisper web UI";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network-online.target" "postgresql.service" ];
-    wants = [ "network-online.target" "postgresql.service" ];
+    after = [
+      "network-online.target"
+      "postgresql.service"
+    ];
+    wants = [
+      "network-online.target"
+      "postgresql.service"
+    ];
     serviceConfig = {
       User = "frigate-whisper";
       Group = "users";

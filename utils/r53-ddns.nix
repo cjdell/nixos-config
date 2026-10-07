@@ -2,7 +2,11 @@
 { pkgs, route53Creds }:
 
 # Define the function that takes hostname, domain, and zone as arguments.
-{ hostname, domain, zone }:
+{
+  hostname,
+  domain,
+  zone,
+}:
 let
   serviceName = "r53-ddns-${zone}";
 in

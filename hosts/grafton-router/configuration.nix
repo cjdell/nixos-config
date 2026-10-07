@@ -17,10 +17,12 @@
   # tsc + vite) risked the OOM killer taking out Frigate/HA/ClickHouse. The
   # kernel now swaps cold pages under pressure instead. `size` (MiB) makes
   # NixOS create the file at boot if it is missing or the wrong size.
-  swapDevices = [ {
-    device = "/swapfile";
-    size = 8192;
-  } ];
+  swapDevices = [
+    {
+      device = "/swapfile";
+      size = 8192;
+    }
+  ];
 
   # Bootloader.
   boot.loader.systemd-boot.enable = true;

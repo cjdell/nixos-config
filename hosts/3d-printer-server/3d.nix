@@ -82,8 +82,14 @@
   # Moonraker has no printer). Order after the device unit and give the retries a
   # window wide enough to survive a printer that is powered off or slow to boot.
   systemd.services."podman-klipper" = {
-    wants = [ "dev-ttyACM0.device" "dev-ttyUSB0.device" ];
-    after = [ "dev-ttyACM0.device" "dev-ttyUSB0.device" ];
+    wants = [
+      "dev-ttyACM0.device"
+      "dev-ttyUSB0.device"
+    ];
+    after = [
+      "dev-ttyACM0.device"
+      "dev-ttyUSB0.device"
+    ];
     unitConfig = {
       StartLimitIntervalSec = 300;
       StartLimitBurst = 30;
