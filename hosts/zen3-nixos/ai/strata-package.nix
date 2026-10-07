@@ -47,17 +47,43 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.1.40.2";
+  version = "0.1.40.3";
 
-  # v0.1.40.2 (2026-10-07).  NOTE: upstream rewrote this repo's history on
+  # v0.1.40.3 (2026-10-07).  NOTE: upstream rewrote this repo's history on
   # 2026-10-06 (the 0.1.40.1 release notes say so), so any pin older than that has
   # no common ancestor with main and GitHub's compare API cannot diff them - diff
   # two trees instead.  The old tag v0.1.39 is also not 6f32ec0 (it is a1641e9f).
+  #
+  # 0.1.40.2 -> 0.1.40.3 touches nothing we patch (diff the two trees: 28 files,
+  # of which the ones that matter here are):
+  #   * src/core/mtp.cpp - #1357: native_router_top10 is now guarded by
+  #     `g.n_expert == 512 && K == 10` and falls back to the generic router_top10
+  #     otherwise (the native kernel reads 512 floats a row).  Our model IS
+  #     512-expert / top-10, so the native path stays and nothing changes for us;
+  #     it is a correctness fix for other packs.
+  #   * src/program/generate.cpp - a HIP/Linux diagnostic when no device is
+  #     visible and /dev/kfd is not openable (missing render/video group), and the
+  #     #1376 WDDM auto-reserve floor, which is `#if defined(_WIN32)` and so does
+  #     not apply to this Linux build.
+  #   * tools/strata_tokenizer.py - #1385: `_bpe` caches `self.ranks.get` in a
+  #     local after one interpreter saw `self` arrive as an int ('int' object has
+  #     no attribute 'ranks').  Worth having: we run this on CPython 3.14.7.
+  #   * serve/web/app.js - #1392: a turn with no answer text (reasoning only, or a
+  #     stop before the first content token) is sent back as an assistant turn with
+  #     reasoning_content, so the web UI's history keeps alternating.  Relevant to
+  #     the thinking-only turns seen in the #879 incidents.
+  #   * setup.py / tools/hip/* / sycl/* / docs - Windows packaging, Intel Arc and
+  #     setup menus; not on this build path.
+  # `serve/server.py`, `src/core/verify.cpp`, `src/kernels/cuda/sampler.cu`,
+  # `src/kernels/cuda/iq_kernels.cu`, `src/kernels/cuda/kv_q8.cu` and
+  # `src/prefill/kernels.cu` are byte-identical to 0.1.40.2, so `patches`, the
+  # postPatch clamps and the installPhase rewrites all still apply unchanged.
+  # The ggml pin is unchanged too (setup.py:166 LLAMA_CPP_COMMIT = 3cf03257...).
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a";
-    hash = "sha256-NCOHJF8L32g67h8S4XY9uOABAKEoqapGqYLUEoiVHME=";
+    rev = "d5ea7133741e67743c0e886bb426c0ce8d69cf6c";
+    hash = "sha256-DWjDxgvIkwNDGyl+bN/UOoAtPtKtveVQVTcNaOVvTOk=";
   };
 
   nativeBuildInputs = [
@@ -98,11 +124,14 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Local HIP port of the upstream #879 finiteness instrumentation + guard
   # (gist 66419118nnn/7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact
-  # pin e8ca9afd (v0.1.40.2) on 2026-10-07: 3 hunks had drifted - 2 in verify.cpp
-  # (the window-inputs comment is now two lines; a new `if (inputs_pending)` join
-  # block sits between q8_attn and `stamp(l, 1, grp)`) and the sampler.cu hunk,
-  # whose `coupled_check("coupled_draft merge")` anchor is no longer at EOF (new
-  # functions follow it), so its additions moved to the file's closing namespace.
+  # pin e8ca9afd (v0.1.40.2) on 2026-10-07; it still applies to d5ea7133
+  # (v0.1.40.3) with --fuzz=0 unchanged, because verify.cpp, sampler.cu and
+  # iq_kernels.cu did not move between them.  3 hunks had drifted back then: 2 in
+  # verify.cpp (the window-inputs comment is now two lines, and a new
+  # `if (inputs_pending)` join block sits between q8_attn and `stamp(l, 1, grp)`),
+  # and the sampler.cu hunk, whose `coupled_check("coupled_draft merge")` anchor is
+  # no longer at EOF (new functions follow it), so its additions moved to the
+  # file's closing namespace.
   # The other 10 hunks applied with pure offsets and the added lines are
   # byte-identical to the 0.1.40.1 diff.  Regenerated from the patched tree, so
   # every hunk now applies with --fuzz=0; do not re-apply the old file with fuzz
@@ -127,8 +156,9 @@ stdenv.mkDerivation (finalAttrs: {
   # degeneracy the guard in serve/server.py exists to end (upstream #606;
   # ggml-org/llama.cpp#23606 is the same defect).
   #
-  # STATUS ON 0.1.40.2 (checked against the tree, not the changelog): the two sites
-  # our 0.1.39 build clamped itself are FIXED UPSTREAM in 0.1.40 ("the fused SwiGLU
+  # STATUS ON 0.1.40.3 (checked against the tree, not the changelog; the three sites
+  # below are byte-identical to 0.1.40.2, where the same check was first done): the two
+  # sites our 0.1.39 build clamped itself are FIXED UPSTREAM in 0.1.40 ("the fused SwiGLU
   # q8_1 quantizers keep their scale finite") - native_mmvq.cu
   # native_swiglu_quantize_q8_1_kernel (line 172) and the iq_kernels.cu fused gate/up
   # block store (line 3342) both use q8_1_finite/q8_1_quant/q8_1_ds now.  Those two

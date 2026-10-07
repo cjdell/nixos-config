@@ -37,9 +37,9 @@ When IQ3_S is trusted, reclaim the old files with
 shard 2 is a hardlink, so unlinking it frees nothing). It refuses unless the
 engine is live and serving IQ3_S, and defaults to a dry run.
 
-Upstream pinned: **v0.1.40.2**, rev `e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a`
-(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-07 from v0.1.40.1
-(`82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`). It builds its own ggml from a
+Upstream pinned: **v0.1.40.3**, rev `d5ea7133741e67743c0e886bb426c0ce8d69cf6c`
+(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-08 from v0.1.40.2
+(`e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a`). It builds its own ggml from a
 pinned llama.cpp (`3cf03257f219afbe7334045ff7c6a06ac68c627d`) — **unchanged by
 0.1.40 and 0.1.40.2** (`setup.py:165 LLAMA_CPP_COMMIT`), so `strata-package.nix`'s
 `llama` fetch stays as it is.
@@ -144,6 +144,76 @@ to us, read off the tree:
   cache 13,104 experts / 24.87 GiB, `ready` in 26 s, `/v1/models` 200, and a
   57-token prompt decoded at 47.9 tok/s with 6/6 drafts accepted. No
   `verify: non-finite logits` fire on the first requests.
+
+## 0.1.40.3 (2026-10-08)
+
+Pinned `d5ea7133` (v0.1.40.3), built
+`/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3`. A small hotfix on
+top of 0.1.40.2 — 28 files differ, and **none of them is a file we patch**:
+`serve/server.py`, `src/core/verify.cpp`, `src/kernels/cuda/sampler.cu`,
+`src/kernels/cuda/iq_kernels.cu`, `src/kernels/cuda/kv_q8.cu` and
+`src/prefill/kernels.cu` are byte-identical between the two tags. So
+`strata-nan-guard.diff` still applies with `--fuzz=0` unchanged (checked against
+the 0.1.40.3 tree), every `postPatch` clamp target is still at the same line
+(`iq_kernels.cu:2326-2330`, `kv_q8.cu:55`, `prefill/kernels.cu:1340`) and both
+`installPhase` serve strings are still at `serve/server.py:4741` / `:4749`. The
+ggml pin is unchanged (`setup.py:166 LLAMA_CPP_COMMIT = 3cf03257…`), so the
+`llama` fetch in `strata-package.nix` stays as it is. Nothing was re-based, and
+no clamp was dropped or added — upstream still writes `amax / 127` to fp16
+unclamped at all three sites.
+
+What changed that we care about:
+
+- **#1357** (`src/core/mtp.cpp`): `native_router_top10` is now called only when
+  `g.n_expert == 512 && K == 10`, else the generic `router_top10` (the native
+  kernel reads 512 floats a row). Our pack IS 512-expert / top-10, so nothing
+  changes here — but 0.1.40.2 would have run that kernel on any other pack's MTP
+  draft layer.
+- **#1385** (`tools/strata_tokenizer.py`): `_bpe` now caches `self.ranks.get` in a
+  local, after CPython 3.14.4 was seen handing that frame an int for `self`
+  (`'int' object has no attribute 'ranks'`). We run this Python layer on CPython
+  3.14.7, so worth having.
+- **#1392** (`serve/web/app.js`): a turn with no answer text (reasoning only, or a
+  stop before the first content token) goes back in the history as an assistant
+  turn with `reasoning_content`, so the web UI's history keeps alternating — the
+  shape of the thinking-only turns the #879 incidents produced.
+- Windows-only: #1376 (on a 16 GiB+ HIP card under WDDM an auto expert cache now
+  keeps a 2560 MiB floor) and #461 (copy the HIP runtime's whole DLL closure next
+  to the exe). On Linux `generate.cpp` now says "no GPU is visible and this user
+  cannot open /dev/kfd" instead of blaming another program for the VRAM.
+- **#879 is still open upstream** (last maintainer update 2026-10-07: could not
+  reproduce, asking reporters to retry on 0.1.40), so the local finiteness guard
+  stays, and so do the clamps.
+
+Verified in the built package: the binary prints `engine=0.1.40.3`, carries
+`verify: non-finite logits` and the audit symbols (`record_first_nonfinite`,
+`native_stage_audit_alloc/layer/get`), and the installed `serve/server.py` has
+both `server error: ` prefixes at 4741/4749.
+
+**Build gotcha:** the first build of 0.1.40.3 died with a gcc ICE —
+`free(): invalid next size (normal)` / `during IPA pass: icf` /
+`src/core/expert_source.cpp:4016:1: internal compiler error: Aborted` — while
+`/` was at 100 % full. A plain retry with space freed built clean, and gcc is
+16.2.0 in both nixpkgs pins, so read that ICE as disk pressure / a flaky
+cc1plus, not a reason to touch the toolchain.
+
+**Not switched on the live service yet**: `strata` still runs
+`/nix/store/v63bhabzfxwg6i8hkx8q93rb9r0q0jf9-strata-0.1.40.2/bin/strata`
+(pid 903061 since 2026-10-07 15:35). Deploy = `sudo nixos-rebuild switch --flake .`
+(zen3-nixos has autoRollback commented out — no `nixos-confirm`), then check
+`systemctl show strata -p ExecStart` and
+`readlink /proc/$(pgrep -f '[b]in/strata --serve')/exe`.
+
+## nixpkgs 26.11.20261006 (2026-10-08)
+
+`nix flake update nixpkgs`: `a7868a72…` → `151fa4e8…` (the nixos-unstable branch
+head as of 2026-10-06 04:29 UTC, so this is current, not a lagging channel).
+Nothing relevant moved for us: ROCm is still **7.2.3**, gcc **16.2.0**, cmake
+**4.4.3**, python **3.14.7**. All 22 `nixosConfigurations` still evaluate, and the
+zen3-nixos toplevel needed only 21 derivations built + 22 fetched (30 MiB —
+curl/openssl/krb5/libssh2/nghttp2 refreshes plus our own strata and config
+units), i.e. the bump is cheap on this host. Other hosts were evaluated but not
+built.
 
 ## Why llama-swap is off
 

@@ -416,6 +416,22 @@ per-window copy on the decode hot path forever if nothing fires. Our guard's GPU
 flag is the cheap equivalent; set `STRATA_DBG_NAN=1` only for a deliberate diagnostic
 run.
 
+## Update 2026-10-08: 0.1.40.2 → 0.1.40.3, nothing we rely on moved
+
+Re-checked against the `v0.1.40.3` tree (`d5ea7133`, built
+`/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3`; live engine is still
+0.1.40.2 until the next switch). 28 files differ from 0.1.40.2 and **none of them is a
+patched file**: `verify.cpp`, `sampler.cu`, `iq_kernels.cu`, `kv_q8.cu`,
+`prefill/kernels.cu` and `serve/server.py` are byte-identical, so the guard diff applies
+with `--fuzz=0` unchanged, the three clamps are still at `iq_kernels.cu:2326-2330`,
+`kv_q8.cu:55` and `prefill/kernels.cu:1340` (still unclamped upstream), and the
+`"server error: "` rewrites still land at `serve/server.py:4741`/`:4749`. Upstream did
+**not** touch the `native_expert_grouped` data path #879 blames, and the issue is still
+open (last maintainer reply 2026-10-07: cannot reproduce, retry on 0.1.40). The only
+near-miss for us is #1357 (`mtp.cpp`: the native top-10 router is now gated on
+`g.n_expert == 512 && K == 10`) — our pack matches, so the MTP path is unchanged.
+Details in [`strata.md`](./strata.md).
+
 ## Still open
 
 - **Retry #879 on 0.1.40.1 — in progress.** Switched 2026-10-06 14:39 BST: the live
