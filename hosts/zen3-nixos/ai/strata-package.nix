@@ -47,17 +47,17 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.1.40.1";
+  version = "0.1.40.2";
 
-  # v0.1.40.1 (2026-10-06).  NOTE: upstream rewrote this repo's history on
-  # 2026-10-06 (the 0.1.40.1 release notes say so), so the old pin 6f32ec0 has no
-  # common ancestor with main and GitHub's compare API cannot diff them - diff the
-  # two trees instead.  The tag v0.1.39 is also not 6f32ec0 (it is a1641e9f).
+  # v0.1.40.2 (2026-10-07).  NOTE: upstream rewrote this repo's history on
+  # 2026-10-06 (the 0.1.40.1 release notes say so), so any pin older than that has
+  # no common ancestor with main and GitHub's compare API cannot diff them - diff
+  # two trees instead.  The old tag v0.1.39 is also not 6f32ec0 (it is a1641e9f).
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "82f46a8c8f475f001ad76d92f58f4a4f8ffb0253";
-    hash = "sha256-y+0Qn2KhyVFfQrZi1L9BzR7iqQoRHjkXO9W48VJO2QQ=";
+    rev = "e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a";
+    hash = "sha256-NCOHJF8L32g67h8S4XY9uOABAKEoqapGqYLUEoiVHME=";
   };
 
   nativeBuildInputs = [
@@ -98,13 +98,16 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Local HIP port of the upstream #879 finiteness instrumentation + guard
   # (gist 66419118nnn/7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact
-  # pin 82f46a8c (v0.1.40.1) on 2026-10-06: 6 of its 11 verify.cpp hunks needed new
-  # anchors (0.1.40 added the STRATA_QFUSE fused-read returns, the S26 kernels, the
-  # #871 all-resident plan error and new arena buffers), and the stage-audit /
-  # sampler / header hunks apply with pure offsets.  It was regenerated from the
-  # patched tree, so every hunk now applies with --fuzz=0; do not re-apply the old
-  # file with fuzz (fuzz 3 put the arena carve inside the mapped() chain and the
-  # input audit inside the PLE try block).  #879 proved the repeated-token
+  # pin e8ca9afd (v0.1.40.2) on 2026-10-07: 3 hunks had drifted - 2 in verify.cpp
+  # (the window-inputs comment is now two lines; a new `if (inputs_pending)` join
+  # block sits between q8_attn and `stamp(l, 1, grp)`) and the sampler.cu hunk,
+  # whose `coupled_check("coupled_draft merge")` anchor is no longer at EOF (new
+  # functions follow it), so its additions moved to the file's closing namespace.
+  # The other 10 hunks applied with pure offsets and the added lines are
+  # byte-identical to the 0.1.40.1 diff.  Regenerated from the patched tree, so
+  # every hunk now applies with --fuzz=0; do not re-apply the old file with fuzz
+  # (fuzz 3 put the arena carve inside the mapped() chain and the input audit inside
+  # the PLE try block).  #879 proved the repeated-token
   # degeneration is NOT the fp16-overflow class the postPatch clamps below fix:
   # the first poisoned value is garbage 0x7FFFFFFF bits written into a
   # routed-expert output row (a data-path defect in native_expert_grouped).  This
@@ -124,7 +127,7 @@ stdenv.mkDerivation (finalAttrs: {
   # degeneracy the guard in serve/server.py exists to end (upstream #606;
   # ggml-org/llama.cpp#23606 is the same defect).
   #
-  # STATUS ON 0.1.40.1 (checked against the tree, not the changelog): the two sites
+  # STATUS ON 0.1.40.2 (checked against the tree, not the changelog): the two sites
   # our 0.1.39 build clamped itself are FIXED UPSTREAM in 0.1.40 ("the fused SwiGLU
   # q8_1 quantizers keep their scale finite") - native_mmvq.cu
   # native_swiglu_quantize_q8_1_kernel (line 172) and the iq_kernels.cu fused gate/up
@@ -135,7 +138,7 @@ stdenv.mkDerivation (finalAttrs: {
   #     (prefill/kernels.cu:1340) - never covered by #606, and the site our
   #     incident-2 132,947-token prompt was fixed by.  Still ours, still live.
   #   * the new S26 fused swiglu+q8_1 kernel (iq_kernels.cu s26_swiglu_q8_1_kernel,
-  #     ~line 2326) - latent for us: it is behind STRATA_EXPERT_V2, which 0.1.40
+  #     ~line 2312) - latent for us: it is behind STRATA_EXPERT_V2, which 0.1.40
   #     turns on by default ONLY on gfx1151 (src/core/arch_defaults.cpp), not on our
   #     gfx1201.  Clamped for the same reason the old gfx906-only site was.
   # Deliberately NOT clamped (same class, also opt-in and off on gfx1201, and the

@@ -37,12 +37,12 @@ When IQ3_S is trusted, reclaim the old files with
 shard 2 is a hardlink, so unlinking it frees nothing). It refuses unless the
 engine is live and serving IQ3_S, and defaults to a dry run.
 
-Upstream pinned: **v0.1.40.1**, rev `82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`
-(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-06 from v0.1.39
-(`6f32ec070f23ced9f50e704d854d775da52591ab`). It builds its own ggml from a
+Upstream pinned: **v0.1.40.2**, rev `e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a`
+(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-07 from v0.1.40.1
+(`82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`). It builds its own ggml from a
 pinned llama.cpp (`3cf03257f219afbe7334045ff7c6a06ac68c627d`) — **unchanged by
-0.1.40** (`setup.py:93 LLAMA_CPP_COMMIT`), so `strata-package.nix`'s `llama`
-fetch stays as it is.
+0.1.40 and 0.1.40.2** (`setup.py:165 LLAMA_CPP_COMMIT`), so `strata-package.nix`'s
+`llama` fetch stays as it is.
 
 ## 0.1.40 / 0.1.40.1 (updated 2026-10-06)
 
@@ -106,6 +106,44 @@ What actually changed for us (read off the two trees, not the changelog):
   rewrite targets are still verbatim (now at lines 4242 and 4250).
 - `setup.py`'s tested ROCm is `7.10.0a20251120` (`setup.py:1493`); our build uses
   nixpkgs ROCm **7.2.3** and still compiles clean for gfx1201.
+
+## 0.1.40.2 (2026-10-07)
+
+Pinned `e8ca9afd` (v0.1.40.2), built
+`/nix/store/v63bhabzfxwg6i8hkx8q93rb9r0q0jf9-strata-0.1.40.2`. This is the first
+release after the history rewrite, so the pin moves forward normally. What matters
+to us, read off the tree:
+
+- **The guard diff needed 3 anchors moved** (2 in `verify.cpp`: the window-inputs
+  comment is now two lines, and a new `if (inputs_pending)` join block sits before
+  `stamp(l, 1, grp)`; 1 in `sampler.cu`: the `coupled_check("coupled_draft merge")`
+  anchor is no longer at EOF because `sample_tokens_spec` follows it, so the
+  additions moved to the closing namespace). The added lines are byte-identical to
+  the 0.1.40.1 diff and it applies with `--fuzz=0`. See `strata-package.nix`.
+- **All `postPatch` clamp targets and both `installPhase` serve strings are still
+  present** (shifted): the S26 swiglu block is now `iq_kernels.cu:2326-2330`, the
+  int8-KV scales are `kv_q8.cu:55` and `prefill/kernels.cu:1340`, and the two
+  `serve/server.py` error bodies are at `:4741` and `:4749`. No clamp dropped or
+  added; the built binary carries `verify: non-finite logits` and the
+  `native_stage_audit_*` / `record_first_nonfinite` symbols.
+- **The llama.cpp ggml pin is unchanged** (`3cf03257…`, `setup.py:165`), and the
+  HIP build's cmake args (`setup.py:2412`) are exactly the ones
+  `strata-package.nix` passes (`STRATA_ENABLE_HIP=ON`, `STRATA_ENABLE_CUDA=OFF`,
+  `STRATA_BUILD_TESTS=OFF`, `STRATA_PREFILL_MMQ=ON`, `gfx1201`).
+- **Default answers are byte-identical to 0.1.40** (upstream checked Q2_0,
+  IQ3_XXS, Coder, IQ3_S). The new default-on speed-ups are bit-identical: the F4
+  verify-window interleaved read (`STRATA_MMVQ_IL=0` turns it off, +1–4% decode)
+  and, on Linux, the prompt stager sleeping instead of spinning plus the file tier
+  reading through the page cache (#1194). `STRATA_PREFILL_CPU_SHARE` is opt-in and
+  off, and Intel Arc is a separate SYCL port — neither touches this R9700 build.
+- **#879 is still open** (updated 2026-10-07): the routed-expert data-path
+  degeneration is not fixed in 0.1.40.2, so the local guard stays.
+- **Live switch, 2026-10-07 15:36 BST**
+  (`/nix/store/v63bhabzfxwg6i8hkx8q93rb9r0q0jf9-strata-0.1.40.2/bin/strata`,
+  engine pid 903083): experts loaded 46.84 GiB at 3.21 GiB/s (22 s), GPU expert
+  cache 13,104 experts / 24.87 GiB, `ready` in 26 s, `/v1/models` 200, and a
+  57-token prompt decoded at 47.9 tok/s with 6/6 drafts accepted. No
+  `verify: non-finite logits` fire on the first requests.
 
 ## Why llama-swap is off
 

@@ -712,13 +712,13 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.1.40.1** (`82f46a8c8f475f001ad76d92f58f4a4f8ffb0253`, updated 2026-10-06 from
-0.1.39 `6f32ec0`; **switched live 2026-10-06 14:39 BST** —
-`/nix/store/vl353xnf6ccdlckjs2mm8j428s6zp28s-strata-0.1.40.1/bin/strata`):
+**0.1.40.2** (`e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a`, updated 2026-10-07 from
+0.1.40.1 `82f46a8c`; **switched live 2026-10-07 15:36 BST** —
+`/nix/store/v63bhabzfxwg6i8hkx8q93rb9r0q0jf9-strata-0.1.40.2/bin/strata`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
-`Qwen3.8-Flash-Next-IQ3_XXS` (GSQ-RCO GGUF, no MTP head). Docs:
+`Qwen3.8-Flash-Next-IQ3_S` (GSQ-RCO GGUF, no MTP head). Docs:
 [`docs/strata.md`](docs/strata.md).
 
 - **A long-context reply can collapse to one repeated token (or a thinking-only
@@ -737,7 +737,7 @@ The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
   (`patches = [...]`, applied before `postPatch`): it fails a verify window with
   `verify: non-finite logits` instead of emitting the degenerate token, and dumps
   per-stage layer/row/col/raw bits (`STRATA_KERNEL_AUDIT=1`). It was re-based onto
-  0.1.40.1 on 2026-10-06 (6 of its 11 `verify.cpp` hunks needed new anchors) and is
+  0.1.40.2 on 2026-10-07 (3 hunks drifted: 2 in `verify.cpp`, 1 in `sampler.cu`) and is
   regenerated to apply with `--fuzz=0`. **Never re-apply it with fuzz** — `--fuzz=3`
   "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
   inside the PLE `try` block.
