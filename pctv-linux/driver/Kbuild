@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Kbuild rules for the Pinnacle PCTV 320cx analog capture driver.
+#
+# The module mixes Rust (driver core: DiB0700 firmware download, I2C tunnel,
+# CX25843 decoder programming, bulk-IN capture) with C (the V4L2 face and the
+# USB driver registration).  The Rust side sees the C glue through bindgen,
+# generated at build time from the kernel build tree's headers the same way
+# the in-tree `rust/bindings` crate is (see rust/Makefile).
+
+obj-m += pctv320cx.o
+pctv320cx-objs := v4l2-glue.o usb-shim.o pctv320cx_rs.o
+
+clean-files += pctv320cx_bindings.rs
+
+# kbuild's implicit Rust rule builds $(obj)/%.o from $(src)/%.rs, which would
+# force the source to be named after the object.  Keep the driver core's own
+# name and point kbuild's rustc rule at it instead.
+$(obj)/pctv320cx_rs.o: $(src)/pctv320cx.rs FORCE
+	+$(call if_changed_rule,rustc_o_rs)
+
+# The crate pulls the generated bindings in with include!(), which kbuild's
+# dependency tracking cannot see on its own.
+$(obj)/pctv320cx_rs.o: $(obj)/pctv320cx_bindings.rs
+
+# ---------------------------------------------------------------------------
+# Rust bindings for the C glue (pctv320cx.h -> v4l2-glue.c / usb-shim.c).
+# ---------------------------------------------------------------------------
+BINDGEN ?= bindgen
+BINDGEN_TARGET ?= x86_64-linux-gnu
+
+# The kernel's own bindgen tweaks (opaque types, blocklists, ...).  A copy
+# lives in this directory: $(srctree) is not reliably set when an out-of-tree
+# module's Kbuild is parsed, and the file's location has moved around.
+bindgen_kernel_params := $(shell grep -Ev '^#|^$$' $(src)/bindgen_parameters 2>/dev/null)
+
+bindgen_flags = \
+	--rust-target 1.85 --use-core --with-derive-default \
+	--ctypes-prefix core::ffi --no-layout-tests --no-debug '.*' \
+	$(bindgen_kernel_params)
+
+# bindgen drives libclang, so it cannot take the whole set of flags the kernel
+# is compiled with (GCC-only options and plugins).  Filter them out and add an
+# explicit target triple, exactly like rust/Makefile does in-tree.
+bindgen_skip_c_flags := -mno-fp-ret-in-387 -mpreferred-stack-boundary=% \
+	-mskip-rax-setup -mgeneral-regs-only -msign-return-address=% \
+	-mindirect-branch=thunk-extern -mindirect-branch-register \
+	-mfunction-return=thunk-extern -mrecord-mcount -mabi=lp64 \
+	-mindirect-branch-cs-prefix -mstack-protector-guard% -mtraceback=no \
+	-mno-pointers-to-nested-functions -mno-string \
+	-mno-strict-align -mstrict-align -mdirect-extern-access \
+	-mexplicit-relocs -mno-check-zero-division \
+	-fconserve-stack -falign-jumps=% -falign-loops=% \
+	-femit-struct-debug-baseonly -fno-ipa-cp-clone -fno-ipa-sra \
+	-fno-partial-inlining -fplugin-arg-arm_ssp_per_task_plugin-% \
+	-fno-reorder-blocks -fno-allow-store-data-races -fasan-shadow-offset=% \
+	-fzero-call-used-regs=% -fno-stack-clash-protection \
+	-fno-inline-functions-called-once -fsanitize=bounds-strict \
+	-fstrict-flex-arrays=% -fmin-function-alignment=% \
+	-fzero-init-padding-bits=% -mno-fdpic \
+	-fdiagnostics-show-context -fdiagnostics-show-context=% \
+	--param=% --param asan-% -fno-isolate-erroneous-paths-dereference
+
+bindgen_cflags = \
+	$(filter-out $(bindgen_skip_c_flags), $(c_flags)) \
+	-w --target=$(BINDGEN_TARGET) -fno-lto -fno-builtin -D__BINDGEN__
+
+quiet_cmd_bindgen_rs = BINDGEN $@
+      cmd_bindgen_rs = $(BINDGEN) $< $(bindgen_flags) -o $@ -- $(bindgen_cflags)
+
+$(obj)/pctv320cx_bindings.rs: $(src)/pctv320cx.h FORCE
+	$(call cmd,bindgen_rs)
