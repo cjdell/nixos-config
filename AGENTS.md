@@ -2,6 +2,47 @@
 
 Guidance for AI coding agents working in this repository. Read this before making changes.
 
+## Step 0: identify the host you are on — before anything else
+
+**Do not assume you are on zen3-nixos.** This repo is checked out on several
+machines — verified 2026-10-08: `~/nixos-config` exists on **zen3-nixos,
+grafton-router, N100-NAS, GEN8-NAS and N40L-NAS** (plus alderlake-thinkpad and
+the MacBookAir, where the rebuild is `just switch`) — and the flake
+evaluates/builds *every* host from *any* of them. Start by asking where you are:
+
+```sh
+hostname                      # == the hosts/<name> directory == the flake attribute
+ip -4 addr show scope global  # which segment you are on (192.168.49.0/24 = LAN)
+```
+
+Then act on the answer:
+
+- **`nixos-rebuild switch --flake .` without `--target-host` reconfigures the
+  machine you are standing on**, not the one you were thinking about. On an
+  autoRollback host a forgotten `sudo nixos-confirm` then reboots *that* box ~5
+  min later. Name the host you are deploying to in your reply before you do it.
+- **Host-specific state does not exist elsewhere**, and querying it on the wrong
+  host returns nothing and looks like a bug. zen3-nixos: the AI stack (`strata`,
+  `llama-swap`, `sd-gate`, Recallium, diamcp, llama-log-viewer),
+  `/home/cjdell/Models`, `llama-logs/`, the R9700 (`amd-smi`), `/etc/tftp` +
+  `/exports` (Pi 5 netboot), zram. grafton-router: `meter-relay`, dnsmasq leases,
+  kanidm, Home Assistant, Frigate, WireGuard/headscale, the public nginx edge.
+  N100-NAS: Jellyfin, Immich, Grafana, Postgres, qBittorrent. 3d-printer-server:
+  the `podman-klipper` units.
+- **Toolchains differ**: grafton-router has no `cargo`, `rustc` or `cc`; no host
+  has `python3` on PATH; GPU tooling exists only on the GPU boxes; `nixos-confirm`
+  only matters where `system.autoRollback` is on (see *Critical: auto-rollback +
+  `nixos-confirm`* below).
+- **The working tree is not the running system.** Check
+  `git -C ~/nixos-config log -1 --format='%cd %s'` and `git status` against
+  `/run/current-system` (or a `nixos-rebuild … dry`) before concluding a change
+  is deployed — and remember `path:` flake inputs are frozen at their
+  `flake.lock` `narHash`.
+- If the task names a host you are **not** on, reach it over SSH with a
+  `timeout` (`ssh <host>.grafton.lan` on the LAN, `<host>.grafton.tailscale` on
+  the tailnet) instead of running the command locally, and say which host each
+  result came from.
+
 ## Repository overview
 
 A NixOS flake-based configuration managing many hosts (NAS boxes, ThinkPads, a Zen 3 GPU
@@ -20,12 +61,46 @@ workstation, etc.). Key layout:
 | `docs/klipper-3d-printer.md` | 3d-printer-server / Klipper (Smoothieboard LPC1768): boot-race fix, `klipper-firmware-update` + SD-flash runbook, and the **open** thermistor/ADC fault |
 | `docs/gtt-vram.md` | GTT-default/VRAM-cache research: `GGML_VK_ALLOW_SYSMEM_FALLBACK`, why there's no weight cache in llama.cpp, and why GTT never auto-unspills |
 | `docs/zen3-random-crashes.md` | **OPEN** investigation into zen3-nixos' random hard resets (watchdog-reaped hangs, not panics; memory/IMC hypothesis; `[S]`=CPU_OUT_OF_SPEC) + the `scripts/stress-monitor.sh` soak harness — sequel to `docs/kernel-rcu-wedge.md` |
-| `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), and the 2026-09-30 tuning |
+| `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), the 2026-09-30 tuning, the exact nudge-gate formulas, and how to health-check it (`bili doctor`, `/__bili/*` on the **pi lane port 18789**, not 18787) |
 | `docs/strata-hang.md` | Strata's `no progress for 60 s` watchdog aborts (upstream #29) → 32 GB core dumps → amdgpu MES teardown failure + MODE1 GPU reset: why the cores are useless, the journal line that names the stall, and the `HSA_USERPTR_FOR_PAGED_MEM=0` candidate fix (#750 = two R9700s on ROCm 7.2) |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
 Formatting: `./format.sh` runs `nixfmt` over all `.nix` files.
+
+## The servers on the network (who runs what)
+
+All in `hosts/<name>` (directory name == host name == flake attribute), on the
+`192.168.49.0/24` LAN with domain `grafton.lan`; tailnet names are
+`<host>.grafton.tailscale`. Static leases for everything below are in
+`hosts/grafton-router/networking/dns.nix` — that file is the network map. The
+"what it runs" column is the headline set, not exhaustive.
+
+| Host | LAN IP | Role | What it actually runs | Deploy notes |
+| --- | --- | --- | --- | --- |
+| **grafton-router** | `.1` (`2a02:8010:6680:49::1`) | Edge router **and** the main homelab app host | PPPoE WAN (`pppoe-zen`), `lan` bridge + VLAN10, nftables, dnsmasq DHCP+DNS, AdGuard, WireGuard `10.47.0.0/16`, headscale + Tailscale, **kanidm** IdP (`kanidm.home.chrisdell.info`), nginx public edge `*.home.chrisdell.info` (ACME DNS-01 Route 53 + route53 dynamic DNS) proxying to itself *and* to N100-NAS (`grafana…`→`:3000`, `filebrowser…`→`:8002`), Home Assistant + InfluxDB + Mosquitto + zigbee2mqtt, Frigate (+`frigate-whisper`/`frigate-monitor`), Jellyfin, Immich, qBittorrent, Ghost, 2fauth, Beszel, Postgres, **meter-relay** (`:8484`), container-ui, TFTP/iPXE netboot, a microVM host (`grafton-hackspace-client`, `.15`), dsh-harness `:3080` | **autoRollback ON** → `sudo nixos-confirm`. 15 GiB RAM + 8 GiB `/swapfile`. No Rust toolchain. Config is `hosts/grafton-router/` (imports its own flake inputs). |
+| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Strata `:8080`, llama-swap/llama.cpp (Vulkan, R9700 32 GB) `:8081`, sd-gate + SDXL, Recallium, diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
+| **N100-NAS** | `.22` | Media/app NAS (ZFS pool `samsung-4tb`: `ds-media`, `ds-photos`) | Jellyfin, Immich (podman: server/ml/redis/postgres), qBittorrent, Postgres + postgresqlBackup, filebrowser, Grafana `:3000` (kanidm OIDC, `grafana.home.chrisdell.info`), container-ui `:8091`, Samba + NFS, sanoid + syncoid → N40L-NAS and dbthr33, Scrutiny, Prometheus exporters, Tailscale | **autoRollback ON** → `sudo nixos-confirm`. Repo checkout lives here too. The folding@home module is imported but `services.foldingathome` is commented out in `common/folding-at-home.nix` — it is **not** running. |
+| **GEN8-NAS** | `.23` | Bulk file + snapshot host (ZFS `sas-24tb`: `ds-public`, `ds-cjdell`, `ds-backup`) | Samba + NFS shares, sanoid snapshots, syncoid → N40L-NAS, `backup-host` receiver (`backup` user, `/var/lib/backup`), Scrutiny, Prometheus exporters, Tailscale, `lsiutil`/`sasutils` (HBA) | no autoRollback. ZFS via disko. |
+| **N40L-NAS** | `.21` (`…:49::21`) | The backup **target** (ZFS `sas-16tb`) | Receives the GEN8 + N100 syncoid streams under `sas-16tb/ds-external-backups/…`, holds dbthr33's `ds-frigate-archive`, UniFi controller container, `zfs-status`, Scrutiny, Tailscale | `nfs.nix`, `samba.nix` and `backup.nix` exist in the directory but are **not imported** by `default.nix` — no shares and no offsite push from this box. no autoRollback. |
+| **3d-printer-server** | `.60` | Klipper 3-D-print server | prind stack as three rootful podman units (`podman-klipper/-moonraker/-mainsail`), Mainsail on nginx `:80`, `klipper-firmware-update` | no autoRollback; no GitHub creds (deploy via `git bundle`); read `docs/klipper-3d-printer.md` first. |
+| **pi5** | `.92` | aarch64 netboot node (Raspberry Pi 5, no SD) | NixOS on a tmpfs root with its store served by zen3 over NFS; its config lives in the `gc-rust-node` repo, **not** this flake | Deploy = `nixos-rebuild switch` on zen3 + power-cycle (`scripts/pi5-powercycle.sh`); host keys regenerate every boot. |
+
+Load-bearing hosts **not** in this flake: **dbthr33-server** (offsite backup
+target — `backup@10.47.35.20:dbthr33/ds-external-backups/grafton` from N100-NAS;
+its `2a0a:ef40:241::/48` is a trusted network in
+`hosts/grafton-router/networking/constants.nix`), **inverter-pi** `.30` (the
+`ser2net` Modbus-RTU bridge that `meter-relay-rs` discovers its connections
+through), zigbee `.31`, jk-bms-can `.32`/`.33`, the OpenWrt APs `.2`/`.3`, and
+the **MacBookAir-NixOS** aarch64 build machine — pinned to **`192.168.49.69`** by
+MAC `00:0e:c6:8e:b3:ff` (wired `enu1`) in `hosts/grafton-router/networking/dns.nix`,
+and `nix.buildMachines` in `hosts/zen3-nixos/default.nix` points at
+`cjdell@192.168.49.69`. (Before 2026-10-08 the reservation named MAC
+`18:3e:ef:c6:1c:2f`, which never matched, so the box took a dynamic `.191` — if
+you see it at `.191` the lease change has not been deployed / renewed yet.)
+
+Clients, not servers: `alderlake-thinkpad`, `rocketlakelatitude`, and the legacy
+`machines/*` configs.
 
 ## Critical: auto-rollback + `nixos-confirm` (READ THIS FIRST)
 
@@ -83,7 +158,9 @@ sudo nixos-rebuild switch --flake .
 - **Deploy locally when you're already on the target host:** check `hostname`
   first — if it matches the target host name (the `hosts/<name>` directory,
   e.g. `N100-NAS`), the flake is checked out on this machine, so run the
-  rebuild here. Do not assume the repo lives only on zen3-nixos.
+  rebuild here. Do not assume the repo lives only on zen3-nixos (*Step 0* above
+  lists the hosts that carry a checkout, and the server roles table shows what
+  each one runs).
 - **alderlake-thinkpad builds exclusively on zen3-nixos** (`192.168.49.50`):
   `nix.distributedBuilds` + `nix.buildMachines` write `/etc/nix/machines`
   (Nix's default `builders = @/etc/nix/machines` picks it up) and
@@ -228,8 +305,9 @@ NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md
   on this host** (+ `sudo nixos-confirm`, autoRollback is on) + a Pi
   power-cycle. No runtime copies into /etc/tftp.
 - **Build = build machine, not manual copies:** the MacBookAir
-  (`cjdell@192.168.49.191`, NixOS config in `/home/cjdell/nixos-config/` there,
-  rebuild with `just switch` in that dir — `--impure` required) is a Nix build
+  (`cjdell@192.168.49.69` — static lease on MAC `00:0e:c6:8e:b3:ff`, its wired
+  `enu1`; NixOS config in `/home/cjdell/nixos-config/` there, rebuild with `just
+  switch` in that dir — `--impure` required) is a Nix build
   machine for zen3: `nix.buildMachines` in `hosts/zen3-nixos/default.nix` (root
   key `/root/.ssh/id_ed25519` authorized on the MacBook, `cjdell` in its
   `nix.trustedUsers`, `supportedFeatures = [ "big-parallel" ]` — without it the
@@ -807,12 +885,16 @@ both run `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…`):
   renderD minor**: `gpu-panel --pci 1002:7551` (id-based sysfs scan), the R9700's
   DRM node via the udev symlink `/dev/dri/r9700` (`services.udev.extraRules` in
   `hosts/zen3-nixos/ai/gpu-panel.nix`), HIP by `amd-smi list` UUID
-  `47ff7551-…`. Two swap side effects still open: **Resizable BAR is off**
-  (`lspci -vv -s 09:00.0`: BAR0 256 MB, was 32 GB — re-enable Above-4G Decoding +
-  Re-Size BAR in the BIOS) and the **TPM changed**, which had invalidated
-  libvirt's sealed `secrets-encryption-key` and made every `nixos-rebuild switch`
-  exit 4 (regenerated 2026-10-08; the old blob is kept as
+  `47ff7551-…`. One swap side effect still open: the **TPM changed**, which had
+  invalidated libvirt's sealed `secrets-encryption-key` and made every
+  `nixos-rebuild switch` exit 4 (regenerated 2026-10-08; the old blob is kept as
   `/var/lib/libvirt/secrets/secrets-encryption-key.stale-tpm`).
+  The other side effect is **fixed (2026-10-08, box rebooted 23:26 BST): ReBAR is back on** — Above-4G
+  Decoding + Re-Size BAR enabled in the BIOS, so `lspci -vvvs 09:00.0` shows
+  `BAR 0: current size: 32GB, supported: 256MB 512MB 1GB 2GB 4GB 8GB 16GB 32GB`
+  mapped at `f000000000`, and amdgpu logs `Detected VRAM RAM=32624M, BAR=32768M`
+  (was `BAR=256M` after the swap) — the whole card is host-visible, no 256 MB
+  window. If BAR0 reads 256 MB again, the BIOS setting got reset.
 
 - **The r9700 HIP fork is gone (all llama.cpp forks removed 2026-09-26).**
   `rdna-boosts`/`llama-cpp-rdna` (stew675) was the r9700 build until

@@ -116,7 +116,18 @@ in
         "AirM5                                        ,192.168.49.66,1h"
         "f0:77:c3:9f:4e:12,rocketlakelatitude-nixos   ,192.168.49.67,1h"
         "7c:76:35:f8:e1:bb,precision-nixos            ,192.168.49.68,1h"
-        "18:3e:ef:c6:1c:2f,MacBookAir                 ,192.168.49.69,1h"
+        # MacBookAir-NixOS — the aarch64 Nix build machine zen3-nixos dispatches
+        # the Pi 5 netboot bundle to (nix.buildMachines in
+        # hosts/zen3-nixos/default.nix). The reservation must name the MAC it
+        # actually leases on: the wired USB-dock interface `enu1` =
+        # 00:0e:c6:8e:b3:ff (verified 2026-10-08 — the previous entry used
+        # 18:3e:ef:c6:1c:2f, which has no lease and is not in the ARP table, so
+        # the box fell through to a *dynamic* .191 and the .69 reservation was
+        # dead config). Hostname is its real hostname so
+        # macbookair-nixos.grafton.lan resolves. Wi-Fi (`wld0`) is down and
+        # MAC-randomised — if it ever joins on Wi-Fi, add that MAC here too or
+        # pin the MAC in NetworkManager, otherwise it gets a dynamic address.
+        "00:0e:c6:8e:b3:ff,MacBookAir-NixOS           ,192.168.49.69,1h"
 
         "d4:f5:47:2f:76:93,Small-Bedroom-Speaker      ,192.168.49.71,1h"
         "e4:f0:42:08:e3:1e,Front-Bedroom-Speaker      ,192.168.49.72,1h"

@@ -71,11 +71,14 @@
     # /exports/nix-store — see ./pi5-netboot.nix). The daemon (root) SSHes to
     # the MacBook as cjdell; the key below is authorized there, and cjdell is in
     # trusted-users in the MacBook's /home/cjdell/nixos-config/configuration.nix.
+    # Address = the router's static DHCP lease for its wired `enu1` MAC
+    # 00:0e:c6:8e:b3:ff (hosts/grafton-router/networking/dns.nix); it used to
+    # reach this box at a dynamic .191 because the lease named the wrong MAC.
     nix = {
       distributedBuilds = true;
       buildMachines = [
         {
-          hostName = "cjdell@192.168.49.191";
+          hostName = "cjdell@192.168.49.69";
           systems = [ "aarch64-linux" ];
           maxJobs = 4;
           sshKey = "/root/.ssh/id_ed25519";
