@@ -156,6 +156,13 @@ const ACTIVE_PIXEL_BYTES: usize = 1440;
 /// comfortably more than the 2 s videobuf2 timeout.
 const NUM_URBS: usize = 8;
 const URB_BYTES: usize = 65536;
+/// Scratch holding one field's active lines (max PAL) before they are
+/// vertically rescaled into the frame.  A field arrives with up to ~5% of its
+/// lines missing (mode-2 bandwidth ceiling); writing the survivors directly
+/// into their nominal rows makes every dropped line shift the rest of the
+/// field up and the picture jitters.  The scratch lets the field end be found
+/// first, then resamples the N captured lines onto the fixed 288-row grid.
+const FIELD_SCRATCH_BYTES: usize = PAL_LINES * ACTIVE_PIXEL_BYTES;
 /// Bulk-IN endpoint number that carries the analog capture stream (the
 /// in-tree dib0700 devices table uses stream endpoint 2 for this card;
 /// FINDINGS.md section 11.2: only 0x82 ever delivers).
@@ -242,6 +249,10 @@ struct Pctv320cxInner {
     /// DMA-safe staging buffer for the bulk-OUT writes (firmware records,
     /// jumpram).  Allocated with the URB pool, freed with it.
     fw_buf: *mut u8,
+
+    /// Scratch for the field being deframed (see FIELD_SCRATCH_BYTES).
+    /// Allocated with the URB pool, freed with it.
+    field_buf: *mut u8,
 
     /// Streaming state, read by the URB completion (softirq) and written by
     /// start/stop (process context).
@@ -1019,7 +1030,6 @@ const SAV2: u8 = 0x00;
 /// active video; 1 = EAV, end of active video).  Bits 3..0 are the protection
 /// bits.  The earlier code tested bit 0 (a protection bit) as H, which
 /// accepted EAV codes such as `0xda` and rejected the field-2 SAV `0xc7`.
-const SAV_STATUS_F: u8 = 0x40;
 const SAV_STATUS_V: u8 = 0x20;
 const SAV_STATUS_H: u8 = 0x10;
 
@@ -1028,25 +1038,38 @@ const SAV_STATUS_H: u8 = 0x10;
 ///
 /// The CX25843 emits whole BT.656 lines (mode 2): SAV, active video, EAV,
 /// blanking.  Active lines carry V=0; the vertical-blanking lines carry V=1
-/// and their 1440 bytes are blanking level, not picture.  Each active line
-/// goes to its field's interleaved slot (even rows = field 0, odd rows =
-/// field 1), which is what V4L2_FIELD_INTERLACED means to userspace.
+/// and their 1440 bytes are blanking level, not picture.
 ///
-/// A frame is completed on the *field boundary* after both fields have been
-/// seen, never on a line count: mode 2 drops ~5% of lines, so a 576-line
-/// target slips a little further into the following frame each time and the
-/// picture rolls.
+/// Fields are delimited by the **V** bit, not by F.  The decoder flips F one
+/// line early (a single active line at the end of a field already carries the
+/// next field's F) and that lone line is fragile: if the bridge drops it, an
+/// F-based boundary slips a whole line.  The vertical-blanking run is ~22
+/// lines wide, so the V=1 -> V=0 transition is a far steadier anchor.  Each
+/// V=0 run is one field; consecutive runs alternate output parity (even/odd
+/// rows = V4L2_FIELD_INTERLACED).
+///
+/// Mode 2 still drops ~5% of the active lines (the bridge tops out at
+/// 25.6 MB/s and PAL needs 27.0).  Writing the survivors straight into their
+/// nominal rows lets every drop pull the rest of the field up - that is the
+/// visible vertical jitter.  Instead each field is accumulated in a scratch
+/// buffer and, once its true line count N is known, resampled onto the fixed
+/// 288-row grid, which spreads the missing lines evenly instead of shifting
+/// everything below them.
 struct Deframer {
     /// Buffer currently being filled (from the vb2 handoff), and its address.
     vb: *mut bindings::vb2_buffer,
     addr: *mut u8,
     size: u32,
-    /// Active lines written so far in this buffer, per field.
-    lines: [u32; 2],
-    /// Field of the last active line written, `None` until the first one.
-    field: Option<usize>,
-    /// Fields started since the current buffer was handed out.
-    fields: u32,
+    /// Active lines copied into the scratch for the field in progress.
+    field_lines: u32,
+    /// Output parity of the field in progress (0 = even rows, 1 = odd rows).
+    parity: usize,
+    /// Parities already flushed into the current buffer.
+    filled: [bool; 2],
+    /// True while a V=0 active region is being captured.
+    in_field: bool,
+    /// Output lines per field for the selected standard.
+    h_out: usize,
     /// Frames still to throw away before handing one out.  Streaming joins
     /// the BT.656 stream mid-field, so the first assembled buffer holds the
     /// tail of one field and the head of the next; discard it (and restart
@@ -1060,31 +1083,113 @@ impl Deframer {
             vb: core::ptr::null_mut(),
             addr: core::ptr::null_mut(),
             size: 0,
-            lines: [0, 0],
-            field: None,
-            fields: 0,
+            field_lines: 0,
+            parity: 1,
+            filled: [false, false],
+            in_field: false,
+            h_out: PAL_LINES,
             preroll: 1,
         }
     }
 
-    fn reset(&mut self, _std_sel: u32) {
-        *self = Self::new();
+    fn reset(&mut self, std_sel: u32) {
+        let h_out = if std_sel == STD_NTSC {
+            NTSC_LINES
+        } else {
+            PAL_LINES
+        };
+        *self = Self {
+            h_out,
+            ..Self::new()
+        };
     }
 
     /// Take the next videobuf2 buffer.  Returns false when the queue is dry.
     unsafe fn acquire(&mut self, glue: *mut bindings::pctv_glue) -> bool {
-        self.addr = core::ptr::null_mut();
-        self.size = 0;
-        self.lines = [0, 0];
-        self.field = None;
-        self.fields = 0;
         self.vb = bindings::pctv_glue_next_buffer(glue);
         if self.vb.is_null() {
+            self.addr = core::ptr::null_mut();
+            self.size = 0;
             return false;
         }
         self.addr = bindings::pctv_glue_buffer_addr(self.vb) as *mut u8;
         self.size = bindings::pctv_glue_buffer_size(self.vb);
+        self.filled = [false, false];
         true
+    }
+
+    /// Resample the field's `field_lines` scratch lines onto `h_out` output
+    /// rows and interleave them into the videobuf2 buffer at output parity
+    /// `parity`.  Linear interpolation in 8-bit fixed point; the scratch holds
+    /// UYVY, so byte-wise blending stays within the luma or the chroma samples.
+    unsafe fn flush_field(
+        &mut self,
+        glue: *mut bindings::pctv_glue,
+        scratch: *mut u8,
+        parity: usize,
+    ) {
+        let n = self.field_lines as usize;
+        if self.vb.is_null() || self.addr.is_null() || scratch.is_null() {
+            self.filled[parity] = true;
+            self.finish_frame(glue, parity);
+            return;
+        }
+        let h_out = self.h_out;
+        if n == 1 {
+            for j in 0..h_out {
+                let off = (2 * j + parity) * ACTIVE_PIXEL_BYTES;
+                if off + ACTIVE_PIXEL_BYTES > self.size as usize {
+                    break;
+                }
+                core::ptr::copy_nonoverlapping(scratch, self.addr.add(off), ACTIVE_PIXEL_BYTES);
+            }
+        } else if n > 1 {
+            let denom = (h_out - 1) as u64;
+            for j in 0..h_out {
+                let off = (2 * j + parity) * ACTIVE_PIXEL_BYTES;
+                if off + ACTIVE_PIXEL_BYTES > self.size as usize {
+                    break;
+                }
+                let t = (j as u64) * ((n - 1) as u64);
+                let i0 = (t / denom) as usize;
+                let frac = (((t % denom) * 256) / denom) as u32;
+                let i1 = core::cmp::min(i0 + 1, n - 1);
+                let src0 = scratch.add(i0 * ACTIVE_PIXEL_BYTES);
+                let src1 = scratch.add(i1 * ACTIVE_PIXEL_BYTES);
+                let dst = self.addr.add(off);
+                for k in 0..ACTIVE_PIXEL_BYTES {
+                    let a = core::ptr::read(src0.add(k)) as u32;
+                    let b = core::ptr::read(src1.add(k)) as u32;
+                    core::ptr::write(dst.add(k), ((a * (256 - frac) + b * frac) >> 8) as u8);
+                }
+            }
+        }
+        self.filled[parity] = true;
+        self.finish_frame(glue, parity);
+    }
+
+    /// Once both parities have been flushed the frame is complete: hand it to
+    /// videobuf2 (or discard it while the startup preroll lasts).
+    unsafe fn finish_frame(&mut self, glue: *mut bindings::pctv_glue, _parity: usize) {
+        if !(self.filled[0] && self.filled[1]) {
+            return;
+        }
+        self.filled = [false, false];
+        if self.vb.is_null() {
+            // Queue was dry when the frame was assembled; nothing to hand over.
+            return;
+        }
+        if self.preroll > 0 {
+            // Startup frame: keep the buffer and refill it.
+            self.preroll -= 1;
+            return;
+        }
+        // Both fields in: report the whole buffer, not just up to the last
+        // line written (the fields interleave, so a variable bytesused makes
+        // raw dumps impossible to frame align).
+        bindings::pctv_glue_buffer_done(glue, self.vb, self.size);
+        self.vb = core::ptr::null_mut();
+        self.addr = core::ptr::null_mut();
     }
 }
 
@@ -1097,6 +1202,7 @@ impl Pctv320cxInner {
         dropped: &Atomic<u32>,
         d: &mut Deframer,
         data: &[u8],
+        scratch: *mut u8,
     ) {
         let mut pos = 0usize;
         while pos + SYNC_BYTES + ACTIVE_BYTES <= data.len() {
@@ -1113,60 +1219,40 @@ impl Pctv320cxInner {
                 continue;
             }
 
-            // Vertical blanking (V=1): the payload is blanking level, not
-            // picture.  Skipping the whole line keeps the marker search in
-            // phase.
             if status & SAV_STATUS_V != 0 {
+                // Vertical blanking: the field that just ended is complete.
+                // Resample it into the buffer before moving on.
+                if d.in_field {
+                    let parity = d.parity;
+                    d.flush_field(glue, scratch, parity);
+                    d.in_field = false;
+                }
                 pos += LINE_BYTES;
                 continue;
             }
 
-            if d.vb.is_null() && !d.acquire(glue) {
-                // No buffer to fill: drop the rest of this URB.
-                dropped.fetch_add(1, Relaxed);
-                return;
-            }
-
-            // Even rows are field 0 (F=0), odd rows field 1 (F=1).  A change
-            // of field starts a new field; after both have been captured the
-            // frame is complete and the next one begins.
-            let field = ((status & SAV_STATUS_F) != 0) as usize;
-            if d.field != Some(field) {
-                if d.fields >= 2 {
-                    if d.preroll > 0 {
-                        // Startup frame: keep the buffer and fill it again
-                        // from this field boundary.
-                        d.preroll -= 1;
-                        d.fields = 0;
-                    } else {
-                        // Both fields in: report the whole buffer, not just
-                        // up to the last line written (the fields interleave,
-                        // so a variable bytesused makes raw dumps impossible
-                        // to frame align).
-                        bindings::pctv_glue_buffer_done(glue, d.vb, d.size);
-                        d.vb = core::ptr::null_mut();
-                        d.addr = core::ptr::null_mut();
-                        if !d.acquire(glue) {
-                            dropped.fetch_add(1, Relaxed);
-                            return;
-                        }
-                    }
+            // V=0: an active line.  The first one after blanking opens a new
+            // field; consecutive fields alternate output parity.
+            if !d.in_field {
+                d.parity ^= 1;
+                d.field_lines = 0;
+                d.in_field = true;
+                if d.vb.is_null() && !d.acquire(glue) {
+                    // No buffer to fill: drop the rest of this URB.
+                    dropped.fetch_add(1, Relaxed);
+                    return;
                 }
-                d.lines = [0, 0];
-                d.fields += 1;
-                d.field = Some(field);
             }
 
-            let line = d.lines[field] as usize;
-            let off = (2 * line + field) * ACTIVE_PIXEL_BYTES;
-            if d.addr != core::ptr::null_mut() && off + ACTIVE_BYTES <= d.size as usize {
+            let line = d.field_lines as usize;
+            if !scratch.is_null() && line < FIELD_SCRATCH_BYTES / ACTIVE_PIXEL_BYTES {
                 core::ptr::copy_nonoverlapping(
                     data.as_ptr().add(pos + SYNC_BYTES),
-                    d.addr.add(off),
+                    scratch.add(line * ACTIVE_PIXEL_BYTES),
                     ACTIVE_BYTES,
                 );
+                d.field_lines += 1;
             }
-            d.lines[field] += 1;
 
             // A line is always 1728 bytes on the wire: 4 sync + 1440 active
             // + 4 EAV + 280 blanking.  Skipping the whole line also keeps the
@@ -1186,6 +1272,12 @@ impl Pctv320cxInner {
         if self.fw_buf.is_null() {
             self.fw_buf = bindings::pctv_kmalloc(FW_BUF_BYTES) as *mut u8;
             if self.fw_buf.is_null() {
+                return Err(Error::from_errno(-ENOMEM));
+            }
+        }
+        if self.field_buf.is_null() {
+            self.field_buf = bindings::pctv_vmalloc(FIELD_SCRATCH_BYTES) as *mut u8;
+            if self.field_buf.is_null() {
                 return Err(Error::from_errno(-ENOMEM));
             }
         }
@@ -1236,6 +1328,10 @@ impl Pctv320cxInner {
         if !self.fw_buf.is_null() {
             bindings::pctv_kfree(self.fw_buf as *mut c_void);
             self.fw_buf = core::ptr::null_mut();
+        }
+        if !self.field_buf.is_null() {
+            bindings::pctv_vfree(self.field_buf as *const c_void);
+            self.field_buf = core::ptr::null_mut();
         }
     }
 
@@ -1331,7 +1427,7 @@ impl Pctv320cxInner {
             if status == 0 && actual > 0 {
                 let data = core::slice::from_raw_parts((*ctx).buffer, actual as usize);
                 let mut guard = (*p).deframer.lock();
-                Self::deframe((*p).glue, &(*p).dropped, &mut *guard, data);
+                Self::deframe((*p).glue, &(*p).dropped, &mut *guard, data, (*p).field_buf);
             } else if status != 0 {
                 // A halt on the pipe (the device dropped FIFO data) or a
                 // short transfer: count it, the next submit clears the halt.
@@ -1433,6 +1529,7 @@ unsafe extern "C" fn op_set_std(cookie: *mut c_void, std_sel: u32) -> c_int {
     let (lines_per_field, _) = geometry(std_sel);
     clamp_fmt(std_sel, &mut d.fmt);
     d.fmt.height = (lines_per_field * 2) as u32;
+    (*d.deframer.lock()).reset(std_sel);
     0
 }
 
@@ -1559,6 +1656,7 @@ unsafe fn probe(intf: *mut bindings::usb_interface) -> Result {
             ep_in: ep_in as u8,
             urbs: [const { Urb::empty() }; NUM_URBS],
             fw_buf: core::ptr::null_mut(),
+            field_buf: core::ptr::null_mut(),
             streaming: Atomic::new(false),
             dropped: Atomic::new(0),
             deframer <- new_spinlock!(Deframer::new(), "pctv320cx-deframe"),

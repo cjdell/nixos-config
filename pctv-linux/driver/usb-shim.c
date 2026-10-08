@@ -17,6 +17,7 @@
 
 #include <linux/module.h>
 #include <linux/usb.h>
+#include <linux/vmalloc.h>
 
 #include "pctv320cx.h"
 
@@ -113,6 +114,17 @@ void *pctv_kmalloc(size_t size)
 void pctv_kfree(void *p)
 {
 	kfree(p);
+}
+
+/* vmalloc/vfree are invisible to bindgen - see pctv320cx.h. */
+void *pctv_vmalloc(size_t size)
+{
+	return vmalloc(size);
+}
+
+void pctv_vfree(const void *p)
+{
+	vfree(p);
 }
 
 /*

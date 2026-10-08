@@ -10,6 +10,43 @@ Pinnacle PCTV 320cx ExpressCard, **2304:022e**, enumerates as **usb 1-3**
 
 ---
 
+# UPDATE 2026-10-08 ~02:00 — vertical jiggle diagnosed and fixed; chroma ramp explained
+
+Two follow-up defects reported on the live picture, both traced to their
+root cause and one fixed in the driver (details: FINDINGS §14).
+
+1. **A few lines of vertical jiggle on a still source.** Mode 2 drops ~5%
+   of active lines, and the deframer (a) keyed the field boundary on the F
+   bit, which the CX25843 flips one line early - if the bridge drops that
+   lone line the boundary slips a whole line - and (b) wrote survivors
+   straight into their nominal rows, so every drop pulled everything below
+   it up.  `pctv320cx.rs` now delimits fields by the **V blanking run**
+   (alternating output parity) and **resamples each field onto the fixed
+   288-row grid** from a `vmalloc` scratch buffer (288 x 1440 bytes), 8-bit
+   linear interpolation.  `finish_frame()` also guards a null vb2 buffer,
+   and `op_set_std()` resets the deframer.
+   Hardware result (15 s driver capture): **25.00 fps** (was 26.4),
+   consecutive-frame vertical shift **0 for 99/119** frames (was ±2..±12),
+   even/odd mismatch ~37 -> 3-6.
+2. **The chroma "gets worse after a few seconds".** `0x401` bit 7 is the
+   chroma-AGC fast-lock bit.  With `0x401 = 0x40` the edge-chroma magnitude
+   walks in over ~4 s (21 -> 3.5) then flat; with `0x401 = 0xc0` it is
+   pinned from field 1.  **The driver already uses `0xc0`**, and a 20 s
+   driver capture was flat (31.0-31.3 per 25 frames), so the ramp is only
+   visible on the libusb path when run with `0x40`.  The constant rainbow
+   fringe that remains on hard edges is cross-luma from the (chroma-free,
+   §12) DVD menu, not a time-varying defect.
+
+**Verified on hardware**: module `…-fan7qif8…`,
+`sha256 a5332ca7cb2bb65e…`.  The follow-up robustness build
+`…-zfnqlqch…`, `sha256 6d26c687a70adb9a…` built clean but could not be
+run: the host hard-crashed and rebooted during the final rebuild (no oops
+on the previous boot; nouveau BAR fault ~8 min earlier when qv4l2 was
+killed) and came up with the DiB0700 **cold-wedged**, so §0 (physical
+power-off) is needed before the next hardware run.
+
+---
+
 # UPDATE 2026-10-08 ~01:15 — the green cast and the roll are fixed
 
 The picture was a solid green, vertically torn and rolling. Two independent
@@ -132,14 +169,24 @@ zero `videobuf2` warnings, PNG at `/tmp/pctv-driver-test.png`.
 
 ## Still open
 
-* **Cold boot not re-tested.** The card was warm for all of the above, so
-  the bridge-firmware-download → jumpram → GET_VERSION path has not run
-  since the fixes (it did work end-to-end before, §1). Re-test with §0's
-  power-cycle when convenient.
-* The picture is strongly green. Chroma is clearly present (not the grey of
-  a pinned CKILLEN) but the cast has not been investigated; it may simply be
-  the source. See FINDINGS §9/§12.
-* ~5% of lines are dropped (mode-2 bandwidth ceiling) as scattered singles.
+* **Cold boot / wedge retest, and the §14.3 robustness build.** The card
+  was cold-wedged at the end of the 2026-10-08 session, so the final module
+  (`…-zfnqlqch…`) has not been run and the cold-boot
+  firmware-download path has still not been re-tested since the fixes.
+  Do §0, then re-check fps (expect 25.00), the absence of vertical jiggle,
+  and that `0x401` is `0xc0` after probe (the driver sets it; the chroma
+  ramp only appears if something clears bit 7).
+* **Cross-luma fringe on hard edges** remains (constant, not a ramp): the
+  DVD-menu source has no true chroma (§12), so this is decoder peaking /
+  cross-colour.  §10.10's `luma_lpf=3/uv_lpf=0/comb=0x40` was never tried
+  in the driver; a module parameter for `0x47a`/`0x47b` would let it be
+  A/B'd from userspace.
+* ~5% of lines are dropped (mode-2 bandwidth ceiling).  The resampler now
+  hides the vertical effect but does not recover the lines; a true fix
+  would need a streaming mode that fits PAL's 27.0 MB/s.
+* The `0x401` AGC distinction above should be kept in mind when comparing
+  libusb captures (`capture-live.sh` uses `0x40`) against the driver
+  (`0xc0`): they are not the same decoder state.
 
 ---
 
@@ -163,17 +210,16 @@ validated until the DiB0700 gets a real power-off.
 
 ## 1. Current state
 
-* **Driver**: `pctv-linux/driver/` — Rust core `pctv320cx.rs` (1551 L) + C V4L2
-  glue `v4l2-glue.c` (601 L) + `usb-shim.c` (168 L), seam header `pctv320cx.h`,
-  kbuild with bindgen bindings (`Kbuild`, `bindgen_parameters`). Builds clean
-  (only bindgen's own `unnecessary transmute` noise).
-* **Git**: committed baseline `8f5a85f` "pctv320cx: native Linux driver for the
-  PCTV 320cx analog side". **Uncommitted on top**: `pctv320cx.{rs,h}`,
-  `usb-shim.c`, `v4l2-glue.c` — all of §3 (179 insertions). Commit when the
-  hardware run confirms it.
+* **Driver**: `pctv-linux/driver/` — Rust core `pctv320cx.rs` (~1800 L) + C
+  V4L2 glue `v4l2-glue.c` (~620 L) + `usb-shim.c` (~180 L), seam header
+  `pctv320cx.h` (~200 L), kbuild with bindgen bindings. Builds clean (only
+  bindgen's own `unnecessary transmute` noise).
+* **Git**: the driver (green cast, roll, and the §14 field-resample fix) is
+  committed; see the update sections above for the per-session hashes.
 * **Installed**: `nixos-rebuild boot --impure --flake .#macbook-pro-2009-nixos`
-  → **generation 12 is the default boot entry** and contains the current module
-  (`md5 6e0f62b90ed76196edef06f081848cd4`, identical to `/tmp/pctv-result`).
+  → generation 12 is the default boot entry. The 2026-10-08 resample build
+  was run from `/tmp/pctv-result` (module `…-fan7qif8…`) rather than
+  installed into a generation; re-install once the cold-wedge retest passes.
 * **NixOS wiring** (`pctv-linux/nixos-module.nix`, enabled in
   `machines/macbook-pro-2009/default.nix`): `hardware.pctv320cx.enable = true`
   → `boot.extraModulePackages` + `boot.kernelModules = [ "pctv320cx" ]` +

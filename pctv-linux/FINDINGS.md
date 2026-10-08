@@ -2402,3 +2402,108 @@ Verified: builds warning-free against 7.2.3, `modinfo` shows the 2304:022e
 alias, both firmware entries and the videobuf2 dependencies. **Not yet run
 against the card** — first hardware run is `dmesg | grep pctv`, then
 `v4l2-ctl -d /dev/video0 --all` and a capture.
+
+---
+
+# 14. The last two picture defects: vertical jiggle and the chroma "ramp" — 2026-10-08
+
+After §13 the driver produced a stable, correctly-framed picture, but the
+live view still showed a few lines of vertical jiggle on a *still* source
+(a DVD menu), and the chroma fringing on sharp edges was suspected of
+worsening a few seconds after the signal appeared. Both were chased down
+with a 12 s / 307 MB raw capture (`pctv_probe analog2 svideo1 …`, i.e. the
+libusb path, unaffected by the driver) and a 15 s driver capture
+(`/dev/video0`, UYVY 720x576).
+
+## 14.1 The jiggle is line drops plus an F-based field boundary
+
+Mode 2 still drops ~5% of the active lines (the bridge tops out at
+25.6 MB/s, PAL needs 27.0). Two things turned that into visible motion:
+
+1. **Whole-field shift.** The old deframer completed a frame on the F bit
+   changing. The CX25843 flips F **one line early** - a single active line
+   at the end of a field already carries the next field's F - and if the
+   bridge drops that lone line (it is exactly the kind of line mode 2
+   loses) the boundary slips a whole line. Measured correlation of each
+   field against a reference of the same parity, band by band, showed bands
+   of the field displaced by 2-8 lines relative to each other, i.e. the
+   field was both shifted and internally inconsistent.
+2. **No vertical resampling.** The survivors were written straight into
+   their nominal rows (line k -> row 2k+field), so every dropped line pulled
+   the rest of the field up by one. Across a field this showed as the bottom
+   of the picture walking up and down; the whole-frame cross-correlation had
+   a standard deviation of ~4 lines and excursions to ±21.
+
+Both are fixed in `driver/pctv320cx.rs`:
+
+* **Fields are delimited by V, not F.** The vertical-blanking run is ~22
+  lines wide, so the V=1 -> V=0 transition is a far steadier anchor than a
+  single F-tagged line. Consecutive V=0 runs are one field each and their
+  output parity alternates (even/odd rows = `V4L2_FIELD_INTERLACED`).
+* **Each field is accumulated in a scratch buffer** (`vmalloc`, 288 x 1440
+  bytes, `FIELD_SCRATCH_BYTES`; shims `pctv_vmalloc`/`pctv_vfree` in
+  `usb-shim.c`) and, once its true line count N is known, **resampled onto
+  the fixed 288-row grid** with 8-bit linear interpolation. Missing lines are
+  spread evenly instead of shifting everything below them.
+
+Result on the 15 s driver capture (375 frames):
+
+| metric | before | after |
+| --- | --- | --- |
+| reported fps | 26.4 | **25.00** |
+| consecutive-frame vertical shift | ±2..±12, 0 in 38/119 | **0 in 99/119**, never beyond ±2 |
+| even/odd field mismatch (mean abs luma) | ~37 | **3-6** |
+
+A resampling simulation on the same raw data reproduced this off-line
+(_what if we resample_: full-field shift stdev 2.89 -> 0.29 lines, frame
+shifts pinned to 0) before the driver was touched.
+
+## 14.2 The chroma "gets worse" is the 0x401 fast-lock bit
+
+`0x401` bit 7 is a fast-lock / forced-acquisition bit for the chroma AGC
+and colour-killer; the in-tree `cx25840` sets it only in
+`cx25840_set_fmt()` (`cx25840_initialize()` deliberately writes `0x40`) and
+`cx25840_s_ctrl()` clears it again for manual chroma controls.
+
+Measured edge-chroma magnitude per field, `0x47a=0x90`, `0x47b=0x20`:
+
+* `0x401 = 0x40`: edgeCb **21.1 -> 18.8 -> … -> 3.5** over the first ~4 s,
+  then flat. That is the ramp.
+* `0x401 = 0xc0`: edgeCb **pinned at 1.4-1.6 from the first field**, flat
+  for the whole 10 s capture.
+
+So the "starts ok then gets worse" behaviour is chroma AGC slow-locking:
+with bit 7 clear the loop walks in over a few seconds. The driver already
+uses `0x401 = 0xc0` (`input_setup()`), and a 20 s driver capture showed
+edgeCb flat (per-25-frame means 31.0-31.3, min 26.6 max 33.5 - no trend),
+so the ramp is **not** present on the driver path. It was only visible on
+the libusb path when `capture-live.sh`/`pctv_probe` were run with `0x40`.
+
+Caveat: the same capture is a DVD menu with no true chroma content (§12),
+so "chroma fringing" on its hard edges is cross-luma / decoder peaking
+rather than real hue. The constant rainbow fringe that remains on the
+driver output is that edge response, not a time-varying defect.
+
+## 14.3 Robustness fixes and build
+
+* `finish_frame()` now guards a null videobuf2 buffer (queue dry when the
+  frame was assembled) - previously that path could call
+  `pctv_glue_buffer_done(glue, NULL, …)`.
+* `op_set_std()` resets the deframer too, so a standard change re-derives
+  the output field height (288 PAL / 240 NTSC).
+* Build: `./build-module.sh --max-jobs 4 --option builders ''` (the zen3
+  build machine rejected the SSH key during this session; local build works
+  and is ~5 min). Module `sha256 6d26c687a70adb9a…`,
+  `/nix/store/zfnqlqchzd36m6zkhlxmk799vf98zkf3-pctv320cx-0.1`.
+
+## 14.4 State when this session ended
+
+* The **resampling fix was verified on hardware** (module
+  `…-fan7qif8…`, `sha256 a5332ca7cb2bb65e…`): 375 frames at 25.00 fps, the
+  jiggle gone, `snapshots/`-comparable image clean and single.
+* The null-guard / `op_set_std` additions (`…-zfnqlqch…`) were built but
+  **not re-run on the card**: during the final rebuild the host hard-crashed
+  and rebooted (nouveau BAR fault was logged ~8 min earlier when qv4l2 was
+  killed; the crash itself left no oops) and came up with the DiB0700
+  **cold-wedged** - `GET_VERSION` NACKs even over libusb, so the fixes could
+  not be exercised. A physical power-off (HANDOVER §0) is required.

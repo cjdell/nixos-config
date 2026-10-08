@@ -153,6 +153,9 @@ bool pctv_usb_endpoint_is_in(const struct usb_endpoint_descriptor *ep);
 u32 pctv_usb_endpoint_maxpkt(const struct usb_endpoint_descriptor *ep);
 void *pctv_kmalloc(size_t size);
 void pctv_kfree(void *p);
+/* vmalloc is invisible to bindgen (linux/vmalloc.h is not included above). */
+void *pctv_vmalloc(size_t size);
+void pctv_vfree(const void *p);
 /* Mark an URB's transfer buffer as already DMA-mapped (usb_alloc_coherent). */
 void pctv_urb_use_coherent(struct urb *urb, dma_addr_t dma);
 
