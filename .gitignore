@@ -35,3 +35,4 @@ __pycache__/
 /pctv-linux/i2cdev
 /pctv-linux/i2cprobe
 /pctv-linux/pctv_probe
+/pctv-linux/pctv-monitor

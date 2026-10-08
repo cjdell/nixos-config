@@ -47,6 +47,10 @@
 #include <unistd.h>
 #include <time.h>
 #include <getopt.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <libusb-1.0/libusb.h>
 
 #define VID 0x2304
@@ -996,6 +1000,499 @@ static int cmd_probeall(int out_mode, int from, int to, int rec4)
     return 0;
 }
 
+/* ================================================================== *
+ *  ROM-bootloader window catcher ("romwin")
+ *
+ *  The DiB0700's 8051 normally self-boots firmware from its config
+ *  EEPROM; when that fails it either sits in the mask ROM (GET_VERSION
+ *  returns ram=0x00000001) or stops answering EP0 altogether.  That
+ *  window is rare and is provoked by host activity, so this watches, then
+ *  the instant the bridge answers it dumps everything (both GET_VERSION
+ *  forms, the full EEPROM, GET_GPIO, the vendor-request map).
+ *
+ *  It is strictly READ-ONLY: it never writes the EEPROM.  The only thing
+ *  it sends to the device is the ordinary RAM firmware download (which is
+ *  non-persistent and already proven harmless), and optionally a USB port
+ *  reset.
+ * ================================================================== */
+
+#define BE32(p) (((unsigned)(p)[0] << 24) | ((unsigned)(p)[1] << 16) | \
+                 ((unsigned)(p)[2] << 8)  |  (unsigned)(p)[3])
+
+static unsigned long long now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (unsigned long long)t.tv_sec * 1000ull + t.tv_nsec / 1000000ull;
+}
+
+static void stamp(char *buf, size_t n)
+{
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(buf, n, "%H:%M:%S", &tm);
+}
+
+/* mkdir -p (single component paths and nested paths, no shell-out) */
+static int mkdir_p(const char *path)
+{
+    char tmp[512];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof tmp) return -1;
+    memcpy(tmp, path, len + 1);
+    if (tmp[len - 1] == '/') tmp[len - 1] = 0;
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') { *p = 0; mkdir(tmp, 0777); *p = '/'; }
+    }
+    return mkdir(tmp, 0777);
+}
+
+/* Read GET_VERSION.  The ROM and the running firmware are reached through
+ * different bmRequestType recipients, so the caller tries both. */
+static int read_version(unsigned char *b, int len, int recip4)
+{
+    if (!dev) return LIBUSB_ERROR_NO_DEVICE;
+    return libusb_control_transfer(dev, recip4 ? 0xC4 : 0xC0, RQ_GET_VERSION,
+                                   0, 0, b, (uint16_t)len, 1000);
+}
+
+/* The DiB0700 exposes the config EEPROM through GET_EEPROM: recipient 4,
+ * request 0x02, wValue 0x01a0 (0x01 = read, 0xa0 = I2C address byte of the
+ * EEPROM at 0x50), 8 bytes per window.  This is the read the Windows driver
+ * performs at cold start.
+ *
+ * MEASURED 2026-10-08 (ROM window, 12 index points, all consistent):
+ * the 8 bytes returned are a SLIDING WINDOW that starts at EEPROM byte
+ * (wIndex >> 8) - the ROM's index register is the HIGH byte of wIndex, it is
+ * 8 bits wide, and it wraps (the window at 0xff00 ends with byte 0 again).
+ * So the byte address is wIndex>>8, NOT wIndex: the old form (wIndex = off)
+ * re-reads the same byte 32 times and only ever reaches bytes 0..max/256.
+ * With a 16-bit wIndex that caps the reachable EEPROM at 256 bytes. */
+#define EEP_RQ   0x02
+#define EEP_VAL  0x01a0
+
+/* one 8-byte window starting at EEPROM byte `off` */
+static int eep_at(int off, unsigned char *b)
+{
+    if (!dev) return LIBUSB_ERROR_NO_DEVICE;
+    return libusb_control_transfer(dev, 0xC4, EEP_RQ, EEP_VAL,
+                                   (uint16_t)((off << 8) & 0xffff), b, 8, 2000);
+}
+
+/* raw GET_EEPROM with an explicit wValue/wIndex (for form discovery) */
+static int eep_raw(int recip4, unsigned value, unsigned index, unsigned char *b, int len)
+{
+    if (!dev) return LIBUSB_ERROR_NO_DEVICE;
+    return libusb_control_transfer(dev, recip4 ? 0xC4 : 0xC0, EEP_RQ,
+                                   (uint16_t)value, (uint16_t)index, b,
+                                   (uint16_t)len, 1500);
+}
+
+static int cmd_eepromdump(unsigned maxbytes, const char *outpath, int quiet)
+{
+    unsigned char b[8];
+    unsigned off, ok = 0, bad = 0;
+    FILE *f = outpath ? fopen(outpath, "wb") : NULL;
+    if (outpath && !f) perror(outpath);
+    if (!maxbytes) maxbytes = 256;
+    if (maxbytes > 0x100) maxbytes = 0x100;  /* the ROM index is 8-bit */
+    for (off = 0; off < maxbytes; off += 8) {
+        if (!dev) break;
+        int r = eep_at((int)off, b);
+        if (r != 8) {
+            bad++;
+            if (bad <= 4)
+                printf("  eeprom %04x -> %s\n", off,
+                       r < 0 ? libusb_strerror(r) : "short read");
+            if (r == LIBUSB_ERROR_NO_DEVICE) { dev = NULL; break; }
+            memset(b, 0xdb, 8);   /* keep the image byte-aligned */
+        } else
+            ok++;
+        if (f) fwrite(b, 1, 8, f);
+        if (!quiet) {
+            printf("  %03x: ", off);
+            for (int i = 0; i < 8; i++) printf("%02x ", b[i]);
+            printf("  |");
+            for (int i = 0; i < 8; i++) putchar(b[i] >= 32 && b[i] < 127 ? b[i] : '.');
+            printf("|\n");
+        }
+    }
+    if (f) fclose(f);
+    printf("eepromdump: %u window(s) ok, %u bad, bytes 0..%02x%s\n",
+           ok, bad, maxbytes ? maxbytes - 1 : 0, outpath ? " (saved)" : "");
+    /* cross-check: the window at 0xff must run past byte 255 back to byte 0 */
+    if (dev && !quiet) {
+        unsigned char w[8];
+        int rw = eep_at(0xff, w);
+        printf("  wrap check @255 -> %s", rw < 0 ? libusb_strerror(rw) : "ok");
+        if (rw == 8) { printf("  "); for (int i = 0; i < 8; i++) printf("%02x ", w[i]); }
+        printf("\n");
+    }
+    return bad ? 1 : 0;
+}
+
+static int snapshot_window(const char *dir, int idx, int quiet, int do_map)
+{
+    char path[600], tb[16];
+    unsigned char b[16];
+    stamp(tb, sizeof tb);
+    printf("\n*** ROM WINDOW #%d at %s ***\n", idx, tb);
+    fflush(stdout);
+
+    int r0 = read_version(b, 16, 0);
+    printf("  [%s] GET_VERSION recipient0 -> %s", tb,
+           r0 < 0 ? libusb_strerror(r0) : "ok");
+    if (r0 > 0) { printf("  "); for (int i = 0; i < r0; i++) printf("%02x ", b[i]); }
+    printf("\n");
+    if (r0 == 16)
+        printf("    hw=%08x rom=%08x ram=%08x fwtype=%08x\n",
+               BE32(b), BE32(b + 4), BE32(b + 8), BE32(b + 12));
+
+    int r4 = read_version(b, 16, 1);
+    printf("  [%s] GET_VERSION recipient4 -> %s", tb,
+           r4 < 0 ? libusb_strerror(r4) : "ok");
+    if (r4 > 0) { printf("  "); for (int i = 0; i < r4; i++) printf("%02x ", b[i]); }
+    printf("\n");
+    if (r4 == 16)
+        printf("    hw=%08x rom=%08x ram=%08x fwtype=%08x\n",
+               BE32(b), BE32(b + 4), BE32(b + 8), BE32(b + 12));
+
+    if (r0 <= 0 && r4 <= 0) {
+        printf("  (window closed before snapshot)\n");
+        return 0;
+    }
+
+    unsigned char g[2];
+    int rg = libusb_control_transfer(dev, 0xC4, RQ_GET_GPIO_VAL, 0, 0, g, 2, 1000);
+    printf("  [%s] GET_GPIO_VAL -> %s", tb, rg < 0 ? libusb_strerror(rg) : "ok");
+    if (rg > 0) { printf("  "); for (int i = 0; i < rg; i++) printf("%02x ", g[i]); }
+    printf("\n");
+
+    snprintf(path, sizeof path, "%s/eeprom-window%d.bin", dir, idx);
+    printf("  [%s] EEPROM dump -> %s\n", tb, path);
+    cmd_eepromdump(0x4000, path, quiet);
+
+    /* The vendor-request map is DESTRUCTIVE to the very service we are
+     * hunting: the map sends rq 0x02 (I2C-in) with wValue 0, i.e. I2C address
+     * byte 0x00, and that wedges the ROM's I2C engine - measured 2026-10-08,
+     * GET_EEPROM answered 2048 times in a row and STALLs from the map probe
+     * onwards, while GET_VERSION kept answering.  This is the mechanism behind
+     * the old "probing every request number wedges the stick" note.  So the
+     * map is opt-in (--map), never part of the default snapshot. */
+    printf("  [%s] vendor request map (recipient 4, IN, 0x00..0xff): %s\n", tb,
+           do_map ? "running (wedges the I2C/EEPROM service)" : "SKIPPED (use --map)");
+    if (dev && do_map) cmd_probeall(0, 0, 0xff, 1);
+
+    return 1;
+}
+
+/* usage: romwin [secs] [dir] [--fw file] [--no-fw] [--reset-every N]
+ *                [--max N] [--quiet]
+ * env:   ROMWIN_FW etc. are not used; keep it explicit on the command line. */
+static int cmd_romwin(int argc, char **argv)
+{
+    int secs = 1800, reset_every = 0, max_windows = 0, quiet = 0, do_map = 0;
+    const char *dir = NULL, *fw = "firmware/win_fw.bin";
+    int positional = 0;
+
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--fw") && i + 1 < argc)        fw = argv[++i];
+        else if (!strcmp(argv[i], "--no-fw"))                 fw = NULL;
+        else if (!strcmp(argv[i], "--reset-every") && i + 1 < argc) reset_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max") && i + 1 < argc)   max_windows = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--secs") && i + 1 < argc)  secs = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--quiet"))                 quiet = 1;
+        else if (!strcmp(argv[i], "--map"))                    do_map = 1;
+        else if (argv[i][0] != '-') {
+            if (positional == 0) { secs = atoi(argv[i]); positional = 1; }
+            else if (positional == 1) { dir = argv[i]; positional = 2; }
+        }
+    }
+
+    char default_dir[256];
+    if (!dir) {
+        snprintf(default_dir, sizeof default_dir, "logs/romwin-%ld", (long)time(NULL));
+        dir = default_dir;
+    }
+    mkdir_p(dir);
+    if (max_windows <= 0) max_windows = 1 << 30;
+
+    printf("romwin: secs=%d dir=%s fw=%s reset_every=%d max_windows=%s quiet=%d\n",
+           secs, dir, fw ? fw : "(none)", reset_every,
+           (max_windows == (1 << 30)) ? "unlimited" : "set", quiet);
+    fflush(stdout);
+
+    unsigned long long deadline = now_ms() + (unsigned long long)secs * 1000ull;
+    int iter = 0, windows = 0;
+
+    while (now_ms() < deadline && windows < max_windows) {
+        iter++;
+        if (!dev) {
+            if (reopen() < 0) { usleep(200000); continue; }
+        }
+
+        unsigned char b[16];
+        int r0 = read_version(b, 16, 0);
+        int r4 = (r0 <= 0) ? read_version(b, 16, 1) : 0;
+
+        if (r0 == LIBUSB_ERROR_NO_DEVICE || r4 == LIBUSB_ERROR_NO_DEVICE) {
+            libusb_close(dev); dev = NULL;
+            continue;
+        }
+
+        if (r0 > 0 || r4 > 0) {
+            windows++;
+            snapshot_window(dir, windows, quiet, do_map);
+            fflush(stdout);
+            if (!dev) continue;
+        }
+
+        if (fw && fw[0] && dev) {
+            download_firmware(fw);
+        }
+
+        if (reset_every > 0 && (iter % reset_every) == 0) {
+            char tb[16]; stamp(tb, sizeof tb);
+            printf("[%s] iter %d: USB port reset\n", tb, iter);
+            fflush(stdout);
+            if (dev) libusb_reset_device(dev);
+            if (dev) libusb_close(dev);
+            dev = NULL;
+            usleep(300000);
+            continue;
+        }
+
+        if (!quiet && (iter % 25) == 0) {
+            char tb[16]; stamp(tb, sizeof tb);
+            printf("[%s] iter %d: cold, %d window(s) so far\n", tb, iter, windows);
+            fflush(stdout);
+        }
+        usleep(100000);
+    }
+
+    printf("romwin: finished after %d iteration(s), %d window(s), dir=%s\n",
+           iter, windows, dir);
+    return windows ? 0 : 1;
+}
+
+/* =====================================================================
+ *  EEPROM-window catcher ("eepromwin")
+ *
+ *  Caught 2026-10-08 15:53: inside a ROM window the bridge also services
+ *  GET_EEPROM (c4 02 01a0) - 2048 reads in a row, zero errors - and that
+ *  service then DIES (after the vendor-request-map probe) while GET_VERSION
+ *  keeps answering.  So the EEPROM-read window is rarer than the ROM window.
+ *  This watches for it and, the instant request 0x02 answers, takes
+ *  everything reachable in one burst: the full 256-byte image (with the
+ *  measured index = off<<8), the wrap cross-check, the wValue/wIndex form
+ *  map (hunting an index wider than 8 bits - the only thing between us and
+ *  the rest of the EEPROM) and the I2C address-byte map (which tells us the
+ *  EEPROM chip variant / page bits).
+ *
+ *  Read-only: request 0x02 is a read; nothing here writes the EEPROM.
+ * ===================================================================== */
+static void eeprom_forms(void)
+{
+    static const unsigned vals[] = {
+        0x01a0, 0x02a0, 0x04a0, 0x08a0, 0x10a0, 0x20a0,
+        0x01a1, 0x01a2, 0x01a4, 0x01a6, 0x01a8, 0x01aa, 0x01ac, 0x01ae,
+        0x00a0, 0x03a0
+    };
+    static const unsigned ixs[] = { 0x0000, 0x0100, 0x0008, 0x1000, 0xff00 };
+    unsigned char b[8];
+
+    printf("  GET_EEPROM form map (hunting an index wider than 8 bits;\n"
+           "    v low byte = I2C address byte, ix high byte = index):\n");
+    for (unsigned i = 0; i < sizeof vals / sizeof *vals; i++) {
+        for (unsigned j = 0; j < sizeof ixs / sizeof *ixs; j++) {
+            int r = eep_raw(1, vals[i], ixs[j], b, 8);
+            printf("    v=%04x ix=%04x -> %s", vals[i], ixs[j],
+                   r < 0 ? libusb_strerror(r) : "ok");
+            if (r > 0) { printf("  "); for (int k = 0; k < r; k++) printf("%02x ", b[k]); }
+            printf("\n");
+            if (r == LIBUSB_ERROR_NO_DEVICE) return;
+        }
+    }
+    int r = eep_raw(0, EEP_VAL, 0, b, 8);
+    printf("    recip0 v=01a0 ix=0000 -> %s", r < 0 ? libusb_strerror(r) : "ok");
+    if (r > 0) { printf("  "); for (int k = 0; k < r; k++) printf("%02x ", b[k]); }
+    printf("\n");
+    fflush(stdout);
+}
+
+/* Measured 2026-10-08 18:01, in the same burst that read the image: wValue
+ * 0x02a0 is the SAME 8-bit index but with a +1 offset and NO wrap -
+ * ix=0x0000 -> byte 1, 0x0100 -> byte 2, 0x1000 -> byte 16, 0xff00 -> byte 256.
+ * That is the only way found to look one byte past the 1-byte window, and byte
+ * 256 - exactly where an aligned firmware image would have to start - is 0xff
+ * (erased).  These forms are valid address bytes, so they do not wedge the
+ * engine; the destructive sweep lives in eeprom_forms() and is opt-in. */
+static void eeprom_extended(void)
+{
+    static const unsigned ixs[] = {
+        0x0000, 0x0100, 0x0200, 0x1000, 0x2000, 0xfe00, 0xff00
+    };
+    unsigned char b[8];
+
+    printf("  extended index probe (wValue 0x02a0: same 8-bit index, +1 offset, no wrap;\n"
+           "    ix=ff00 therefore reads byte 256, the first byte past the 1-byte window):\n");
+    for (unsigned j = 0; j < sizeof ixs / sizeof *ixs; j++) {
+        int r = eep_raw(1, 0x02a0, ixs[j], b, 8);
+        printf("    v=02a0 ix=%04x -> %s", ixs[j], r < 0 ? libusb_strerror(r) : "ok");
+        if (r > 0) { printf("  "); for (int k = 0; k < r; k++) printf("%02x ", b[k]); }
+        printf("\n");
+        if (r == LIBUSB_ERROR_NO_DEVICE) return;
+    }
+
+    /* Is the demod reachable on the same I2C engine right now?  Valid address
+     * bytes only (0x80/0x82 = DiB7000P at 0x40). */
+    static const unsigned addrs[] = { 0x0180, 0x0182 };
+    for (unsigned j = 0; j < sizeof addrs / sizeof *addrs; j++) {
+        int r = eep_raw(1, addrs[j], 0, b, 8);
+        printf("    I2C-in demod v=%04x -> %s", addrs[j], r < 0 ? libusb_strerror(r) : "ok");
+        if (r > 0) { printf("  "); for (int k = 0; k < r; k++) printf("%02x ", b[k]); }
+        printf("\n");
+        if (r == LIBUSB_ERROR_NO_DEVICE) return;
+    }
+    fflush(stdout);
+}
+
+static void eeprom_grab(const char *dir)
+{
+    char path[600], tb[16];
+    unsigned char b[8], img[256], v[16];
+    int off, ok = 0, bad = 0;
+
+    snprintf(path, sizeof path, "%s/eeprom-%ld.bin", dir, (long)time(NULL));
+    stamp(tb, sizeof tb);
+    printf("\n*** EEPROM WINDOW at %s -> %s ***\n", tb, path);
+    fflush(stdout);
+
+    int r0 = read_version(v, 16, 0);
+    printf("  GET_VERSION recip0 -> %s", r0 < 0 ? libusb_strerror(r0) : "ok");
+    if (r0 == 16)
+        printf("  hw=%08x rom=%08x ram=%08x fwtype=%08x",
+               BE32(v), BE32(v + 4), BE32(v + 8), BE32(v + 12));
+    printf("\n");
+    int r4 = read_version(v, 16, 1);
+    printf("  GET_VERSION recip4 -> %s", r4 < 0 ? libusb_strerror(r4) : "ok");
+    if (r4 == 16)
+        printf("  hw=%08x rom=%08x ram=%08x fwtype=%08x",
+               BE32(v), BE32(v + 4), BE32(v + 8), BE32(v + 12));
+    printf("\n");
+
+    memset(img, 0xdb, sizeof img);
+    for (off = 0; off < 256; off += 8) {
+        int r = eep_at(off, b);
+        if (r == LIBUSB_ERROR_NO_DEVICE) {
+            libusb_close(dev); dev = NULL;
+            printf("  (device vanished at byte %03x)\n", off);
+            break;
+        }
+        if (r == 8) { ok++; memcpy(img + off, b, 8); }
+        else {
+            bad++;
+            if (bad <= 3) printf("  eep %03x -> %s\n", off, r < 0 ? libusb_strerror(r) : "short");
+        }
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(img, 1, sizeof img, f); fclose(f); }
+    else perror(path);
+    printf("eepromwin: %d/32 window(s) ok, %d bad, %zu bytes -> %s\n",
+           ok, bad, sizeof img, path);
+    for (off = 0; off < 256; off += 16) {
+        printf("  %03x: ", off);
+        for (int i = 0; i < 16; i++) printf("%02x ", img[off + i]);
+        printf(" |");
+        for (int i = 0; i < 16; i++)
+            putchar(img[off + i] >= 32 && img[off + i] < 127 ? img[off + i] : '.');
+        printf("|\n");
+    }
+
+    int rw = eep_at(0xff, b);
+    printf("  wrap check @255 -> %s", rw < 0 ? libusb_strerror(rw) : "ok");
+    if (rw == 8) { printf("  "); for (int i = 0; i < 8; i++) printf("%02x ", b[i]); }
+    printf("\n");
+    fflush(stdout);
+}
+
+/* usage: eepromwin [secs] [dir] [--fw file] [--no-fw] [--max N] [--quiet] */
+static int cmd_eepromwin(int argc, char **argv)
+{
+    int secs = 1800, max_windows = 1, quiet = 0, do_map = 0;
+    const char *dir = NULL, *fw = "firmware/win_fw.bin";
+    int positional = 0;
+
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--fw") && i + 1 < argc)       fw = argv[++i];
+        else if (!strcmp(argv[i], "--no-fw"))               fw = NULL;
+        else if (!strcmp(argv[i], "--max") && i + 1 < argc) max_windows = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--quiet"))               quiet = 1;
+        else if (!strcmp(argv[i], "--map"))                  do_map = 1;
+        else if (argv[i][0] != '-') {
+            if (positional == 0) { secs = atoi(argv[i]); positional = 1; }
+            else if (positional == 1) { dir = argv[i]; positional = 2; }
+        }
+    }
+
+    char default_dir[256];
+    if (!dir) {
+        snprintf(default_dir, sizeof default_dir, "logs/eepromwin-%ld", (long)time(NULL));
+        dir = default_dir;
+    }
+    mkdir_p(dir);
+    if (max_windows <= 0) max_windows = 1 << 30;
+
+    printf("eepromwin: secs=%d dir=%s fw=%s max_windows=%s quiet=%d map=%d\n",
+           secs, dir, fw ? fw : "(none)",
+           (max_windows == (1 << 30)) ? "unlimited" : "set", quiet, do_map);
+    fflush(stdout);
+
+    unsigned long long deadline = now_ms() + (unsigned long long)secs * 1000ull;
+    int iter = 0, windows = 0;
+
+    while (now_ms() < deadline && windows < max_windows) {
+        iter++;
+        if (!dev) {
+            if (reopen() < 0) { usleep(200000); continue; }
+        }
+
+        unsigned char b[8];
+        int r = eep_at(0, b);           /* the probe: does GET_EEPROM answer? */
+        if (r == LIBUSB_ERROR_NO_DEVICE) {
+            libusb_close(dev); dev = NULL;
+            continue;
+        }
+        if (r == 8) {
+            windows++;
+            eeprom_grab(dir);
+            /* order matters: the image and the safe extended probes come first,
+             * the invalid-address sweep last and only on request - it is what
+             * wedges the I2C engine (see the --map note in rom-window.sh). */
+            if (dev) eeprom_extended();
+            if (dev && do_map) eeprom_forms();
+            if (!dev) continue;
+            if (windows >= max_windows) break;
+        }
+
+        if (fw && fw[0] && dev) download_firmware(fw);
+
+        if (!quiet && (iter % 50) == 0) {
+            char tb[16]; stamp(tb, sizeof tb);
+            printf("[%s] iter %d: no EEPROM read service, %d window(s) so far\n",
+                   tb, iter, windows);
+            fflush(stdout);
+        }
+        usleep(100000);
+    }
+
+    printf("eepromwin: finished after %d iteration(s), %d window(s), dir=%s\n",
+           iter, windows, dir);
+    return windows ? 0 : 1;
+}
+
 /* the analog bring-up: clock, i2c speed, the stk7700ph GPIO sequence,
  * REQUEST_ENABLE_VIDEO in ANALOG mode, then capture from a bulk IN endpoint */
 static int cmd_analog(int argc, char **argv)
@@ -1772,18 +2269,9 @@ static int cmd_cxdump(int argc, char **argv)
     return 0;
 }
 
-static int cmd_analog2(int argc, char **argv)
+static int analog2_bringup(const char *inp, int ntsc, const char *arm,
+                           int r1286, const char *fwpath, const char *gspec)
 {
-    const char *inp = argc > 2 ? argv[2] : "composite1";
-    int ntsc = argc > 3 && !strcmp(argv[3], "ntsc");
-    const char *arm = argc > 4 ? argv[4] : "0f101100";
-    int ep     = argc > 5 ? strtol(argv[5], 0, 0) : 0x82;
-    int nbytes = argc > 6 ? atoi(argv[6]) : 1000000;
-    const char *out = argc > 7 ? argv[7] : "/tmp/analog2.bin";
-    int r1286 = argc > 8 ? strtol(argv[8], 0, 0) : 0x0000;
-    const char *fwpath = argc > 9 ? argv[9] : "/tmp/v4l-cx25840.fw";
-    const char *gspec = argc > 10 ? argv[10] : NULL;
-
     /* board init: the kernel's stk7700ph sequence for the 320cx */
     cmd_clock(); cmd_i2cparam(100);
     cmd_gpio(6, 1, 0); usleep(20000);
@@ -1920,7 +2408,162 @@ static int cmd_analog2(int argc, char **argv)
     { const char *e = getenv("PCTV_ARMDELAY");
       if (e) { int ms = atoi(e); printf("arm delay %d ms\n", ms); usleep(ms * 1000); } }
 
+    return 0;
+}
+
+static int cmd_analog2(int argc, char **argv)
+{
+    const char *inp = argc > 2 ? argv[2] : "composite1";
+    int ntsc = argc > 3 && !strcmp(argv[3], "ntsc");
+    const char *arm = argc > 4 ? argv[4] : "0f101100";
+    int ep     = argc > 5 ? strtol(argv[5], 0, 0) : 0x82;
+    int nbytes = argc > 6 ? atoi(argv[6]) : 1000000;
+    const char *out = argc > 7 ? argv[7] : "/tmp/analog2.bin";
+    int r1286 = argc > 8 ? strtol(argv[8], 0, 0) : 0x0000;
+    const char *fwpath = argc > 9 ? argv[9] : "/tmp/v4l-cx25840.fw";
+    const char *gspec = argc > 10 ? argv[10] : NULL;
+
+    int rc = analog2_bringup(inp, ntsc, arm, r1286, fwpath, gspec);
+    if (rc) return rc;
     return cmd_cap(ep, nbytes, out);
+}
+
+/* ---- continuous userspace streaming -------------------------------
+ * The "userspace driver": the same bring-up as analog2, then raw BT.656
+ * from the bulk-IN endpoint to stdout until SIGINT/SIGTERM.  Consumers
+ * (pctv-monitor, mpv, ...) parse the BT.656 sync words themselves.
+ *
+ * Stdout is best-effort and non-blocking from the libusb callback: if the
+ * consumer stalls we drop that chunk rather than stalling the USB event loop
+ * (the parser resyncs on the next SAV, so a dropped chunk costs at most a
+ * few lines, never a wedged stream).  Bring-up diagnostics go to stderr.
+ */
+static volatile sig_atomic_t stream_stop;
+static int stream_inflight;
+static void stream_on_sig(int sig) { (void)sig; stream_stop = 1; }
+
+static void stream_cb(struct libusb_transfer *t)
+{
+    if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0) {
+        ssize_t off = 0;
+        int len = t->actual_length;
+        while (off < len) {
+            ssize_t w = write(STDOUT_FILENO, t->buffer + off, len - off);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                break;   /* EAGAIN/EPIPE: drop the rest of this chunk */
+            }
+            off += w;
+        }
+    }
+    if (!stream_stop) {
+        if (libusb_submit_transfer(t) < 0) stream_stop = 1;
+    } else {
+        stream_inflight--;
+    }
+}
+
+/* Is the DiB0700 bridge microcontroller running 1.2.0 firmware? */
+static unsigned bridge_ram(void)
+{
+    unsigned char b[16];
+    if (ctrl_in(RQ_GET_VERSION, 0, 0, b, 16) < 16) return 0;
+    return (b[8] << 24) | (b[9] << 16) | (b[10] << 8) | b[11];
+}
+
+static int cmd_stream(int argc, char **argv)
+{
+    const char *inp    = argc > 2 ? argv[2] : "composite1";
+    int ntsc           = argc > 3 && !strcmp(argv[3], "ntsc");
+    const char *fwpath = argc > 4 ? argv[4] :
+        (getenv("PCTV_DECODER_FW") ? getenv("PCTV_DECODER_FW")
+                                    : "/tmp/pctv-fw/v4l-cx25840.fw");
+    int ep             = argc > 5 ? strtol(argv[5], 0, 0) : 0x82;
+    const char *gspec  = getenv("PCTV_GPIO");
+
+    /* Keep stdout pure BT.656: bounce the bring-up chatter to stderr. */
+    int saved_out = dup(STDOUT_FILENO);
+    dup2(STDERR_FILENO, STDOUT_FILENO);
+
+    if (bridge_ram() != 0x00010200) {
+        const char *bfw = getenv("PCTV_BRIDGE_FW");
+        if (!bfw) bfw = "firmware/dvb-usb-dib0700-1.20.fw";
+        fprintf(stderr, "stream: bridge not running -> downloading %s\n", bfw);
+        if (download_firmware(bfw) == 0) {
+            unsigned ram = bridge_ram();
+            fprintf(stderr, "stream: after download ram=0x%08x -> %s\n", ram,
+                    ram == 0x00010200 ? "RUNNING" : "still cold/ROM-idle");
+        } else {
+            fprintf(stderr, "stream: bridge firmware download failed\n");
+        }
+    } else {
+        fprintf(stderr, "stream: bridge firmware already running\n");
+    }
+
+    if (analog2_bringup(inp, ntsc, "0f000000", 0x0000, fwpath, gspec) < 0) {
+        dup2(saved_out, STDOUT_FILENO);
+        close(saved_out);
+        return -1;
+    }
+
+    /* The mode-2 arm is only accepted after an off->on transition (arming it
+     * straight out of bring-up STALLs with a pipe error and the bridge then
+     * emits non-BT.656 garbage).  This mirrors the proven capture-live.sh
+     * sequence: bring up with video off, then arm mode 2. */
+    usleep(150000);
+    {
+        unsigned char arm2[4] = { 0x0f, 0x12, 0x01, 0x00 };
+        int ok = 0;
+        for (int i = 0; i < 8 && !ok; i++) {
+            if (ctrl_out(arm2, 4) >= 0) ok = 1;
+            else usleep(200000);
+        }
+        if (!ok) fprintf(stderr, "stream: WARNING: mode-2 arm kept failing\n");
+    }
+    /* Prime: discard a little so the stream starts on a clean line boundary. */
+    {
+        unsigned char *p = malloc(65536);
+        int got = 0;
+        for (int i = 0; i < 24; i++)
+            if (libusb_bulk_transfer(dev, ep, p, 65536, &got, 500) < 0) break;
+        free(p);
+    }
+
+    dup2(saved_out, STDOUT_FILENO);
+    close(saved_out);
+    int fl = fcntl(STDOUT_FILENO, F_GETFL, 0);
+    if (fl >= 0) fcntl(STDOUT_FILENO, F_SETFL, fl | O_NONBLOCK);
+    signal(SIGINT, stream_on_sig);
+    signal(SIGTERM, stream_on_sig);
+    signal(SIGPIPE, SIG_IGN);
+
+    const char *eu = getenv("PCTV_URB");
+    int bufsz = eu ? atoi(eu) : ACAP_BUFSZ;
+    if (bufsz < 512) bufsz = 512;
+    struct libusb_transfer *tr[ACAP_URBS];
+    unsigned char *buf[ACAP_URBS];
+    for (int i = 0; i < ACAP_URBS; i++) {
+        buf[i] = malloc(bufsz);
+        tr[i] = libusb_alloc_transfer(0);
+        libusb_fill_bulk_transfer(tr[i], dev, ep, buf[i], bufsz, stream_cb, NULL, 1000);
+        if (libusb_submit_transfer(tr[i]) == 0) stream_inflight++;
+    }
+    fprintf(stderr, "stream: ep 0x%02x, %d URBs x %d B -> stdout (Ctrl-C to stop)\n",
+            ep, ACAP_URBS, bufsz);
+
+    while (!stream_stop && stream_inflight > 0) {
+        struct timeval tv = { 0, 100000 };
+        libusb_handle_events_timeout_completed(NULL, &tv, NULL);
+    }
+    stream_stop = 1;
+    for (int i = 0; i < ACAP_URBS; i++) libusb_cancel_transfer(tr[i]);
+    for (int t = 0; t < 100 && stream_inflight > 0; t++) {
+        struct timeval tv = { 0, 50000 };
+        libusb_handle_events_timeout_completed(NULL, &tv, NULL);
+    }
+    for (int i = 0; i < ACAP_URBS; i++) { libusb_free_transfer(tr[i]); free(buf[i]); }
+    fprintf(stderr, "stream: stopped\n");
+    return 0;
 }
 
 static int cmd_analogout(int argc, char **argv)
@@ -1995,10 +2638,17 @@ static void usage(const char *p)
 "  identify [bus]        sweep i2c addrs for the DiBcom vendor ID (reg 768 = 01b3)\n"
 "  idrd <bus> <addr7> <reg>  read one dib7000p word (16-bit reg, 16-bit value)\n"
 "  analog2 <input> <pal|ntsc> [arm] [ep] [bytes] [file] [r1286]  one-process decoder+bridge capture\n"
+"  stream <input> [pal|ntsc] [fw] [ep]    bring up + stream raw BT.656 to stdout (userspace driver)\n"
 "  dwr <reg> <val> [addr8]   write one dib7000p word + read it back (default addr 0x80)\n"
 "  videosweep            sweep ENABLE_VIDEO and watch EP2/EP3 for data\n"
 "  analog [525|625] [ep] [bytes] [file]  full analog bring-up + capture\n"
 "  eeprom                dump the DiB0700 EEPROM via c4 02 01a0\n"
+"  eepromdump [max] [file] config EEPROM read, correct index (off<<8), max 256 B\n"
+"  romwin [secs] [dir] [--fw file] [--no-fw] [--reset-every N] [--max N] [--map] [--quiet]\n"
+"                        catch the fleeting ROM-bootloader window and dump EEPROM+state\n"
+"  eepromwin [secs] [dir] [--fw file] [--no-fw] [--max N] [--quiet]\n"
+"                        watch for the (rarer) GET_EEPROM read service and grab the\n"
+"                        whole 256 B image + index-form map the moment it answers\n"
 "  probeall [from] [to]  scan all vendor requests (IN, recipient 0)\n"
 "  probe4    [from] [to] scan all vendor requests (IN, recipient 4)\n"
 "  probeout4 [from] [to] scan all vendor requests (OUT, recipient 4)\n"
@@ -2029,21 +2679,25 @@ int main(int argc, char **argv)
     if (r < 0) { fprintf(stderr, "libusb_init: %s\n", libusb_strerror(r)); return 1; }
 
     dev = libusb_open_device_with_vid_pid(NULL, VID, PID);
-    if (!dev) {
+    if (!dev && strcmp(argv[1], "romwin") && strcmp(argv[1], "eepromwin")) {
         fprintf(stderr,
             "device %04x:%04x not found (or held by qemu/usbfs).\n"
             "Stop the Win7 VM first: virsh shutdown win7\n", VID, PID);
         libusb_exit(NULL);
         return 1;
     }
+    if (!dev)
+        fprintf(stderr, "%s: device not present yet, will wait for it\n", argv[1]);
 
     /* detach whatever kernel driver is bound (dvb_usb_dib0700) */
-    if (libusb_kernel_driver_active(dev, 0) == 1) {
-        r = libusb_detach_kernel_driver(dev, 0);
-        printf("detach kernel driver: %s\n", r ? libusb_strerror(r) : "ok");
+    if (dev) {
+        if (libusb_kernel_driver_active(dev, 0) == 1) {
+            r = libusb_detach_kernel_driver(dev, 0);
+            printf("detach kernel driver: %s\n", r ? libusb_strerror(r) : "ok");
+        }
+        r = libusb_claim_interface(dev, 0);
+        if (r < 0) fprintf(stderr, "claim if0: %s (continuing anyway)\n", libusb_strerror(r));
     }
-    r = libusb_claim_interface(dev, 0);
-    if (r < 0) fprintf(stderr, "claim if0: %s (continuing anyway)\n", libusb_strerror(r));
 
     const char *c = argv[1];
     int rc = 0;
@@ -2203,6 +2857,8 @@ int main(int argc, char **argv)
         rc = cmd_cxw(argc, argv);
     } else if (!strcmp(c, "analog2")) {
         rc = cmd_analog2(argc, argv);
+    } else if (!strcmp(c, "stream")) {
+        rc = cmd_stream(argc, argv);
     } else if (!strcmp(c, "dwr")) {
         if (argc < 4) { usage(argv[0]); rc = 2; }
         else {
@@ -2217,6 +2873,13 @@ int main(int argc, char **argv)
         rc = cmd_videosweep();
     } else if (!strcmp(c, "analog")) {
         rc = cmd_analog(argc, argv);
+    } else if (!strcmp(c, "eepromdump")) {
+        rc = cmd_eepromdump(argc > 2 ? (unsigned)strtoul(argv[2], 0, 0) : 0,
+                            argc > 3 ? argv[3] : NULL, 0);
+    } else if (!strcmp(c, "romwin")) {
+        rc = cmd_romwin(argc, argv);
+    } else if (!strcmp(c, "eepromwin")) {
+        rc = cmd_eepromwin(argc, argv);
     } else if (!strcmp(c, "eeprom")) {
         rc = cmd_eeprom();
     } else if (!strcmp(c, "probeall")) {
@@ -2246,8 +2909,10 @@ int main(int argc, char **argv)
         usage(argv[0]); rc = 2;
     }
 
-    libusb_release_interface(dev, 0);
-    libusb_close(dev);
+    if (dev) {
+        libusb_release_interface(dev, 0);
+        libusb_close(dev);
+    }
     libusb_exit(NULL);
     return rc < 0 ? 1 : (rc ? 0 : 0);
 }

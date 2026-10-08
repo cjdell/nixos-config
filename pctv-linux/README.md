@@ -38,6 +38,82 @@ Two non-obvious things had to be right, and both are in `capture-live.sh`:
 field boundaries and blanking exactly) and writes a colour plus a greyscale
 PNG from one complete field. No gap filling, nothing invented.
 
+## Live monitor — userspace, no kernel module
+
+`pctv-monitor` is a live monitor / capture GUI that talks to the card
+**entirely through libusb**.  It does not use `/dev/video*` and does not need
+the `pctv320cx` kernel module:
+
+```
+  pctv-monitor  (SDL2 GUI)
+      └─ fork/exec ─ sudo -n pctv_probe stream <input>
+                        └─ bring-up (proven analog2 sequence) → raw BT.656 on stdout
+```
+
+`pctv_probe stream <input>` is the "userspace driver": it reuses the exact
+`analog2` bring-up, arms video mode 2 (off→on, the only ordering the bridge
+accepts), then streams continuous BT.656 with 24 URBs in flight until
+SIGINT/SIGTERM.  Diagnostics go to stderr, so stdout is a clean byte stream any
+consumer can parse (the GUI, `mpv`, `ffmpeg`, a file).
+
+### Through Nix (normal way)
+
+The `hardware.pctv320cxLive` module installs both binaries and a `.desktop`
+entry, keeps the in-tree DVB driver off the card, and adds a udev rule:
+
+```nix
+# machines/macbook-pro-2009/default.nix
+imports = [ ../../pctv-linux/live-module.nix ];
+hardware.pctv320cxLive.enable = true;
+```
+
+```sh
+just rebuild          # then: pctv-monitor   (or launch it from the app menu)
+```
+
+By default the GUI invokes the probe through `sudo -n`.  For a no-sudo launcher
+set `hardware.pctv320cxLive.noSudo = true;` (installs `PCTV_NO_SUDO=1` into the
+wrapper; relies on the module's `GROUP="video", MODE="0660"` udev rule and on
+the kernel module not being bound).
+
+Standalone (without the module):
+
+```sh
+nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix {}'
+# or: nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix { noSudo = true; }'
+```
+
+### Manual build (for hacking on it)
+
+```sh
+./build.sh && ./build-monitor.sh
+./pctv-monitor                      # as your desktop user; it sudo -n's the probe
+```
+
+Monitor keys: `1`–`4` switch input (Composite 1/2/3, S-Video), `g` colour/grey,
+`s` snapshot to `/tmp/pctv-snap-*.ppm`, `r` toggle raw BT.656 recording to
+`/tmp/pctv-rec-*.bt656`, space pause, `q`/ESC quit.  The window title shows the
+input and the live field rate (~50 fields/s = 25 interlaced fps for PAL).
+
+Headless checks (no display needed):
+
+```sh
+SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor          # prints fps to stderr
+PCTV_SNAP_AFTER=120 SDL_VIDEODRIVER=dummy ./pctv-monitor     # saves one frame, exits
+# or drive the stream directly:
+sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
+```
+
+Notes / current limits:
+
+* Luma is correct and the picture is stable at the full 50 fields/s.  **Chroma
+  still shows the rainbow fringing** the offline decoder has (the §14
+  chroma/resampling work is not applied here yet).
+* PAL only for now; the parser keys off the BT.656 F/V bits but the output
+  geometry is hard-wired to 720×576.
+* The child needs raw USB.  It is launched via `sudo -n`; a udev rule (below)
+  would remove that requirement.
+
 ## The driver — `driver/`
 
 The reverse-engineered bring-up is now a real kernel module: **`pctv320cx.ko`**,
