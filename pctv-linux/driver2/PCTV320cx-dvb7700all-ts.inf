@@ -1,0 +1,237 @@
+;////////////////////////////////////////////////////////////////////////////////
+;//
+;//                           (C) Pinnacle Systems 2008
+;//      All rights are reserved.  Reproduction in whole or in part is prohibited
+;//      without the written consent of the copyright owner.
+;//
+;//      Pinnacle Systems, Inc. reserves the right to make changes without notice at any time.
+;//      Pinnacle Systems, Inc. makes no warranty, expressed, implied or statutory, including
+;//      but not limited to any implied warranty of merchantibility of fitness
+;//      for any particular purpose, or that the use will not infringe any
+;//      third party patent, copyright or trademark.
+;//      Pinnacle Systems, Inc. must not be liable for any loss or damage arising from its use.
+;//
+;////////////////////////////////////////////////////////////////////////////////
+
+;----------------------------------------------------------------------------------------------------
+;
+; PCTVyu.inf   -- This file contains installation information for
+;
+;                    PCTV 340e
+;                    PCTV 340e SE
+;                    PCTV 801e
+;                    PCTV 801e SE
+;
+;
+; Copyright (c) 2007,2008 Pinnacle Systems
+;----------------------------------------------------------------------------------------------------
+
+
+; TEST-SIGNED variant: dvb7700all.sys carries an embedded self-signed
+; Authenticode signature with the MS Test EKU (1.3.6.1.4.1.311.10.3.22);
+; the guest must be in testsigning mode and hold the cert in its Root store.
+; MODIFIED 2026-10-06 for the PCTV 320cx analog experiment (cjdell):
+;   - adds USB\VID_2304&PID_022E (PCTV 320cx) -> dvb7700all.sys v2.3.3.28
+;   - service renamed to mod7700all so the mod7700.sys install stays intact
+;   - CatalogFile commented out (editing invalidates PCTVyu64.cat); the guest
+;     runs testsigning + nointegritychecks and the install is clicked through
+;     interactively (see scripts/pctv-tools/instclick.cs)
+; Original: "Driver/PCTV 340e 801e/64 bit/PCTVyu64.inf" from
+; Pinnacle_TVCenterProSetup_5.4.0.3032.exe
+;
+[Version]
+signature	= "$CHICAGO$"
+Class		= Media
+ClassGUID	= {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider	= %Vendor%
+DriverVer	= 10/06/2026,9.9.9.9
+;CatalogFile.ntamd64  = PCTVyu64.cat   ; edited INF -> catalog no longer matches
+DriverPackageType = PlugAndPlay
+DriverPackageDisplayName = "PCTV 340e(SE), PCTV 801e(SE)"
+
+
+[Manufacturer]
+%Vendor% = Pinnacle,NTamd64
+
+[Pinnacle.NTamd64]
+%PCTV340e.DeviceDesc%  = MOD7000.Device,USB\VID_2304&PID_023D           ; PCTV 340e
+%PCTV340eSE.DeviceDesc%  = MOD7000.Device,USB\VID_2304&PID_023E         ; PCTV 340e SE
+%PCTV801e.DeviceDesc% = MOD7000.Device,USB\VID_2304&PID_023A            ; PCTV 801e, 1f08
+%PCTV801eSE.DeviceDesc% = MOD7000.Device,USB\VID_2304&PID_023B          ; PCTV 801e SE, 1efc
+%PCTV320cx.DeviceDesc% = MOD7000_320cx.Device,USB\VID_2304&PID_022E ; PCTV 320cx (ADDED)
+
+[DestinationDirs]
+MOD7000.CopyDrivers	= 10,System32\Drivers 
+
+
+[SourceDisksNames]
+1 = %INSTALLATION_DISK%,,
+
+
+[SourceDisksFiles]
+dvb7700all.sys = 1
+
+
+[ControlFlags]
+ExcludeFromSelect    = *
+ExcludeFromSelect.NT = *
+
+
+;---------------------  PCTV 320cx via dvb7700all (ADDED)  --------------------
+
+[MOD7000_320cx.Device.NTamd64]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_320cx.Device.NTamd64.HW]
+AddReg = MOD7000_320cx_DEVICE_AddReg
+
+[MOD7000_320cx.Device.NTamd64.Services]
+Addservice = mod7700all, 0x00000002, MOD7000_320cx.AddService
+
+[MOD7000_320cx.AddService]
+DisplayName    = %MOD7000.FriendlyName2%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\dvb7700all.sys
+LoadOrderGroup = Base
+AddReg         = MOD7000.Service.AddReg
+
+; Device Parameters: this package's own set (ProductId=0 means the driver
+; auto-detects the board from the bridge ID block), but with the real PID.
+[MOD7000_320cx_DEVICE_AddReg]
+HKR,,"ProductId",0x00010001,0x0000022E
+HKR,,"MaskDevicePath",0x00010001,0x00000000
+HKR,,"BdaDigCaptureFilterName",0,"DiBcom BDA Digital Capture"
+HKR,,"BdaDigTunerFilterName",0,"DiBcom BDA Digital Tuner"
+HKR,,"AnlgTunerFilterName",0,"DiBcom BDA Analog TV Tuner"
+HKR,,"AnlgCaptureFilterName",0,"DiBcom BDA Analog Capture"
+HKR,,"AnlgXBarFilterName",0,"DiBcom BDA Analog Xbar"
+HKR,,"AnlgTVAudioFilterName",0,"DiBcom BDA Analog TV Audio"
+HKR,,"ControlFilterName",0,"DiBcom Control Filter"
+HKR,,"AnlgAudioCaptureFilterName",0,"DiBcom BDA Analog Audio Capture"
+
+[MOD7000.Device.NT]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000.Device.NT.HW]
+AddReg = MOD7000_DEVICE_AddReg
+
+
+[MOD7000.Device.NT.Services]
+Addservice = mod7700, 0x00000002, MOD7000.AddService
+
+
+[MOD7000.AddService]
+DisplayName    = %MOD7000.FriendlyName2%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %10%\System32\Drivers\dvb7700all.sys
+LoadOrderGroup = Base
+AddReg         = MOD7000.Service.AddReg
+
+
+[MOD7000.Service.AddReg]
+HKR,,DigitalJmp,0x00010001,0x00
+
+
+[MOD7000.CopyDrivers]
+dvb7700all.sys
+
+[MOD7000.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,dvb7700all.sys
+HKR,,PageOutWhenUnopened,3,01
+HKLM,System\CurrentControlSet\Control\MediaCategories\{FF7451BA-42F1-4a9e-9908-E12406A48D6D}
+HKLM,System\CurrentControlSet\Control\MediaCategories\{FF7451BA-42F1-4a9e-9908-E12406A48D6D},Display,0x00010001,0
+HKLM,System\CurrentControlSet\Control\MediaCategories\{FF7451BA-42F1-4a9e-9908-E12406A48D6D},Name,,"Tuner Node"
+HKLM,System\CurrentControlSet\Control\MediaCategories\{7969986E-A637-4e4e-8AC8-0BD9A02DFC1F}
+HKLM,System\CurrentControlSet\Control\MediaCategories\{7969986E-A637-4e4e-8AC8-0BD9A02DFC1F},Display,0x00010001,0
+HKLM,System\CurrentControlSet\Control\MediaCategories\{7969986E-A637-4e4e-8AC8-0BD9A02DFC1F},Name,,"Demodulator Node"
+HKLM,System\CurrentControlSet\Control\MediaCategories\{54B37042-5CED-48dd-BF4B-16FF7D6E8C81}
+HKLM,System\CurrentControlSet\Control\MediaCategories\{54B37042-5CED-48dd-BF4B-16FF7D6E8C81},Display,0x00010001,0
+HKLM,System\CurrentControlSet\Control\MediaCategories\{54B37042-5CED-48dd-BF4B-16FF7D6E8C81},Name,,"Antenna In Pin"
+
+[MOD7000_DEVICE_AddReg]
+HKR,,"ProductId",0x00010001,0x00000000
+HKR,,"MaskDevicePath",0x00010001,0x00000000
+HKR,,"BdaDigCaptureFilterName",0,"DiBcom BDA Digital Capture"
+HKR,,"BdaDigTunerFilterName",0,"DiBcom BDA Digital Tuner"
+HKR,,"AnlgTunerFilterName",0,"DiBcom BDA Analog TV Tuner"
+HKR,,"AnlgCaptureFilterName",0,"DiBcom BDA Analog Capture"
+HKR,,"AnlgXBarFilterName",0,"DiBcom BDA Analog Xbar"
+HKR,,"AnlgTVAudioFilterName",0,"DiBcom BDA Analog TV Audio"
+HKR,,"ControlFilterName",0,"DiBcom Control Filter"
+
+
+[Strings]
+Vendor              	= "Pinnacle Systems"
+PCTV320cx.DeviceDesc     = "Pinnacle PCTV 320cx (dvb7700all test)"
+MOD7000.FriendlyName2    = "DiBcom DIB7700 based TV tuner device (dvb7700all)"
+MOD7000.FriendlyName 	= "DiBcom DIB7700 based TV tuner device"
+INSTALLATION_DISK     = "PCTV Installation Disk"
+PCTV340e.DeviceDesc   = "Pinnacle PCTV 340e"
+PCTV340eSE.DeviceDesc = "Pinnacle PCTV 340e SE"
+PCTV801e.DeviceDesc   = "Pinnacle PCTV 801e"
+PCTV801eSE.DeviceDesc = "Pinnacle PCTV 801e SE"
+
+;
+; The following items should be moved to KS_registration - TCP
+;
+
+MediaCategories         = "SYSTEM\CurrentControlSet\Control\MediaCategories"
+    
+
+;
+; ServiceType values
+SERVICE_KERNEL_DRIVER			= 0x00000001
+SERVICE_FILE_SYSTEM_DRIVER		= 0x00000002
+SERVICE_ADAPTER				= 0x00000004
+SERVICE_RECOGNIZER_DRIVER		= 0x00000008
+SERVICE_WIN32_OWN_PROCESS		= 0x00000010
+SERVICE_WIN32_SHARE_PROCESS		= 0x00000020
+SERVICE_INTERACTIVE_PROCESS		= 0x00000100
+SERVICE_INTERACTIVE_SHARE_PROCESS	= 0x00000120
+
+; StartType values
+SERVICE_BOOT_START          = 0x00000000
+SERVICE_SYSTEM_START        = 0x00000001
+SERVICE_AUTO_START          = 0x00000002
+SERVICE_DEMAND_START        = 0x00000003
+SERVICE_DISABLED            = 0x00000004
+
+; ErrorControl values
+SERVICE_ERROR_IGNORE        = 0x00000000
+SERVICE_ERROR_NORMAL        = 0x00000001
+SERVICE_ERROR_SEVERE        = 0x00000002
+SERVICE_ERROR_CRITICAL      = 0x00000003
+
+; Characteristic flags
+NCF_VIRTUAL                 = 0x0001
+NCF_WRAPPER                 = 0x0002
+NCF_PHYSICAL                = 0x0004
+NCF_HIDDEN                  = 0x0008
+NCF_NO_SERVICE              = 0x0010
+NCF_NOT_USER_REMOVABLE      = 0x0020
+NCF_HAS_UI                  = 0x0080
+NCF_MODEM                   = 0x0100
+
+; Registry types
+REG_MULTI_SZ                = 0x10000
+REG_EXPAND_SZ               = 0x20000
+REG_DWORD                   = 0x10001
+
+; Win9x Compatible Types
+REG_BINARY                  = 17
+REG_SZ                      = 0
+
+; Service install flags
+SPSVCINST_TAGTOFRONT        = 0x1
+SPSVCINST_ASSOCSERVICE      = 0x2

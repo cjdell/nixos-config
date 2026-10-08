@@ -1,0 +1,116 @@
+# pctv-linux — PCTV 320cx (dib0700) analog capture on Linux
+
+Reverse-engineering notes and tooling for capturing **analog video** (composite
+/ S-video) from a Pinnacle PCTV 320cx ExpressCard on Linux. The mainline
+`dvb-usb-dib0700` driver is DVB-only and never enables the analog path, so the
+hardware is driven directly over libusb. Full journey: **`FINDINGS.md`**.
+
+## TL;DR — capturing a frame
+
+```sh
+./capture-live.sh composite1 6 menu best     # input, seconds, tag, field index
+#   -> snapshots/menu-colour.png
+#   -> snapshots/menu-grey.png
+```
+
+`input` is `composite1` or `svideo1`. `best` picks the most complete field;
+you can also pass a field number, or `-1` (same as `best`).
+
+Requires `sudo` (raw USB) and `/tmp/pyn` (a `nix shell --impure nixpkgs#python3`
+wrapper, since python3 is not on PATH).
+
+## How it works
+
+Two non-obvious things had to be right, and both are in `capture-live.sh`:
+
+1. **CX25843 setup through the demod's i2c gate**, with 2-byte register
+   addressing. Notably `0x401 = 0xc0` switches the **colour killer off** —
+   the vendor default leaves it on, which pins chroma to neutral and yields a
+   grey picture.
+2. **`ENABLE_VIDEO` mode 2** (`arm 0f 12 01 00`). The driver and kernel only
+   use mode 1, which hands over just the active part of each BT.656 line and
+   runs at 15.3 MB/s — under the 27.0 MB/s a PAL signal needs — so the bridge
+   silently drops ~32 % of lines. Mode 2 passes the whole line (EAV +
+   blanking + SAV + active) at 25.6 MB/s ≈ 95 % of lines. This was the root
+   cause of every "missing chunks / warped geometry" symptom.
+
+`decode-bt656.py` then parses the real BT.656 stream (EAV/SAV sync words give
+field boundaries and blanking exactly) and writes a colour plus a greyscale
+PNG from one complete field. No gap filling, nothing invented.
+
+## The driver — `driver/`
+
+The reverse-engineered bring-up is now a real kernel module: **`pctv320cx.ko`**,
+Rust core + C V4L2 glue, in `driver/`.
+
+| file | role |
+| --- | --- |
+| `pctv320cx.rs` | driver core (Rust): DiB0700 firmware download, I2C tunnel, CX25843 programming, bulk-IN capture, BT.656 → UYVY (Cb Y Cr Y) deframer |
+| `v4l2-glue.c` | the V4L2 face: `video_device`, `vb2_queue`, ioctl table, control handler, buffer handoff |
+| `usb-shim.c` | `struct usb_driver` registration, endpoint helpers, firmware request, `MODULE_DEVICE_TABLE` |
+| `pctv320cx.h` | the seam between the two halves (`struct pctv_ops`, `pctv_glue_*`) — also the bindgen input |
+| `Kbuild` | kbuild rules: C objects, the Rust object, and the **bindgen-generated bindings** |
+| `bindgen_parameters` | the kernel's own bindgen tweaks (opaque/blocklisted types) |
+| `Makefile`, `package.nix` | out-of-tree build (`make KDIR=…`) and the Nix derivation |
+
+Build (kernel must have `CONFIG_RUST=y`; the bindings are generated from that
+kernel's headers at build time, exactly like the in-tree `bindings` crate):
+
+```sh
+# against the running kernel
+make
+# against a prepared build tree
+make KDIR=/lib/modules/<version>/build
+# Nix: against the MacBook's kernelPackages
+nix build --impure --expr 'let f = builtins.getFlake "/home/cjdell/nixos-config";
+  kp = f.nixosConfigurations.macbook-pro-2009-nixos.config.boot.kernelPackages;
+  in import ./pctv-linux/driver/package.nix { stdenv = kp.stdenv; kernel = kp.kernel;
+                                             lib = import <nixpkgs/lib>; }'
+```
+
+Deploy on the MacBook (the host with the ExpressCard slot) — `nixos-module.nix`
+adds the module to `boot.extraModulePackages` / `boot.kernelModules`, pulls in
+linux-firmware (`dvb-usb-dib0700-1.20.fw`, `v4l-cx25840.fw`) and keeps
+`dvb_usb_dib0700` off the device. It is enabled in
+`machines/macbook-pro-2009/default.nix`; the Win7-VM passthrough that used to
+own the card is retired.
+
+Module metadata after a successful build:
+
+```
+alias:   usb:v2304p022Ed*…      depends: videodev,videobuf2-v4l2,videobuf2-common,videobuf2-vmalloc
+firmware: dvb-usb-dib0700-1.20.fw, v4l-cx25840.fw      parm: debug (u32)
+```
+
+**Status: builds clean against 7.2.3 (the MacBook's kernel); not yet run against
+hardware.** The bring-up sequence, the mode-2 arm and the deframer are direct
+transcriptions of what `capture-live.sh` proved on the real card; the first
+on-hardware run is the next step (`dmesg`, `v4l2-ctl --all`, then
+`ffmpeg -i /dev/video0 …`).
+
+## State
+
+* **Geometry: solved.** Full 288-line fields, sharp, correctly proportioned.
+* **Colour: inconclusive, probably mostly absent on the test disc.**  On the
+  DVD menu used as a reference the chroma has no stable component (it averages
+  to grey faster than noise would) and rises monotonically with the luma
+  gradient — i.e. it is luma-edge leakage, not real chroma. See `FINDINGS.md`
+  §12. Earlier captures of other content *did* show genuine flat colour, so
+  the decode path can carry colour; whether this disc has any is unresolved.
+* Sharper S-video made **no difference**, which argues against cross-colour
+  being the mechanism (see §12.1).
+
+## Layout
+
+| path | what |
+| --- | --- |
+| `FINDINGS.md` | the whole investigation — read this first |
+| `driver/` | the kernel module (Rust core + C V4L2 glue), see above |
+| `nixos-module.nix` | `hardware.pctv320cx.enable` — deploy the module |
+| `capture-live.sh` | one-shot: bring-up → arm → capture → decode → PNG |
+| `decode-bt656.py` | current decoder (mode 2 / true BT.656) |
+| `probe.c`, `build.sh` | the libusb tool: firmware load, i2c, registers, capture |
+| `decode-clean.py` | superseded: mode-1 gap filling + two-field merge |
+| `decode2.py`, `decode-color.py`, `decode-field.py` | earlier decoders, reference |
+| `color-test.sh`, `clock-tune.sh`, `geo-tune.sh` | register sweep harnesses |
+| `snapshots/` | verification stills |

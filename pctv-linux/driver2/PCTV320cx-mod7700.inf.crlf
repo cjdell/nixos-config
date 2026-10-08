@@ -1,0 +1,391 @@
+;////////////////////////////////////////////////////////////////////////////////
+;//
+;//                           (C) Pinnacle Systems GmbH 2008
+;//      All rights are reserved.  Reproduction in whole or in part is prohibited
+;//      without the written consent of the copyright owner.
+;//
+;//      Pinnacle Systems, Inc. reserves the right to make changes without notice at any time.
+;//      Pinnacle Systems, Inc. makes no warranty, expressed, implied or statutory, including
+;//      but not limited to any implied warranty of merchantibility of fitness
+;//      for any particular purpose, or that the use will not infringe any
+;//      third party patent, copyright or trademark.
+;//      Pinnacle Systems, Inc. must not be liable for any loss or damage arising from its use.
+;//
+;////////////////////////////////////////////////////////////////////////////////
+
+;----------------------------------------------------------------------------------------------------
+;
+; PCTVEMPV.inf   -- This file contains installation information for
+;                   PCTV 2000e
+;                    PCTV 2001e
+;                    PCTV 280e
+;                    PCTV 73A
+;                    PCTV 73e
+;                    PCTV 73e Solo
+;                    PCTV 281ea
+;
+; Copyright (c) 2008 Pinnacle Systems
+;----------------------------------------------------------------------------------------------------
+
+; MODIFIED 2026-10-06 for the PCTV 320cx analog experiment (cjdell):
+;   - adds USB\VID_2304&PID_022E (PCTV 320cx) -> mod7700.sys v3.12.4.0
+;   - device registry values copied from the 320cx sections of the stock
+;     PCTV 72e/320cx PCTV.inf (installed in the guest as oem3.inf, driver 3.0.3.3)
+;   - CatalogFile commented out: editing the INF invalidates pctvdib64.cat.
+;     The guest runs with testsigning + nointegritychecks for this test.
+;   - NO GpioStateTable for the 320cx (that table belongs to the 73e/280e board).
+;
+; Original: "Driver/PCTV 200Xe/64 bit/PCTVDiB64.inf" inside
+; Pinnacle_TVCenterProSetup_5.4.0.3032.exe
+;
+[Version]
+signature	= "$CHICAGO$"
+Class		= Media
+ClassGUID	= {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider	= %Vendor%
+DriverVer	= 06/19/2008,3.12.4.0
+;CatalogFile = PCTVDiB64.cat   ; edited INF -> catalog hash no longer matches
+DriverPackageType=PlugAndPlay
+DriverPackageDisplayName="PCTV 73e, PCTV 73e Solo, PCTV 73A, PCTV 281ea, PCTV 2000e, PCTV 2001, PCTV DVB-T Flash Stick (280e)"
+
+
+[Manufacturer]
+%Vendor% = Pinnacle,NTamd64
+
+[Pinnacle]
+;%MOD7000.DeviceDesc1% 	= MOD7000_2000e.Device,USB\VID_2304&PID_022C				; PCTV 2000e
+%MOD7000.DeviceDesc2% 	= MOD7000_Twinky.Device,USB\VID_2304&PID_0229				; PCTV 2001e, Twinky
+%MOD7000.DeviceDesc3% 	= MOD7000_Tweety.Device,USB\VID_2304&PID_0228				; PCTV 280e, Tweety
+%MOD7000.DeviceDesc4% 	= MOD7000_73e.Device,USB\VID_2304&PID_0237			  	; PCTV 73e
+%MOD7000.DeviceDesc5% 	= MOD7000_73e.Device,USB\VID_2304&PID_0239			  	; PCTV 281ea
+%MOD7000.DeviceDesc6% 	= MOD7000_73e.Device,USB\VID_2304&PID_0243			  	; PCTV 73A
+%MOD7000.DeviceDesc7% 	= MOD7000_73e.Device,USB\VID_2304&PID_0245			  	; PCTV 73e Solo
+
+
+[Pinnacle.NTamd64]
+;%MOD7000.DeviceDesc1% 	= MOD7000_2000e.Device,USB\VID_2304&PID_022C				; PCTV 2000e
+%MOD7000.DeviceDesc2% 	= MOD7000_Twinky.Device,USB\VID_2304&PID_0229				; PCTV 2001e, Twinky
+%MOD7000.DeviceDesc3% 	= MOD7000_Tweety.Device,USB\VID_2304&PID_0228				; PCTV 280e, Tweety
+%MOD7000.DeviceDesc4% 	= MOD7000_73e.Device,USB\VID_2304&PID_0237			  	; PCTV 73e
+%MOD7000.DeviceDesc5% 	= MOD7000_73e.Device,USB\VID_2304&PID_0239			  	; PCTV 281ea
+%MOD7000.DeviceDesc6% 	= MOD7000_73e.Device,USB\VID_2304&PID_0243			  	; PCTV 73A
+%MOD7000.DeviceDesc7% 	= MOD7000_73e.Device,USB\VID_2304&PID_0245			  	; PCTV 73e Solo
+%MOD7000.DeviceDesc8% = MOD7000_320cx.Device,USB\VID_2304&PID_022E ; PCTV 320cx (ADDED)
+
+[DestinationDirs]
+MOD7000.CopyDrivers	= 12,
+
+
+[SourceDisksNames]
+1 = %INSTALLATION_DISK%,,
+
+
+[SourceDisksFiles]
+mod7700.sys = 1
+
+
+[ControlFlags]
+ExcludeFromSelect    = *
+ExcludeFromSelect.NT = *
+
+;---------------------  MOD 7000  --------------------
+
+[MOD7000_2000e.Device]
+Include    = ks.inf, kscaptur.inf, bda.inf
+Needs      = KS.Registration, KSCAPTUR.Registration, BDA.Installation, BDA.Registration,
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_2000e.Device.NT]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+CopyINF   = PCTVDiBIR64.inf
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_Twinky.Device]
+Include    = ks.inf, kscaptur.inf, bda.inf
+Needs      = KS.Registration, KSCAPTUR.Registration, BDA.Installation, BDA.Registration,
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_Twinky.Device.NT]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+CopyINF   = PCTVDiBIR64.inf
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_Tweety.Device]
+Include    = ks.inf, kscaptur.inf, bda.inf
+Needs      = KS.Registration, KSCAPTUR.Registration, BDA.Installation, BDA.Registration,
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_Tweety.Device.NT]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+CopyINF   = PCTVDiBIR64.inf
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_73e.Device]
+Include    = ks.inf, kscaptur.inf, bda.inf
+Needs      = KS.Registration, KSCAPTUR.Registration, BDA.Installation, BDA.Registration,
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_73e.Device.NT]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+CopyINF    = PCTVDiBIR.inf
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+;------------ H W ------------
+
+[MOD7000_2000e.Device.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.2000e.AddReg
+
+[MOD7000_2000e.Device.NT.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.2000e.AddReg
+
+[MOD7000_Twinky.Device.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.Twinky.AddReg
+
+[MOD7000_Twinky.Device.NT.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.Twinky.AddReg
+
+[MOD7000_Tweety.Device.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.Tweety.AddReg
+
+[MOD7000_Tweety.Device.NT.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.Tweety.AddReg
+
+[MOD7000_73e.Device.NT.HW]
+AddReg = MOD7000_DEVICE_AddReg,MOD7000.73e.AddReg
+
+;------ S E R V I C E S ------
+
+[MOD7000_2000e.Device.NT.Services]
+Addservice = mod7700, 0x00000002, MOD7000.AddService
+
+[MOD7000_Twinky.Device.NT.Services]
+Addservice = mod7700, 0x00000002, MOD7000.AddService
+
+[MOD7000_Tweety.Device.NT.Services]
+Addservice = mod7700, 0x00000002, MOD7000.AddService
+
+[MOD7000_73e.Device.NT.Services]
+Addservice = mod7700, 0x00000002, MOD7000.AddService
+
+
+[MOD7000.AddService]
+DisplayName    = %MOD7000.FriendlyName%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\mod7700.sys
+LoadOrderGroup = Base
+AddReg         = MOD7000.Service.AddReg
+
+[MOD7000.Service.AddReg]
+HKR,,DigitalJmp,0x00010001,0x00
+HKR,"parameters","ReducedScanning",0x0000001,0x01
+
+
+
+;---------------------  MOD 7000 / PCTV 320cx (ADDED)  --------------------
+
+[MOD7000_320cx.Device.NTamd64]
+Include    = ks.inf, kscaptur.inf, bda.inf, wdmaudio.inf
+Needs      = KS.Registration.NT, KSCAPTUR.Registration.NT, BDA.Installation.NT
+AddReg     = MOD7000.AddReg
+CopyFiles  = MOD7000.CopyDrivers
+
+[MOD7000_320cx.Device.NTamd64.HW]
+AddReg = MOD7000_320cx_DEVICE_AddReg
+
+[MOD7000_320cx.Device.NTamd64.Services]
+Addservice = mod7700, 0x00000002, MOD7000_320cx.AddService
+
+[MOD7000_320cx.AddService]
+DisplayName    = %MOD7000.FriendlyName%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\mod7700.sys
+LoadOrderGroup = Base
+AddReg         = MOD7000_320cx.Service.AddReg
+
+[MOD7000_320cx.Service.AddReg]
+HKR,,DigitalJmp,0x00010001,0x00
+HKR,"parameters","ReducedScanning",0x0000001,0x00
+
+; Device (HW) values copied verbatim from the 320cx sections of the stock
+; PCTV 72e/320cx PCTV.inf. Deliberately no GpioStateTable.
+[MOD7000_320cx_DEVICE_AddReg]
+HKR,,"ProductId",0x00010001,0x0000022E
+HKR,,"MaskDevicePath",0x00010001,0x00000001
+HKR,,"BdaDigCaptureFilterName",0,"PCTV DiB BDA Digital Capture"
+HKR,,"BdaDigTunerFilterName",0,"PCTV DiB BDA Digital Tuner"
+HKR,,"AnlgTunerFilterName",0,"PCTV DiB BDA Analog TV Tuner"
+HKR,,"AnlgCaptureFilterName",0,"PCTV DiB BDA Analog Capture"
+HKR,,"AnlgXBarFilterName",0,"PCTV DiB BDA Analog Xbar"
+HKR,,"AnlgTVAudioFilterName",0,"PCTV DiB BDA Analog TV Audio"
+HKR,,"ControlFilterName",0,"PCTV DiB Control Filter"
+HKR,,"AnlgAudioCaptureFilterName",0,"PCTV DiB BDA Analog Audio Capture"
+HKR,,"DCode",0x00010001,0xFFFFFFFF
+HKR,,"DigitalAmpLimitLevel",0x00010001,0x50
+HKR,,"DigitalAmpTimer",0x00010001,0x32
+HKR,,"AnalogAmpLimitLevel",0x00010001,0x2000
+HKR,,"AudioCaptureSupport",0x00010001,0x00000001
+HKR,,"FORMATMODE",0x00010001,0x00000000
+
+;---------------------  M I S C  ----------------------
+
+[MOD7000.CopyDrivers]
+mod7700.sys
+
+[MOD7000.2000e.AddReg]
+HKR,,"ProductId",0x00010001,0x00001E8C                                ; Diversity!!!
+
+[MOD7000.Twinky.AddReg]
+HKR,,"ProductId",0x00010001,0x00001EBE                                ; 
+
+[MOD7000.Tweety.AddReg]
+HKR,,"ProductId",0x00010001,0x00001EBC                                ; 
+
+[MOD7000.73e.AddReg]
+HKR,,"ProductId",0x00010001,0x00001E80                                ; 
+
+
+[MOD7000.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,mod7700.sys
+HKR,,PageOutWhenUnopened,3,01
+HKLM,System\CurrentControlSet\Control\MediaCategories\{FF7451BA-42F1-4a9e-9908-E12406A48D6D}
+HKLM,System\CurrentControlSet\Control\MediaCategories\{FF7451BA-42F1-4a9e-9908-E12406A48D6D},Display,0x00010001,0
+HKLM,System\CurrentControlSet\Control\MediaCategories\{FF7451BA-42F1-4a9e-9908-E12406A48D6D},Name,,"Tuner Node"
+HKLM,System\CurrentControlSet\Control\MediaCategories\{7969986E-A637-4e4e-8AC8-0BD9A02DFC1F}
+HKLM,System\CurrentControlSet\Control\MediaCategories\{7969986E-A637-4e4e-8AC8-0BD9A02DFC1F},Display,0x00010001,0
+HKLM,System\CurrentControlSet\Control\MediaCategories\{7969986E-A637-4e4e-8AC8-0BD9A02DFC1F},Name,,"Demodulator Node"
+HKLM,System\CurrentControlSet\Control\MediaCategories\{54B37042-5CED-48dd-BF4B-16FF7D6E8C81}
+HKLM,System\CurrentControlSet\Control\MediaCategories\{54B37042-5CED-48dd-BF4B-16FF7D6E8C81},Display,0x00010001,0
+HKLM,System\CurrentControlSet\Control\MediaCategories\{54B37042-5CED-48dd-BF4B-16FF7D6E8C81},Name,,"Antenna In Pin"
+
+; add audio input and output pinnames
+HKLM,SYSTEM\CurrentControlSet\Control\MediaCategories\%HOOK_ANLG_AUDIO_IN_PIN%,"Name",,"Analog Audio input"
+HKLM,SYSTEM\CurrentControlSet\Control\MediaCategories\%HOOK_ANLG_AUDIO_OUT_PIN%,"Name",,"Audio"
+
+[MOD7000_DEVICE_AddReg]
+HKR,,"ProductId",0x00010001,0x00000000
+HKR,,"MaskDevicePath",0x00010001,0x00000000
+HKR,,"BdaDigCaptureFilterName",0,"PCTV DiB BDA Digital Capture"
+HKR,,"BdaDigTunerFilterName",0,"PCTV DiB BDA Digital Tuner"
+HKR,,"AnlgTunerFilterName",0,"PCTV DiB BDA Analog TV Tuner"
+HKR,,"AnlgCaptureFilterName",0,"PCTV DiB BDA Analog Capture"
+HKR,,"AnlgXBarFilterName",0,"PCTV DiB BDA Analog Xbar"
+HKR,,"AnlgTVAudioFilterName",0,"PCTV DiB BDA Analog TV Audio"
+HKR,,"ControlFilterName",0,"PCTV DiB Control Filter"
+HKR,,"AnlgAudioCaptureFilterName",0,"PCTV DiB BDA Analog Audio Capture"
+HKR,,"GpioStateTable",0x00000001, \
+     %GPIO_USB%, %GPIO_FUNC_BOARD_ON%, 1, %GPIO_USB_DIRECTION_OUT%, %GPIO_VALUE_SET%,\
+     %GPIO_DEMOD%, %GPIO_FUNC_BOARD_ON%, 2, %GPIO_DEMOD_DIRECTION_OUT%, %GPIO_VALUE_RESET%,\
+     %GPIO_DEMOD%, %GPIO_FUNC_BOARD_ON%, 4, %GPIO_DEMOD_DIRECTION_OUT%, %GPIO_VALUE_RESET%,\
+     %GPIO_DEMOD%, %GPIO_FUNC_BOARD_ON%, 6, %GPIO_DEMOD_DIRECTION_OUT%, %GPIO_VALUE_RESET%
+
+
+
+[Strings]
+
+;Pin Id
+HOOK_ANLG_AUDIO_IN_PIN  = "{356A9E15-B6B8-4066-A381-B531C606A200}"
+HOOK_ANLG_AUDIO_OUT_PIN = "{0A95FEC0-4617-4f93-9861-91C9E59E1C09}"
+
+;
+; The following items should be moved to KS_registration - TCP
+;
+
+MediaCategories         = "SYSTEM\CurrentControlSet\Control\MediaCategories"
+    
+
+;
+; ServiceType values
+SERVICE_KERNEL_DRIVER			= 0x00000001
+SERVICE_FILE_SYSTEM_DRIVER		= 0x00000002
+SERVICE_ADAPTER					= 0x00000004
+SERVICE_RECOGNIZER_DRIVER		= 0x00000008
+SERVICE_WIN32_OWN_PROCESS		= 0x00000010
+SERVICE_WIN32_SHARE_PROCESS		= 0x00000020
+SERVICE_INTERACTIVE_PROCESS		= 0x00000100
+SERVICE_INTERACTIVE_SHARE_PROCESS	= 0x00000120
+
+; StartType values
+SERVICE_BOOT_START          = 0x00000000
+SERVICE_SYSTEM_START        = 0x00000001
+SERVICE_AUTO_START          = 0x00000002
+SERVICE_DEMAND_START        = 0x00000003
+SERVICE_DISABLED            = 0x00000004
+
+; ErrorControl values
+SERVICE_ERROR_IGNORE        = 0x00000000
+SERVICE_ERROR_NORMAL        = 0x00000001
+SERVICE_ERROR_SEVERE        = 0x00000002
+SERVICE_ERROR_CRITICAL      = 0x00000003
+
+; Characteristic flags
+NCF_VIRTUAL                 = 0x0001
+NCF_WRAPPER                 = 0x0002
+NCF_PHYSICAL                = 0x0004
+NCF_HIDDEN                  = 0x0008
+NCF_NO_SERVICE              = 0x0010
+NCF_NOT_USER_REMOVABLE      = 0x0020
+NCF_HAS_UI                  = 0x0080
+NCF_MODEM                   = 0x0100
+
+; Registry types
+REG_MULTI_SZ                = 0x10000
+REG_EXPAND_SZ               = 0x20000
+REG_DWORD                   = 0x10001
+
+; Win9x Compatible Types
+REG_BINARY                  = 17
+REG_SZ                      = 0
+
+; Service install flags
+SPSVCINST_TAGTOFRONT        = 0x1
+SPSVCINST_ASSOCSERVICE      = 0x2
+
+
+;---------------
+;Localizable
+;---------------
+Vendor               	  = "Pinnacle Systems"
+MOD7000.DeviceDesc1   	= "Pinnacle PCTV 2000e"
+MOD7000.DeviceDesc2   	= "Pinnacle PCTV 2001e"
+MOD7000.DeviceDesc3   	= "PCTV DVB-T Flash Stick (280e)"
+MOD7000.DeviceDesc4   	= "Pinnacle PCTV 73e"
+MOD7000.DeviceDesc5   	= "Pinnacle PCTV 281eA"
+MOD7000.DeviceDesc6   	= "Pinnacle PCTV 73A"
+MOD7000.DeviceDesc7   	= "Pinnacle PCTV 73e Solo"
+MOD7000.DeviceDesc8      = "Pinnacle PCTV 320cx (mod7700 test)"
+MOD7000.FriendlyName 	  = "DiBcom DIB7700 based TV tuner device"
+INSTALLATION_DISK    	  = "PCTV DiB Installation Disk"
+
+; GPIO States
+GPIO_FUNC_BOARD_ON          = 1
+GPIO_FUNC_BOARD_OFF         = 2
+
+GPIO_DEMOD_DIRECTION_IN     = 1
+GPIO_DEMOD_DIRECTION_OUT    = 0
+
+GPIO_USB_DIRECTION_IN       = 0
+GPIO_USB_DIRECTION_OUT      = 1
+
+
+GPIO_VALUE_RESET            = 0
+GPIO_VALUE_SET              = 1
+
+GPIO_USB                    = 1
+GPIO_DEMOD                  = 2
