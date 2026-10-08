@@ -4,3 +4,34 @@ tmp/
 llama-logs/
 target/
 .gc-server-data-pi5-demo/
+
+# Nix build results / profile links
+/result
+/result-*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Installers and archives kept for reverse engineering
+*.exe
+*.zip
+*.7z
+*.rar
+*.msi
+
+# --- PCTV 320cx reverse-engineering scratch -------------------------------
+# The driver source lives in pctv-linux/driver/ (tracked); everything below
+# is generated capture data, extracted firmware or compiled probe binaries.
+/pctv-linux/captures/
+/pctv-linux/frames/
+/pctv-linux/frames2/
+/pctv-linux/logs/
+/pctv-linux/snapshots/
+/pctv-linux/firmware/
+/pctv-linux/driver2/*.sys
+/pctv-linux/driver2/*.cat
+/pctv-linux/dvbtest
+/pctv-linux/i2cdev
+/pctv-linux/i2cprobe
+/pctv-linux/pctv_probe
