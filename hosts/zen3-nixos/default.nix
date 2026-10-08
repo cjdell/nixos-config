@@ -87,10 +87,15 @@
       ];
     };
 
-    # Let the alderlake-thinkpad use this machine as a remote Nix build machine
-    # (matches the sshKey configured in hosts/alderlake-thinkpad/default.nix).
+    # Let other hosts use this machine as a remote Nix build machine (matches
+    # the sshKey configured in hosts/alderlake-thinkpad/default.nix and
+    # machines/macbook-pro-2009/default.nix).
     users.users.root.openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICx2X9y6tglYE8dnTPW1j28iSmv8wftzaVhpUulB5fez root@alderlake-thinkpad (nix builder)"
+      # The 2-core/7 GiB MacBook Pro 2009 offloads everything here (its pctv320cx
+      # kernel module needs a full nixpkgs kernel + Rust bindings built; see
+      # machines/macbook-pro-2009/default.nix).
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPNeoqpYHVpKyITDcHn9ncm7XBNv9zLwg9+yPhDMGcMu root@macbook-pro-2009-nixos (nix builder)"
     ];
 
     boot.kernel.sysctl = {
