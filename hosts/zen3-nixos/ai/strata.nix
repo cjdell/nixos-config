@@ -132,6 +132,21 @@ let
       # (or drop the key) once we have a capture. The guard itself stays on
       # regardless (STRATA_NAN_GUARD defaults to on).
       env.STRATA_KERNEL_AUDIT = "1";
+      # Hang watchdog (#29) work-around, 2026-10-08: ROCr maps paged host
+      # allocations through a KFD userptr, and while the kernel reclaims those
+      # host pages the GPU's queues get suspended; a restore that keeps
+      # returning -EAGAIN leaves them suspended for tens of seconds -> "no
+      # progress for 60 s" during long-prompt prefill (we hit it at 49K-186K
+      # tokens, with --kv-resident 32768 streaming KV into host RAM). Setting
+      # this to 0 makes ROCr use plain mmap/ioctl instead of userptr.
+      # Upstream report #750 is two Radeon AI PRO R9700 on ROCm 7.2 - this box
+      # (rocm-runtime 7.2.3, clr 7.2.3; the knob string is present in
+      # libhsa-runtime64.so.1). Their measurement: same outputs, same median
+      # (16.65 s vs 16.63 s), the 29.8 s / 42.2 s outliers gone, solo requests
+      # a little slower (3.55 -> 3.69 s). One change at a time: if this does
+      # not move it, the next candidate is GPU_PINNED_MIN_XFER_SIZE=1048576
+      # (#920). Details: docs/strata-hang.md.
+      env.HSA_USERPTR_FOR_PAGED_MEM = "0";
     }
   );
 
@@ -162,6 +177,13 @@ in
       StateDirectory = "strata";
       Restart = "on-failure";
       RestartSec = 10;
+      # No core dumps. The engine's hang watchdog (#29) SIGABRTs itself, and
+      # each dump was 32 GB of model weights + KV on "/" (81 G free) - and
+      # useless: bin/strata is stripped with no build-id, so there is nothing
+      # to symbolize, and all 41 threads sit in libc syscall stubs waiting on
+      # the GPU. The journal line names the stall (layer + token) instead.
+      # Full write-up: docs/strata-hang.md.
+      LimitCORE = "0";
       # Loading the model is a multi-minute, tens-of-GB operation.
       TimeoutStartSec = "infinity";
       TimeoutStopSec = 120;

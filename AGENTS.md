@@ -21,6 +21,7 @@ workstation, etc.). Key layout:
 | `docs/gtt-vram.md` | GTT-default/VRAM-cache research: `GGML_VK_ALLOW_SYSMEM_FALLBACK`, why there's no weight cache in llama.cpp, and why GTT never auto-unspills |
 | `docs/zen3-random-crashes.md` | **OPEN** investigation into zen3-nixos' random hard resets (watchdog-reaped hangs, not panics; memory/IMC hypothesis; `[S]`=CPU_OUT_OF_SPEC) + the `scripts/stress-monitor.sh` soak harness — sequel to `docs/kernel-rcu-wedge.md` |
 | `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), and the 2026-09-30 tuning |
+| `docs/strata-hang.md` | Strata's `no progress for 60 s` watchdog aborts (upstream #29) → 32 GB core dumps → amdgpu MES teardown failure + MODE1 GPU reset: why the cores are useless, the journal line that names the stall, and the `HSA_USERPTR_FOR_PAGED_MEM=0` candidate fix (#750 = two R9700s on ROCm 7.2) |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
@@ -713,9 +714,8 @@ reads corresponds to something reviewable.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
 **0.1.40.3** (`d5ea7133741e67743c0e886bb426c0ce8d69cf6c`, updated 2026-10-08 from
-0.1.40.2 `e8ca9afd`; **built but NOT switched live yet** — the running unit still
-uses `/nix/store/v63bhabzfxwg6i8hkx8q93rb9r0q0jf9-strata-0.1.40.2/bin/strata`,
-switched 2026-10-07 15:36 BST):
+0.1.40.2 `e8ca9afd`; **live since 2026-10-08 20:49:51** — `ExecStart` and the engine
+both run `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -734,6 +734,18 @@ switched 2026-10-07 15:36 BST):
   live here) plus the opt-in S26 swiglu kernel (`iq_kernels.cu`, latent on gfx1201).
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
+- **The recurring strata "core dumps" are not crashes — they are the engine's hang
+  watchdog (upstream #29) killing itself after 60 s without GPU progress**, and each one is
+  followed by an amdgpu MES queue-teardown failure and a MODE1 GPU reset (`VRAM is lost due to
+  GPU reset!`). Always **prefill**, always `waiting for the GPU (attention, router)`, at 49K–186K
+  tokens. The cores are useless (stripped binary, no build-id, 41 threads parked in libc stubs)
+  and were **32 GB each on `/`** — `LimitCORE = 0` is now set in
+  `hosts/zen3-nixos/ai/strata.nix`. ⚠️ `NRestarts=0` does **not** mean healthy: `bin/strata-server`
+  restarts the engine child in-process, so systemd never sees the failure. Top fix candidate:
+  `HSA_USERPTR_FOR_PAGED_MEM=0` (upstream #750 = two R9700s on ROCm 7.2; this box runs clr/hipblaslt
+  **7.2.3**) is applied in `configFile`'s `env` since 2026-10-08 — verify with
+  `sudo tr '\0' '\n' < /proc/$(pgrep -f '[b]in/strata --serve')/environ | grep -i userptr`.
+  Full write-up: [`docs/strata-hang.md`](docs/strata-hang.md).
 - **The local finiteness guard is `hosts/zen3-nixos/ai/strata-nan-guard.diff`**
   (`patches = [...]`, applied before `postPatch`): it fails a verify window with
   `verify: non-finite logits` instead of emitting the degenerate token, and dumps

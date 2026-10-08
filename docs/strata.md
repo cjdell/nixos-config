@@ -363,6 +363,15 @@ reuse the KV cache, so the quadratic cost is paid once per conversation.
   quality issue; the quantizer clamps live in `strata-package.nix`'s
   `postPatch`. Full write-up, the two incidents, and the verification commands:
   [`strata-degeneration.md`](./strata-degeneration.md).
+- **The engine sometimes stops making progress and kills itself.** A `SIGABRT` +
+  core dump is the hang watchdog (upstream #29): `no progress for 60 s during a
+  request (reading the prompt (batched): waiting for the GPU (attention, router)
+  at layer N …)`, always during long-prompt prefill, and each one is followed by
+  an amdgpu MES failure and a MODE1 GPU reset. `NRestarts=0` proves nothing — the
+  serve layer restarts the engine in-process. Cores are disabled (`LimitCORE = 0`);
+  they were 32 GB and carried no information. Full write-up and the candidate
+  fixes (`HSA_USERPTR_FOR_PAGED_MEM=0`, `STRATA_KV_HOST_DMA=1`, `--prefill 512`):
+  [`strata-hang.md`](./strata-hang.md).
 - **The GSQ-RCO GGUF has no MTP head.** It must always be fetched from the
   BF16 checkpoint (`mtp_fetch.py` needs Hugging Face and is SHA-256 checked;
   a mirror that ignores Range requests is caught by `verify`, exit 3).
