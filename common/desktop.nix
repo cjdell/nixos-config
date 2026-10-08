@@ -71,7 +71,15 @@
     # geekbench
     google-chrome
     kdePackages.kate
-    bottles
+    # bottles - commented out 2026-10-09: it is an FHS env with `multiArch = true`
+    # and pulls `dosbox` into its 32-bit `multiPkgs` (nixpkgs' bottles/package.nix),
+    # so its closure contains i686-linux derivations. Builder-only hosts
+    # (nix.settings.max-jobs = 0 + a single x86_64-linux ssh-ng builder:
+    # machines/macbook-pro-2009, hosts/alderlake-thinkpad) cannot place those:
+    # "Failed to find a machine for remote build! required (system, features):
+    # (i686-linux, [])" -> system-path and the whole toplevel fail. To bring it
+    # back on such a host, either add "i686-linux" to nix.buildMachines[].system
+    # (if the builder really builds 32-bit) or re-enable local builds.
     xhost
     notify-desktop
     ddcutil

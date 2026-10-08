@@ -195,6 +195,16 @@
       # code, so it is left alone. Same linuxPackages attrset handling as
       # ddcci-driver above; the sed patterns are no-ops (exit 0) on
       # attrsets whose broadcom_sta predates these lines.
+      # NB (2026-10-09, nixpkgs broadcom-sta 6.30.223.271-63 / kernel 7.2.9): the
+      # cfg80211 wdev migration below is now upstream in nixpkgs itself
+      # (wl-kmod-036_kernel_7.1_adaptation_replace_net_device_struct_with_wireless_dev_struct.patch,
+      # and the strncpy work is wl-kmod-038_kernel_7.2_adaptation_remove_strncpy_function.patch,
+      # which makes the four seds no-ops). The perl script therefore no longer
+      # matches: it dies with "no match for: (?^:\{\n(\tstruct wl_wsec_key key;))"
+      # because nixpkgs' patch already inserted the `dev = wdev->netdev` local at
+      # the top of that body. Its invocation is commented out below (the script
+      # is kept for reference in case an older pin needs it again).
+      #
       # On kernel >= 6.13 the cfg80211 key/station ops also changed shape:
       # get_station/add_key/del_key/get_key take struct wireless_dev *wdev
       # instead of struct net_device * (GCC 15 errors on the incompatible
@@ -273,7 +283,8 @@
                 sed -i 's/strncpy(p->file, basename, BCM_MEM_FILENAME_LEN);/strscpy(p->file, basename, BCM_MEM_FILENAME_LEN);/' src/shared/linux_osl.c
                 sed -i 's/strncpy(dev->name, intf_name, IFNAMSIZ-1);/strscpy(dev->name, intf_name, IFNAMSIZ);/' src/wl/sys/wl_linux.c
                 sed -i 's/strncpy(info->version, EPI_VERSION_STR, sizeof(info->version));/strscpy(info->version, EPI_VERSION_STR, sizeof(info->version));/' src/wl/sys/wl_linux.c
-                perl ${hybridFix} src/wl/sys/wl_cfg80211_hybrid.c
+                # redundant (and now failing) since nixpkgs ships wl-kmod-036:
+                # perl ${hybridFix} src/wl/sys/wl_cfg80211_hybrid.c
               '';
             });
         in
@@ -288,6 +299,21 @@
             value
         ) prev;
 
+      # broadcom-sta's package name embeds BOTH its release (…-271-63) and the
+      # kernel it builds against (-7.2.9), so a hardcoded
+      # permittedInsecurePackages entry goes stale on every nixpkgs/kernel bump
+      # (it read 59-6.17.7 / 59-7.2.3 here while the pinned nixpkgs shipped
+      # 63-7.2.9, which made the macbook-pro-2009 rebuild refuse to evaluate).
+      # Derive it from the pinned nixpkgs instead: `.name` is computed before
+      # the insecure-package guard (that only throws once the derivation itself
+      # is demanded), so this stays cheap and always matches the pin. Only
+      # machines/macbook-pro-2009 installs it (boot.extraModulePackages on
+      # linuxPackages_latest).
+      broadcomStaName =
+        (import nixpkgs {
+          inherit system;
+        }).linuxPackages_latest.broadcom_sta.name;
+
       # Build a pkgs set from a given nixpkgs input (shared package config).
       mkPkgs =
         nixpkgs:
@@ -298,10 +324,7 @@
             packageOverrides = pkgs: {
               fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
             };
-            permittedInsecurePackages = [
-              "broadcom-sta-6.30.223.271-59-6.17.7"
-              "broadcom-sta-6.30.223.271-59-7.2.3"
-            ];
+            permittedInsecurePackages = [ broadcomStaName ];
           };
           # Bleeding-edge zed-editor (source build tracking main) instead of the
           # prebuilt release binary that nixpkgs' zed-editor packages.
