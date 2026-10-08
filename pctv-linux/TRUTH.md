@@ -4,18 +4,30 @@
 and contain claims that were later disproved; where they disagree with this file,
 **this file wins**. Superseded claims are listed explicitly in §8.
 
-Last updated: **2026-10-08 18:50 BST**, host `macbook-pro-2009-nixos`, kernel
+Last updated: **2026-10-08 20:05 BST**, host `macbook-pro-2009-nixos`, kernel
 **7.2.9**, ExpressCard slot `0000:00:1c.3` (EHCI bus 2, port 3).
+
+> **2026-10-08 20:05 — the userspace path works, but only after the kernel has
+> booted the bridge.** The active config is userspace-only (no `pctv320cx`
+> module), driven by `pctv-monitor` over libusb. It is live now and capturing
+> (`0x40d=0x94 0x40e=0x7f`, ~30 MB/s). The rule that makes it work is §2.1; §1
+> records both the current userspace status and the earlier V4L2 path.
 
 ---
 
 ## 1. Status right now
 
-**The card is alive and fully brought up, and it now has real pictures.** It is
-bound to our own driver, exposes a V4L2 node, and on 2026-10-08 ~19:03 a loose
-source was wiggled into contact: both **S-Video** and **Composite 1** locked and
-25-frame captures produced clean, recognisable frames (an animated character on a
-grey/dark background). Captured artifacts (scratch): `/tmp/stable-c1.raw`,
+**The card is alive and capturing on the userspace path** (`pctv-monitor`,
+libusb) as of 2026-10-08 20:05 — `0x40d=0x94 0x40e=0x7f -> SIGNAL PRESENT`,
+~30 MB/s — *provided the kernel booted the bridge first* (§2.1). The active
+config dropped the `pctv320cx` kernel module.
+
+**Earlier V4L2 / kernel-module path** (decoder and signal facts below still
+hold): the card is alive and fully brought up. It was bound to our own driver,
+exposed a V4L2 node, and on 2026-10-08 ~19:03 a loose source was wiggled into
+contact: both **S-Video** and **Composite 1** locked and 25-frame captures
+produced clean, recognisable frames (an animated character on a grey/dark
+background). Captured artifacts (scratch): `/tmp/stable-c1.raw`,
 `/tmp/stable-sv.raw`, PNGs `/tmp/stable-{c1,sv}-f10.png`, and the wiggle catches
 `/tmp/pctv-WIGGLE-*.png`.
 
@@ -94,6 +106,25 @@ to dmesg — watch that for `0x40e` bit 5 (`0x20`).
 4. So a "revival" is always: **power-cycle → host downloads bridge firmware →
    host loads decoder microcode → capture.** Nothing else.
 
+### 2.1 The download-order rule (NEW, 2026-10-08 — this is the key fact)
+
+The bridge ROM can only be booted by a host download, and **which host does the
+first download after power-up decides whether it boots at all**:
+
+| first downloader after a pull | result |
+| --- | --- |
+| **kernel** (`dvb_usb_dib0700` binds) | **full boot** — logs `registering adapter 0 frontend 0 (DiBcom 7000PC)`; bridge warm (`ram=0x00010200`) |
+| **userspace** (`pctv_probe`/`pctv-monitor`) | writes 1610 records, `jumpram -> ok`, but `GET_VERSION` reads `ram=0x00000000` — **still cold**; a *later* kernel bind then only half-boots (`i2c_enumeration failed`) |
+
+So a userspace download attempt **poisons the ROM sub-state**; the card is then
+stuck until the next power-cycle. Reproduced twice on 2026-10-08 with genuine
+physical pulls. This is why the userspace-only config failed cold boot, and why
+the one historical full boot (`logs/kernrevive-1791480502/`, t≈14001) followed a
+real `USB disconnect` 91 s earlier: the kernel got there first.
+
+Once the *kernel* has fully booted the bridge, unbinding `dib0700` leaves it warm
+and the userspace monitor drives it perfectly (§3.1).
+
 ---
 
 ## 3. The recovery procedure that works (proven today, 2026-10-08 18:31)
@@ -129,6 +160,24 @@ sudo insmod /tmp/pctv-result/lib/modules/7.2.9/updates/pctv320cx.ko.xz
 The card **stays warm** (firmware running in RAM) across unbind/rebind and module
 reload — only a pull or a host power-cycle loses it.
 
+### 3.1 Userspace path (current config) — 2026-10-08 20:05
+
+The active config has **no** `pctv320cx` module; `pctv-monitor` does the libusb
+bring-up. The card must first be booted by the *kernel* (§2.1). Working recipe:
+
+```sh
+# pull the ExpressCard ≥ 60 s, then re-insert with dib0700 loaded so it is the
+# FIRST downloader; wait for the full boot
+sudo dmesg -w | grep -E 'frontend 0|i2c_enumeration'   # want "frontend 0 (DiBcom 7000PC)"
+echo 2-3:1.0 | sudo tee /sys/bus/usb/drivers/dvb_usb_dib0700/unbind
+pctv-monitor                                            # now captures
+```
+
+Verified 2026-10-08 19:52: `stream: bridge firmware already running`,
+`cx25843 id 0x100=34 0x101=84`, `firmware counter 16382/16382 OK`,
+`0x40d=0x94 0x40e=0x7f -> SIGNAL PRESENT`, `arm -> ok`, ~30 MB/s to stdout.
+**Never let `pctv-monitor` be the first downloader** — it poisons the ROM (§2.1).
+
 ---
 
 ## 4. DiB0700 state machine — what is known
@@ -138,6 +187,7 @@ reload — only a pull or a host power-cycle loses it.
 | `GET_VERSION` (`c4 15 0000 0000`, 16 B) **does not answer** | **cold / true power-on state.** This is what the kernel calls cold and the only state from which a download has worked. |
 | `GET_VERSION` answers, `ram=0x00000001` | mask **ROM** idle, no firmware running. `ram` is a **static ROM constant** here — it does *not* change after a download attempt, so "the download was accepted" proves nothing. |
 | `GET_VERSION` answers, `ram=0x00010200` | **firmware 1.2.0 running** — the healthy state. |
+| after a *userspace* download, `GET_VERSION` still does not answer / `ram=0x00000000` | **ROM poisoned by userspace** — the 1610-record download + `jumpram` did not take and the kernel can no longer fully boot it. Only a pull clears it (§2.1). |
 | `hw=0x66`, `rom=0x11` | constant, all states. |
 
 * Upstream cold detection (`dib0700_core.c:375`): `ret = GET_VERSION(); *cold = ret <= 0;`
@@ -146,9 +196,11 @@ reload — only a pull or a host power-cycle loses it.
   `ram=0x00000001` ROM-idle state, the kernel called it warm, skipped the
   download, and failed later at `i2c_enumeration`.
 * Both recipients work: `bmRequestType` `0xC0` and `0xC4` return the same 16 bytes.
-* The two "cold" sub-states are **not deterministic after a pull**: at 18:01 the
-  post-pull card answered GET_VERSION (`ram=1`); at 18:31 the post-pull card did
-  not answer it (kernel: cold). Which one occurs is not yet characterised.
+* The two "cold" sub-states after a pull (GET_VERSION answering with `ram=1`, vs
+  not answering at all) are **now largely explained**: it depends on **which
+  agent downloaded first** (§2.1), not on chance. A userspace download leaves the
+  card answering nothing / `ram=0x00000000` and un-bootable by the kernel; a clean
+  kernel-first download boots fully.
 * ROM-state vendor services (recipient 4, IN): only `0x04` (8 × 00, not a memory
   read — same for all `wValue`/`wIndex` tried), `0x06` (`00 01`), `0x09`, `0x0d`,
   `0x15` (GET_VERSION). Everything else STALLs. **There is no flash read, upload
@@ -239,13 +291,16 @@ reload — only a pull or a host power-cycle loses it.
   does boot.
 * **Confirmed from true cold on the 2026-10-08 19:25 boot** (COLD-BOOT-NOTES §0):
   userspace download (1610 records + `jumpram -> ok`) leaves `GET_VERSION` at
-  `Pipe error`, both in a fresh process and in-process (`pctv_probe init`).
-  Separately, the kernel's `cold state → firmware started successfully → warm
+  `Pipe error` / `ram=0x00000000`, both in a fresh process and in-process
+  (`pctv_probe init`). Reproduced 19:55 and, decisively, a **fresh physical pull
+  with the kernel as the first downloader boots fully** while **a fresh pull with
+  `pctv-monitor` first poisons the ROM** for the next kernel bind — see §2.1.
+  Note also that the kernel's `cold state → firmware started successfully → warm
   state` log is **not** proof the bridge booted — a bind that then fails with
-  `stk7700ph_frontend_attach: i2c_enumeration failed` is a half-boot (seen this
-  session). A fully booted bridge is the one that logs
-  `registering adapter 0 frontend 0 (DiBcom 7000PC)` and thereafter survives
-  unbind (`warm state`, no re-download) — as in `logs/kernrevive-1791480502/`.
+  `stk7700ph_frontend_attach: i2c_enumeration failed` is a half-boot. A fully
+  booted bridge is the one that logs `registering adapter 0 frontend 0 (DiBcom
+  7000PC)` and thereafter survives unbind (`warm state`, no re-download) — as in
+  `logs/kernrevive-1791480502/`.
 * **modprobe is blocked** for `pctv320cx`, `dvb_usb_dib0700` (NixOS
   `install … false` rules, not in `/etc/modprobe.d` — check
   `modprobe --show-config`). Use `insmod` with the `.ko.xz` path.
@@ -281,15 +336,19 @@ reload — only a pull or a host power-cycle loses it.
 1. **Which GPIO makes the CX25843 answer?** (Sweep works; the pin is unknown.
    Likely a decoder power/reset line the vendor driver drives and `board_init`
    does not.)
-2. **Why does the card come up in one of two post-pull ROM states** (GET_VERSION
-   answering with `ram=1`, vs not answering at all)? Is one of them the wedge from
-   our own invalid I2C probes?
+2. **Why does the card come up in one of two post-pull ROM states?** -> mostly
+   answered 2026-10-08: it is **download order** (§2.1), not randomness. Remaining
+   nuance: the `ram=1` state vs the not-answering state specifically, and whether
+   any userspace download can ever *not* poison it.
 3. Does the **Windows 34066-byte blob** ever boot the card from a true cold state
    (never tested from that state)?
 4. Is the **analog path fully good again** (375 frames @ 25 fps, the Oct 6/7
    result) once a source is connected — including the §14 chroma/resampling fixes?
 5. Should the host config be changed so this is automatic: decompressed firmware
-   dir + `firmware_class` path, and the `pctv320cx` module load order?
+   dir + `firmware_class` path, load `dvb_usb_dib0700` at boot so it is the first
+   downloader, then **auto-unbind** it once `/dev/dvb/adapter0` appears, and let
+   the userspace monitor take the warm bridge? A udev→systemd `oneshot` is the
+   shape. **Do not** let `pctv-monitor` be the first downloader (§2.1).
 
 ## 10. Tools in this directory
 

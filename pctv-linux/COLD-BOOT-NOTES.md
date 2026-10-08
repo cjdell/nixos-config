@@ -52,28 +52,56 @@ matches HANDOVER's 14:20 result: **bytes are identical to the kernel's, but the
 kernel boots the card and userspace does not.** Do not keep re-testing the blob
 shape.
 
-**The kernel download can fully boot the card** — `logs/kernrevive-1791480502/`
-(t ≈ 14001 s) shows `cold state → downloading firmware → firmware started
-successfully → registering adapter 0 frontend 0 (**DiBcom 7000PC**)`, and once
-like that it survives unbind (t ≈ 14120: rebind is `warm state`, no download).
-But it is **not reliable**: binding `dib0700` here produced `warm state` with
-`stk7700ph_frontend_attach: i2c_enumeration failed`, i.e. the bridge firmware
-did not actually take — the same half-booted state klog t ≈ 13866. Which state
-you get is the unresolved ROM sub-state question (TRUTH §9.2).
+**The kernel download fully boots the card — but only if it is the FIRST thing
+to touch the ROM after power-up.  (DEFINITIVE, 2026-10-08 ~19:55.)**
+
+Reproduced twice from a genuine physical pull (ExpressCard out ≥60 s, back in):
+
+* pull → *userspace* download first (`pctv-monitor`): writes 1610 records,
+  `jumpram -> ok`, but `GET_VERSION` reads `ram=0x00000000` — **still cold**.
+  A kernel `dib0700` bind afterwards only half-boots
+  (`stk7700ph_frontend_attach: i2c_enumeration failed`).
+* pull → *kernel* download first (`dib0700` auto-binds on insert): full boot,
+  `registering adapter 0 frontend 0 (DiBcom 7000PC)`.
+
+So the ROM is not simply "un-bootable from userspace": **a userspace download
+attempt poisons the ROM sub-state and makes the next boot fail.** That is why
+the earlier `ram=0x00000001` runs never recovered, and why the one full boot in
+`logs/kernrevive-1791480502/` (t ≈ 14001) followed a real `USB disconnect`
+(device 23) 91 s earlier — the kernel got there first.
+
+Once the kernel has done a *full* boot, unbinding `dib0700` leaves the bridge
+warm (`ram=0x00010200`, `hw=0x66`, `rom=0x11`) and the userspace monitor drives
+it perfectly:
+
+```
+stream: bridge firmware already running
+cx25843 id: 0x100=34 0x101=84 (want 34 84)
+firmware: counter 16382 / 16382 -> OK
+cx25843 initialized: 0x803=13
+decoder: 0x40d=94 0x40e=7f -> SIGNAL PRESENT
+arm -> ok
+stream: ep 0x82, 24 URBs x 32768 B -> stdout     (~30 MB/s)
+```
+
+**Working recipe (2026-10-08):** pull ≥ 60 s → insert with `dvb_usb_dib0700`
+already loaded (it auto-binds and does the first download) → wait for
+`registering adapter 0 frontend 0 (DiBcom 7000PC)` →
+`echo 2-3:1.0 > /sys/bus/usb/drivers/dvb_usb_dib0700/unbind` → run
+`pctv-monitor`. Unbinding after a full boot does **not** reset the bridge;
+unbinding after a half-boot does.
 
 **Consequences / what to do**
 
 1. The stated goal (userspace-only, kernel driver blacklisted) **cannot
-   cold-boot the card**. The only downloader known to work is the kernel's.
-2. To revive the card now: **physical pull ≥ 60 s**, re-insert, then either
-   (a) let the kernel download and hand off — but note detaching `dib0700`
-   after a *successful* boot keeps the bridge warm while detaching after a
-   half-boot resets it — or (b) `insmod` the in-tree modules (§5.3).
-   The card is currently in the half-booted state; a pull is required.
-3. Reliable cold boots need an architecture change (let `dvb_usb_dib0700` do
-   the download, with uncompressed firmware + `firmware_class.path`, and keep
-   the userspace monitor on the warm bridge). Decide before more userspace
-   download work.
+   cold-boot the card**: with nothing loading `dib0700`, the only downloader is
+   userspace, and that both fails itself and poisons the ROM.
+2. Reliable cold boots need an architecture change: let `dvb_usb_dib0700` do
+   the first download (uncompressed firmware + `firmware_class.path`), then
+   **auto-unbind** it once the frontend is up, and run the userspace monitor on
+   the warm bridge. A udev→systemd `oneshot` (wait for `/dev/dvb/adapter0`,
+   then unbind) is the shape. **Never let `pctv-monitor` be the first
+   downloader.**
 
 > Operational trap hit during this session: a `pctv_probe fw2` left running
 > holds interface 0 via usbfs and (a) makes `lsmod`-checking misleading and
