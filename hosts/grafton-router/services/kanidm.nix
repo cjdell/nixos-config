@@ -6,7 +6,10 @@
 
 let
   KANIDM_PORT = 8999;
-  kanidm_pkg = pkgs.kanidm_1_10.withSecretProvisioning;
+  # 1.10.5 went EOL/insecure in nixpkgs (2026-10-09). Upgraded in place: domain
+  # backup taken first, then one minor step 1.10 -> 1.11 (kanidm requires
+  # sequential minor upgrades — see book/src/server_updates.md).
+  kanidm_pkg = pkgs.kanidm_1_11.withSecretProvisioning;
 in
 {
   # Grant kanidm access to nginx group for ACME certificates

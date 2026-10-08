@@ -314,23 +314,12 @@
           inherit system;
         }).linuxPackages_latest.broadcom_sta.name;
 
-      # kanidm 1.10 has reached end-of-life, so nixpkgs marks it insecure and the
-      # grafton-router rebuild refuses to evaluate (2026-10-09: "installation of
-      # 'kanidm-with-secret-provisioning-1.10.5' is blocked").
-      # hosts/grafton-router/services/kanidm.nix pins `kanidm_1_10.withSecret
-      # Provisioning`, and the router is ALREADY running exactly that 1.10.5, so
-      # permitting it changes nothing that runs — it only unblocks the rebuild.
-      # Name derived from the pin for the same reason as broadcomStaName above.
-      # TODO(cjdell): this is a stopgap. kanidm is the IdP behind grafana,
-      # filebrowser and headscale, so the real fix is a planned
-      # `kanidmd domain upgrade-check` + `services.kanidm.package =
-      # pkgs.kanidm_1_x` upgrade (upgrade guide:
-      # https://kanidm.github.io/kanidm/master/server_updates.html), not an
-      # eternal permit.
-      kanidm110Name =
-        (import nixpkgs {
-          inherit system;
-        }).kanidm_1_10.withSecretProvisioning.name;
+      # kanidm 1.10 was marked insecure (EOL) and blocked the grafton-router
+      # rebuild on 2026-10-09; the router now runs kanidm_1_11 (1.11.2, no known
+      # vulnerabilities), so no kanidm entry belongs here. If a future nixpkgs
+      # bump EOLs it again, upgrade the domain one minor version at a time
+      # (https://kanidm.github.io/kanidm/master/server_updates.html) rather than
+      # re-adding a permit.
 
       # Build a pkgs set from a given nixpkgs input (shared package config).
       mkPkgs =
@@ -342,10 +331,7 @@
             packageOverrides = pkgs: {
               fahclient = pkgs.callPackage ./common/overrides/fahclient.nix { };
             };
-            permittedInsecurePackages = [
-              broadcomStaName
-              kanidm110Name
-            ];
+            permittedInsecurePackages = [ broadcomStaName ];
           };
           # Bleeding-edge zed-editor (source build tracking main) instead of the
           # prebuilt release binary that nixpkgs' zed-editor packages.
