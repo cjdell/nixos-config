@@ -21,7 +21,7 @@
   # investigation (4 mixed dual-rank DIMMs at 3600 MT/s, non-ECC).
   boot.loader.systemd-boot.memtest86.enable = true;
 
-  # boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.kernelPackages = pkgs.linuxPackages_latest;
 
   boot.initrd.availableKernelModules = [
     "xhci_pci"
