@@ -54,18 +54,17 @@
   #
   #   hardware.pctv320cxLive.enable = true;   -> pctv_probe (libusb bring-up +
   #                                              BT.656 stream) + pctv-monitor
-  #                                              (SDL2 GUI), udev rule, and the
-  #                                              dvb_usb_dib0700 blacklist.
+  #                                              (SDL2 GUI) + the kernel-first
+  #                                              bridge handoff (TRUTH.md §2.1).
   #
   # No kernel module is built any more.  The old `hardware.pctv320cx` V4L2
   # driver (pctv-linux/nixos-module.nix) still exists for reference but is no
   # longer enabled here.
   hardware.pctv320cxLive.enable = true;
-  # Belt and braces: "blacklist" only affects alias resolution, so make the
-  # DVB module unloadable by any path (including an explicit modprobe).
-  boot.extraModprobeConfig = ''
-    install dvb_usb_dib0700 ${pkgs.coreutils}/bin/false
-  '';
+  # The bridge ROM can only be booted from cold by the in-tree
+  # dvb_usb_dib0700, so that module now loads on purpose (boot.kernelModules)
+  # and is unbound by pctv-bridge-handoff once the bridge is warm.
+  # See pctv-linux/TRUTH.md §2.1.
 
   # --- watching / recording the analog inputs -------------------------------
   #

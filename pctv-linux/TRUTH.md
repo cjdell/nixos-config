@@ -160,23 +160,39 @@ sudo insmod /tmp/pctv-result/lib/modules/7.2.9/updates/pctv320cx.ko.xz
 The card **stays warm** (firmware running in RAM) across unbind/rebind and module
 reload — only a pull or a host power-cycle loses it.
 
-### 3.1 Userspace path (current config) — 2026-10-08 20:05
+### 3.1 Userspace path (current config) — AUTOMATIC since 2026-10-08 20:03
 
 The active config has **no** `pctv320cx` module; `pctv-monitor` does the libusb
-bring-up. The card must first be booted by the *kernel* (§2.1). Working recipe:
+bring-up. The card is booted by the *kernel* (§2.1) **automatically**. On any
+card insertion (cold boot included) the udev rule starts
+`pctv-bridge-handoff.service`, which:
 
-```sh
-# pull the ExpressCard ≥ 60 s, then re-insert with dib0700 loaded so it is the
-# FIRST downloader; wait for the full boot
-sudo dmesg -w | grep -E 'frontend 0|i2c_enumeration'   # want "frontend 0 (DiBcom 7000PC)"
-echo 2-3:1.0 | sudo tee /sys/bus/usb/drivers/dvb_usb_dib0700/unbind
-pctv-monitor                                            # now captures
+1. waits for NixOS to set `/sys/module/firmware_class/parameters/path`;
+2. `modprobe dvb_usb_dib0700` (so the kernel is the first downloader);
+3. waits for `/dev/dvb/adapter0` (= a *full* boot, `DiBcom 7000PC`);
+4. unbinds the driver, leaving the bridge warm for libusb.
+
+Then `pctv-monitor` just runs — no manual recipe. Verified 2026-10-08 20:03
+from a genuine cold pull with the driver unloaded, i.e. the boot path:
+
+```
+dvb-usb: found a 'Pinnacle Expresscard 320cx' in cold state, will try to load a firmware
+dvb-usb: downloading firmware from file 'dvb-usb-dib0700-1.20.fw'   (zstd, from /nix/store)
+dib0700: firmware started successfully.
+usb 2-3: DVB: registering adapter 0 frontend 0 (DiBcom 7000PC)...
+pctv-bridge-handoff: releasing 2-3:1.0 to userspace
+  -> pctv_probe: ram=0x00010200; 
+     stream: bridge firmware already running; 0x40d=0x94 0x40e=0x7f -> SIGNAL PRESENT
 ```
 
-Verified 2026-10-08 19:52: `stream: bridge firmware already running`,
-`cx25843 id 0x100=34 0x101=84`, `firmware counter 16382/16382 OK`,
-`0x40d=0x94 0x40e=0x7f -> SIGNAL PRESENT`, `arm -> ok`, ~30 MB/s to stdout.
+The kernel-side firmware path needs the blob to be reachable by
+`request_firmware()`; the NixOS aggregate ships `dvb-usb-dib0700-1.20.fw.zst` and
+this kernel has `CONFIG_FW_LOADER_COMPRESS_ZSTD=y`, so it is found. (TRUTH §7's
+"kernel can't decompess" was wrong for this build.)
+
 **Never let `pctv-monitor` be the first downloader** — it poisons the ROM (§2.1).
+On a warm reboot the bridge is already booted; the handoff then finds no
+`/dev/dvb/adapter0`, times out cleanly, and the userspace monitor still works.
 
 ---
 
@@ -344,11 +360,11 @@ Verified 2026-10-08 19:52: `stream: bridge firmware already running`,
    (never tested from that state)?
 4. Is the **analog path fully good again** (375 frames @ 25 fps, the Oct 6/7
    result) once a source is connected — including the §14 chroma/resampling fixes?
-5. Should the host config be changed so this is automatic: decompressed firmware
-   dir + `firmware_class` path, load `dvb_usb_dib0700` at boot so it is the first
-   downloader, then **auto-unbind** it once `/dev/dvb/adapter0` appears, and let
-   the userspace monitor take the warm bridge? A udev→systemd `oneshot` is the
-   shape. **Do not** let `pctv-monitor` be the first downloader (§2.1).
+5. **RESOLVED 2026-10-08** — automatic kernel-first boot + handoff is implemented:
+   `hardware.pctv320cxLive` (`pctv-linux/live-module.nix`) ships
+   `pctv-bridge-handoff.service`, which loads `dvb_usb_dib0700` after the
+   firmware path is set, waits for `/dev/dvb/adapter0`, then unbinds it to
+   libusb.  Verified from a cold pull with the driver unloaded (§3.1).
 
 ## 10. Tools in this directory
 

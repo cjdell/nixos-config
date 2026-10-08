@@ -96,12 +96,14 @@ unbinding after a half-boot does.
 1. The stated goal (userspace-only, kernel driver blacklisted) **cannot
    cold-boot the card**: with nothing loading `dib0700`, the only downloader is
    userspace, and that both fails itself and poisons the ROM.
-2. Reliable cold boots need an architecture change: let `dvb_usb_dib0700` do
-   the first download (uncompressed firmware + `firmware_class.path`), then
-   **auto-unbind** it once the frontend is up, and run the userspace monitor on
-   the warm bridge. A udev→systemd `oneshot` (wait for `/dev/dvb/adapter0`,
-   then unbind) is the shape. **Never let `pctv-monitor` be the first
-   downloader.**
+2. **DONE 2026-10-08 20:03 — kernel-first is now automatic.**
+   `pctv-linux/live-module.nix` no longer blacklists `dvb_usb_dib0700`;
+   `pctv-bridge-handoff.service` (triggered by the udev rule and by
+   `multi-user.target`) modprobes `dvb_usb_dib0700` once the firmware path is
+   set, waits for `/dev/dvb/adapter0` (= full boot), then unbinds it, leaving
+   the warm bridge to libusb. Verified from a cold pull with the driver
+   unloaded, i.e. the boot path (see TRUTH §3.1).
+   **Never let `pctv-monitor` be the first downloader.**
 
 > Operational trap hit during this session: a `pctv_probe fw2` left running
 > holds interface 0 via usbfs and (a) makes `lsmod`-checking misleading and
