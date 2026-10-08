@@ -8,12 +8,16 @@
  * we are already root (set PCTV_PROBE to override the binary path, or run the
  * whole GUI under sudo).
  *
- * Keys:
- *   1..4 / C  composite1/2/3, S-Video    g  toggle colour/grey
- *   s snapshots a PPM                     r  toggle raw BT.656 recording
- *   space    pause/resume display         q / ESC  quit
+ * Input selection: keys 1/2 pick Composite or S-Video; Tab cycles.
+ * The choice can also be given at startup with `-i <input>` / PCTV_INPUT
+ * (e.g. `pctv-monitor -i svideo`).  A small overlay names the active input.
  *
- * Build: see build-monitor.sh  (cc + SDL2 + libusb headers not needed here).
+ * Keys:
+ *   1/2 / Tab  input (Composite, S-Video)          g  toggle colour/grey
+ *   s snapshots a PPM                              r  toggle raw BT.656 recording
+ *   space       pause/resume display               q / ESC  quit
+ *
+ * Build: see build-monitor.sh  (cc + SDL2; the probe needs libusb, not us).
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -26,17 +30,27 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <SDL.h>
+
+#include "font5x7.h"
 
 #define W 720
 #define H 576
 #define FIELD_MAX 296
 #define RBUF (8u << 20)     /* 8 MiB read/parse buffer */
 
-static const char *INPUTS[] = { "composite1", "composite2", "composite3", "svideo" };
-static const char *INPUT_LABEL[] = { "Composite 1", "Composite 2", "Composite 3", "S-Video" };
+/* This card has exactly one composite input (the yellow RCA) and one S-Video
+ * connector; the other two RCAs are L/R audio.  The CX25843 exposes eight
+ * composite VINs but only VIN1 is wired here, so the UI offers just the two
+ * physical inputs.  (`pctv_probe analog2 composite2|3 ...` is still available
+ * for board bring-up experiments.) */
+static const char *INPUTS[] = { "composite1", "svideo" };
+static const char *INPUT_LABEL[] = { "Composite", "S-Video" };
+#define NINPUTS ((int)(sizeof(INPUTS) / sizeof(INPUTS[0])))
 
 static pid_t child = -1;
 static int   child_fd = -1;
@@ -46,6 +60,14 @@ static int   grey = 0;
 static int   paused = 0;
 static int   recording = 0;
 static FILE *rec_file = NULL;
+
+/* Overlay: draw the big input banner until this SDL tick; the controls hint
+ * is shown alongside it. */
+static unsigned long long overlay_until = 0;
+static void show_overlay(unsigned ms)
+{
+    overlay_until = SDL_GetTicks() + ms;
+}
 
 /* current field being assembled */
 static unsigned char fY[FIELD_MAX][W];
@@ -57,6 +79,101 @@ static int  frame_ready = 0;         /* set when a field was committed */
 static unsigned long long frames = 0;
 
 static void die(const char *m) { fprintf(stderr, "pctv-monitor: %s: %s\n", m, strerror(errno)); exit(1); }
+
+/* ------------------------------------------------------------------- text */
+
+/* Draw one ASCII glyph from the 5x7 font at (x,y), pixel scale s. */
+static void draw_char(SDL_Renderer *ren, int x, int y, int s, unsigned char c)
+{
+    if (c >= 128) c = '?';
+    const unsigned char *g = FONT5X7[c];
+    for (int col = 0; col < 5; col++)
+        for (int row = 0; row < 7; row++)
+            if (g[col] & (1u << row)) {
+                SDL_Rect r = { x + col * s, y + row * s, s, s };
+                SDL_RenderFillRect(ren, &r);
+            }
+}
+
+static void draw_text(SDL_Renderer *ren, int x, int y, int s, const char *t)
+{
+    for (; *t; t++, x += 6 * s) draw_char(ren, x, y, s, (unsigned char)*t);
+}
+
+static int text_w(const char *t, int s) { return (int)strlen(t) * 6 * s; }
+
+/* A dark panel + text, used for the input banner and the controls hint. */
+static void draw_panel(SDL_Renderer *ren, int x, int y, const char *text, int scale)
+{
+    int w = text_w(text, scale) + 12, h = 7 * scale + 8;
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
+    SDL_Rect bg = { x - 6, y - 4, w, h };
+    SDL_RenderFillRect(ren, &bg);
+    SDL_SetRenderDrawColor(ren, 235, 235, 235, 255);
+    draw_text(ren, x, y, scale, text);
+}
+
+/* --------------------------------------------------------------- input */
+
+static int input_from_name(const char *s)
+{
+    if (!s) return -1;
+    for (int i = 0; i < NINPUTS; i++)
+        if (!strcasecmp(s, INPUTS[i]) || !strcasecmp(s, INPUT_LABEL[i])) return i;
+    if (!strcasecmp(s, "svideo1")) return 1;
+    if (!strcasecmp(s, "composite")) return 0;
+    if (!strcasecmp(s, "1") || !strcasecmp(s, "2")) return atoi(s) - 1;
+    return -1;
+}
+
+/* Remember the last chosen input under $XDG_CONFIG_HOME/pctv-monitor/input so
+ * the monitor comes back on the connector the user actually uses. */
+static const char *state_path(void)
+{
+    static char p[4096];
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && *xdg) snprintf(p, sizeof p, "%s/pctv-monitor/input", xdg);
+    else if (home && *home) snprintf(p, sizeof p, "%s/.config/pctv-monitor/input", home);
+    else p[0] = 0;
+    return p;
+}
+
+static int load_saved_input(void)
+{
+    const char *p = state_path();
+    if (!*p) return -1;
+    FILE *f = fopen(p, "r");
+    if (!f) return -1;
+    char b[64] = { 0 };
+    int ok = fgets(b, sizeof b, f) != NULL;
+    fclose(f);
+    if (!ok) return -1;
+    char *nl = strchr(b, '\n'); if (nl) *nl = 0;
+    return input_from_name(b);
+}
+
+static void save_input(int in)
+{
+    const char *p = state_path();
+    if (!*p || in < 0 || in >= NINPUTS) return;
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s", p);
+    char *sl = strrchr(dir, '/');
+    if (sl) { *sl = 0; mkdir(dir, 0700); }
+    FILE *f = fopen(p, "w");
+    if (f) { fprintf(f, "%s\n", INPUTS[in]); fclose(f); }
+}
+
+static void usage(const char *p)
+{
+    fprintf(stderr,
+        "usage: %s [-i|--input <input>] [-l|--list]\n"
+        "  input: composite (default) or svideo\n"
+        "  keys:  1/2 or Tab pick the input; g grey; s snapshot;\n"
+        "         r record; space pause; q/ESC quit\n", p);
+}
 
 /* ------------------------------------------------------------------ child */
 
@@ -210,6 +327,38 @@ static void rec_toggle(void)
 
 int main(int argc, char **argv)
 {
+    /* input can be selected before the window exists: saved choice, then
+     * PCTV_INPUT, then -i/--input on the command line (highest priority). */
+    {
+        int in = load_saved_input();
+        if (in >= 0) cur_input = in;
+    }
+    {
+        const char *env = getenv("PCTV_INPUT");
+        if (env) {
+            int in = input_from_name(env);
+            if (in >= 0) cur_input = in;
+            else fprintf(stderr, "pctv-monitor: ignoring PCTV_INPUT=%s\n", env);
+        }
+    }
+    for (int i = 1; i < argc; i++) {
+        if ((!strcmp(argv[i], "-i") || !strcmp(argv[i], "--input")) && i + 1 < argc) {
+            int in = input_from_name(argv[++i]);
+            if (in >= 0) cur_input = in;
+            else { fprintf(stderr, "pctv-monitor: unknown input '%s'\n", argv[i]); return 2; }
+        } else if (!strcmp(argv[i], "-l") || !strcmp(argv[i], "--list")) {
+            for (int k = 0; k < NINPUTS; k++) printf("%s\n", INPUTS[k]);
+            return 0;
+        } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "pctv-monitor: unexpected argument '%s'\n", argv[i]);
+            usage(argv[0]);
+            return 2;
+        }
+    }
+
     /* locate pctv_probe next to us unless PCTV_PROBE says otherwise */
     const char *env = getenv("PCTV_PROBE");
     if (env) snprintf(probe_path, sizeof probe_path, "%s", env);
@@ -226,6 +375,8 @@ int main(int argc, char **argv)
     }
     if (access(probe_path, X_OK) != 0)
         snprintf(probe_path, sizeof probe_path, "pctv_probe");
+
+    save_input(cur_input);      /* persist the effective choice */
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -246,6 +397,7 @@ int main(int argc, char **argv)
 
     memset(fb, 0, sizeof fb);
     child_start(cur_input);
+    show_overlay(8000);
 
     unsigned char *rbuf = malloc(RBUF);
     size_t rlen = 0;
@@ -256,29 +408,34 @@ int main(int argc, char **argv)
     double last_t = (double)SDL_GetTicks() / 1000.0, fps = 0;
 
     while (running) {
+        int want_input = cur_input;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_KEYDOWN) {
                 switch (e.key.keysym.sym) {
                 case SDLK_q: case SDLK_ESCAPE: running = 0; break;
-                case SDLK_SPACE: paused = !paused; break;
-                case SDLK_g: grey = !grey; break;
+                case SDLK_SPACE: paused = !paused; show_overlay(2000); break;
+                case SDLK_g: grey = !grey; show_overlay(2000); break;
                 case SDLK_s: snapshot_ppm(); break;
                 case SDLK_r: rec_toggle(); break;
-                case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: {
-                    int in = e.key.keysym.sym - SDLK_1;
-                    if (in != cur_input) {
-                        child_stop();
-                        field_lines = 0; field_F = -1; rlen = 0;
-                        cur_input = in;
-                        child_start(cur_input);
-                    }
-                    break;
-                }
+                case SDLK_TAB: case SDLK_i:
+                    want_input = (cur_input + 1) % NINPUTS; break;
+                case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4:
+                    want_input = e.key.keysym.sym - SDLK_1; break;
                 default: break;
                 }
             }
+        }
+
+        if (want_input != cur_input) {
+            child_stop();
+            field_lines = 0; field_F = -1; rlen = 0;
+            frame_ready = 0;
+            cur_input = want_input;
+            save_input(cur_input);
+            child_start(cur_input);
+            show_overlay(4000);
         }
 
         /* drain the child's stdout */
@@ -306,6 +463,19 @@ int main(int argc, char **argv)
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
+
+        /* input banner: always name the active input, plus transient hints */
+        {
+            char banner[64];
+            snprintf(banner, sizeof banner, "INPUT: %s", INPUT_LABEL[cur_input]);
+            draw_panel(ren, 10, 8, banner, 2);
+            if (SDL_GetTicks() < overlay_until) {
+                char hint[128];
+                snprintf(hint, sizeof hint,
+                         "1/2/Tab: input   G: grey   S: snap   R: rec   SPACE: pause   Q: quit");
+                draw_panel(ren, 10, 8 + 7 * 2 + 12, hint, 1);
+            }
+        }
         SDL_RenderPresent(ren);
 
         double now = (double)SDL_GetTicks() / 1000.0;
@@ -313,7 +483,7 @@ int main(int argc, char **argv)
             fps = (double)(frames - last_frames) / (now - last_t);
             last_frames = frames; last_t = now;
             char title[256];
-            snprintf(title, sizeof title, "PCTV 320cx - %s%s%s - %.0f fps",
+            snprintf(title, sizeof title, "PCTV 320cx - %s%s%s - %.0f fps  [1/2/Tab: input]",
                      INPUT_LABEL[cur_input], grey ? " [grey]" : "",
                      recording ? " [REC]" : "", fps);
             SDL_SetWindowTitle(win, title);

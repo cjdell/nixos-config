@@ -90,10 +90,27 @@ nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix {}'
 ./pctv-monitor                      # as your desktop user; it sudo -n's the probe
 ```
 
-Monitor keys: `1`–`4` switch input (Composite 1/2/3, S-Video), `g` colour/grey,
-`s` snapshot to `/tmp/pctv-snap-*.ppm`, `r` toggle raw BT.656 recording to
-`/tmp/pctv-rec-*.bt656`, space pause, `q`/ESC quit.  The window title shows the
-input and the live field rate (~50 fields/s = 25 interlaced fps for PAL).
+Monitor keys: `1`/`2` switch input (Composite, S-Video), `Tab` cycles,
+`g` colour/grey, `s` snapshot to `/tmp/pctv-snap-*.ppm`, `r` toggle raw BT.656
+recording to `/tmp/pctv-rec-*.bt656`, space pause, `q`/ESC quit.  The active
+input is named in an on-screen banner (and in the window title, with the live
+field rate: ~50 fields/s = 25 interlaced fps for PAL); the controls hint is
+shown for a few seconds after start and after each input change.
+
+The input can also be chosen at launch, which is what the `.desktop` entry and
+scripts use:
+
+```sh
+pctv-monitor -i svideo          # or -i composite
+pctv-monitor -l                 # list the input names
+PCTV_INPUT=svideo pctv-monitor  # same, via the environment
+```
+
+The card has one composite input (the yellow RCA) and one S-Video connector;
+the other two RCAs are L/R audio.  Composite and S-Video share the same
+CX25843 luma pin, so a source plugged into one connector still shows (luma
+only) when the other input is selected; the CX25843 bring-up clears CKILLEN so
+chroma is decoded on the selected input.
 
 Headless checks (no display needed):
 
@@ -106,9 +123,15 @@ sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 
 Notes / current limits:
 
-* Luma is correct and the picture is stable at the full 50 fields/s.  **Chroma
-  still shows the rainbow fringing** the offline decoder has (the §14
-  chroma/resampling work is not applied here yet).
+* Luma is correct and the picture is stable at the full 50 fields/s.  Chroma
+  is now decoded (the bring-up clears the CX25843's CKILLEN, `0x401` bit 6,
+  which the vendor default leaves on and which pins the picture to grey);
+  residual rainbow fringing at chroma edges is the §14 resampling work, not
+  yet applied here.
+* **Audio is not implemented.**  The card's analog audio is digitised on-card
+  but the only stream endpoint that ever delivers is `0x82`, and it carries
+  raw BT.656 video; the vendor Windows BDA driver's audio framing (which is
+  what splits audio out of the USB stream) is not decoded yet.  See TRUTH §9.
 * PAL only for now; the parser keys off the BT.656 F/V bits but the output
   geometry is hard-wired to 720×576.
 * The child needs raw USB.  It is launched via `sudo -n`; a udev rule (below)

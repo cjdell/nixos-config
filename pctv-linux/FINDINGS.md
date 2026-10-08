@@ -1,5 +1,12 @@
 # PCTV 320cx — native Linux driver research
 
+> **`TRUTH.md` is the authority.** This file is the full research log, kept for
+> evidence, and parts of it were later disproved — §16.7/§16.8 (2026-10-08) in
+> particular conclude "the card is bricked at the boot-image level". **That is
+> wrong**: the card was revived at 18:31 the same day by the in-tree driver's
+> cold-state firmware download. See `TRUTH.md` §2, §3 and §8 (retractions). Where
+> this log and `TRUTH.md` disagree, `TRUTH.md` wins.
+
 Companion to `docs/pctv-320cx.md` (the failed Win7-VM attempt). This file is the
 record of the **native Linux** investigation. Everything here was measured on the
 real hardware on `macbook-pro-2009-nixos`.
@@ -2507,3 +2514,343 @@ driver output is that edge response, not a time-varying defect.
   killed; the crash itself left no oops) and came up with the DiB0700
   **cold-wedged** - `GET_VERSION` NACKs even over libusb, so the fixes could
   not be exercised. A physical power-off (HANDOVER §0) is required.
+
+# 15. "Why could Windows revive it?" — ANSWERED: it didn't (2026-10-08)
+
+Full evidence pack: `logs/win7-vs-linux-20261008.md`. Raw usbmon trace
+`logs/raw-winretry2.bin` (parsed `logs/win7-vs-linux-trace-20261008.parsed`).
+
+The Windows binary (`Ltn_hyd7700pc_64.sys`, 570368 B, from inside the guest disk)
+was extracted and its StartDevice **replayed against the same cold card** with
+host usbmon running. Results:
+
+* Its 1625 bulk-OUT EP1 transfers rebuild to **34066 bytes**, md5
+  `29ccafb3cc2414c02dab8b06f3f5bddd` — `cmp`-identical to `firmware/win_fw.bin`
+  **and to our own `pctv_probe fw` download**. No Windows-only record.
+* Its whole cold-start control sequence is `c4 02 01a1` (stall) → fw+jumpram →
+  `c4 02 01a0`/`01a1` (stall). **No reset, GPIO, SET_CLOCK, ENABLE_VIDEO, `0x44`
+  or DiBcom-only request.** It sends nothing Linux does not, and it ends in the
+  same `st=-32` on every post-download EP0 IN.
+* `ram=0x00000001` is the **ROM bootloader** (mask ROM — always runs), not
+  firmware (healthy is `ram=0x00010200`). It is **not a revival**. The 9
+  *device-initiated* re-enumerations were the 8051 repeatedly resetting into its
+  ROM.
+
+So there is **nothing to add to `load_bridge_firmware()`/`board_init()` from the
+Windows driver** — the Linux port already matches it exactly, and a different OS
+with the vendor's own driver ends in the identical failure. This is the
+kernel-independent proof the 14:20 update called for (remaining test #1): the
+fault is below the host, in the 8051/RAM or its supply. The card has been cold
+since **Oct 7 21:58** on the old 7.2.3 kernel and a physical power cycle does not
+clear it — unlike the old port-reset-recoverable wedge (FINDINGS §7.1). The
+capture/analog path is irrelevant to this: it runs only after StartDevice
+succeeds, which never happens on a cold card.
+
+**The next measurement** is `./rom-window.sh` (`pctv_probe romwin`): catch the
+fleeting ROM-bootloader window and dump the config EEPROM + both GET_VERSION
+forms + the vendor-request map. See `ROM-WINDOW.md`. Expected either way: the
+dump reads `00`/`ff` (self-boot image gone) or is intact (8051/RAM execution or
+its supply is the fault). Read-only; the EEPROM is never written.
+
+
+---
+
+# 16. The ROM window is real — and the EEPROM index is `wIndex>>8` (2026-10-08 16:20)
+
+`./rom-window.sh 1800` (dir `logs/rom-window-1791471238/`, usbmon captured in
+`raw-bus2.bin`) caught **19 ROM windows in 4 minutes**. The card was enumerated
+the whole time (bus 2, dev 19→22, re-enumerating on its own), the kernel driver
+was blocked, and the watcher re-opened by VID/PID each iteration.
+
+## 16.1 What the bridge answered
+
+Every window, identically:
+
+```
+hw=0x00000066 rom=0x00000011 ram=0x00000001 fwtype=0x00000000
+```
+
+on **both** recipients (`bmRequestType` 0xC0 and 0xC4) — the "recipient 0 only"
+observation in §15 was a property of the state, not of the request form.
+`GET_GPIO_VAL` stalled in every window. And **`GET_EEPROM` answered**: 2048 reads
+per window, 0 errors, and all 19 dumps byte-identical (`md5 b01001508488b41f…`).
+This is the first EEPROM content ever read from this card.
+
+## 16.2 `ram=0x00000001` is a ROM constant, not a liveness flag
+
+It is the same word before any download, after a `firmware: 1624 record(s)
+written` + `jumpram -> 0x70000000 ok`, and an hour later. So the ROM reports its
+own version word regardless of whether the downloaded image runs: **"the download
+was accepted" carries no information at all.** The only liveness signal is the
+`ram` field *changing* to `0x00010200`, which has not happened since Oct 7 21:58.
+
+## 16.3 The EEPROM read is a sliding window — `eepromdump` was reading the wrong thing
+
+Measured at 12 index points, all consistent, plus a wrap check:
+
+| `wIndex` | bytes returned | EEPROM byte the window starts at |
+| --- | --- | --- |
+| `0x0000`, `0x0008`, `0x00ff` | `d0 04 23 2e 02 00 01 05` | 0 |
+| `0x0100` | `04 23 2e 02 00 01 05 04` | 1 |
+| `0x0108` | `23 2e 02 00 01 05 04 03` | 2 |
+| `0x0200` | `2e 02 00 01 05 04 03 09` | 2 |
+| `0x1000` | `69 6e 6e 61 63 6c 65 20` | 16 |
+| `0x2000` | `6e 61 63 6c 65 20 73 79 73` | 32 |
+| `0x3ff8` | `37 30 30 30 50 08 15 02` | 63 |
+| `0xff00` | `ff d0 04 23 2e 02 00 01` | 255, then wraps to 0 |
+
+**The 8 bytes are a window starting at EEPROM byte `wIndex >> 8`; the ROM's index
+register is the high byte of `wIndex`, it is 8 bits wide, and it wraps.** So the
+old `eepromdump` (`wIndex = offset`) re-read the same byte 32 times: the 16 KiB
+"full dump" was really **bytes 0..70**, and `wIndex` being 16 bits caps what this
+request can address at **256 bytes**. `eepromdump` now uses `wIndex = off<<8`
+(capped at 256 B, with the byte-255 wrap cross-check printed).
+
+Reconstructed bytes 0..71 (all 19 dumps agree; 0 of 2048 blocks differed from
+their shift group):
+
+```
+000: d0 04 23 2e 02 00 01 05 04 03 09 04 20 03 50 69  |..#......... .Pi|
+010: 6e 6e 61 63 6c 65 20 73 79 73 74 65 6d 16 03 50  |nnacle system..P|
+020: 43 54 56 20 33 32 30 63 78 16 03 30 30 30 30 30  |CTV 320cx..00000|
+030: 30 30 31 30 30 02 03 02 03 1c 06 06 75 30 05 37  |00100.......u0.7|
+040: 37 30 30 30 50 08 15 02                          |7000P...|
+```
+
+Decoded: `d0` = the marker the Windows driver reads at cold start (`c4 02 01a1`,
+len 1 → `d0`, §15); `04 23 2e 02` = VID 0x2304 / PID 0x022e LE; `00 01` =
+bcdDevice 0x0100; `05` = string count; then string-descriptor headers with
+**ASCII** payloads (`04 03 09 04` = LANGID 0x0409, `20 03`+"Pinnacle system",
+`16 03`+"PCTV 320cx", `16 03`+"0000000100", two empty `02 03`), then `1c 06 …`
+and a model string ending `37 37 30 30 30 50` = **"7700P"** — the same 7700 the
+vendor's Windows driver is named after (`Ltn_hyd7700pc_64.sys`).
+
+**Consequence for §15's open question:** the EEPROM is *not* `00`/`ff` — its
+config/descriptor block is intact and readable in the failed state. The
+"self-boot image is gone" hypothesis is not supported by what is reachable; the
+decisive bytes are **72..255** (a firmware-record header vs padding), and that
+needs the read service back.
+
+## 16.4 The wedge has a mechanism: `rq 0x02` with `wValue 0` kills the ROM's I2C engine
+
+The window snapshot used to end with the vendor-request map (`probe4 0x00..0xff`).
+From that probe onwards — i.e. after `rq 0x02` was sent with `wValue 0`, an I2C-in
+with address byte `0x00` — `c4 02 01a0` **STALLs forever**, while `GET_VERSION`
+keeps answering, and `libusb_reset_device` does not help. That is the mechanism
+behind the old "probing every request number wedges the stick; only a physical
+power cycle fixes it" note: it wedges the **I2C engine / the EEPROM service**, not
+the whole device, and the EP0 control plane survives it.
+
+So the map is now **opt-in** (`romwin --map`) and the default snapshot no longer
+destroys the thing the next experiment needs. Order of operations from here:
+grab the EEPROM (`--eeprom`) *first*, and only then, if wanted, prove the wedge
+with `--map`.
+
+The wedge is **engine-level, not EEPROM-specific**: measured 16:20 in the wedged
+state, `rq 0x02` stalls for every address byte tried — `0xa0` (EEPROM), `0xa2`
+(page bit), `0x80`/`0x82`/`0x84` (the DiB7000P demod), `0x06` — while
+`GET_VERSION` still answers. A USB port reset (`libusb_reset_device`, logged as
+`reset high-speed USB device number 22`) and a usbfs `authorized` 0→1 toggle both
+leave it wedged. Two consequences:
+
+* It cannot currently distinguish "the EEPROM chip stopped ACKing" from "the
+  ROM's I2C engine is stuck" — but **a pull answers that for free**: if
+  `GET_EEPROM` answers again after a pull, the EEPROM is electrically fine (it
+  ACKed 2048 reads in a row) and the fault is in the boot/execution path.
+* Any future probe of the I2C request must use a valid address byte. `wValue 0`
+  is the poison.
+
+## 16.5 Tools added
+
+* `pctv_probe eepromwin [secs] [dir] [--fw f] [--no-fw] [--max N] [--quiet]` —
+  watches for the **rarer** `GET_EEPROM` read service (it is independent of
+  `GET_VERSION`, which has been answering for hours while 0x02 stalls) and, the
+  instant it answers, takes in one burst: both `GET_VERSION` forms, the full
+  256-byte image (correct index, hex-dumped + saved), the wrap check, and a
+  **form map** — `wValue` ∈ {`01a0 02a0 04a0 08a0 10a0 20a0 01a1…01ae 00a0 03a0`}
+  × `wIndex` ∈ {`0000 0100 0008 1000 ff00`} + the recipient-0 form. That map is
+  what decides whether a wider-than-8-bit index (2-byte index, or page bits in
+  the I2C address byte) exists, i.e. whether the rest of the EEPROM is reachable
+  at all. Measured while the service was still alive: `wValue 0x02a0` answers with
+  the **same byte-0 window** (so the high byte of `wValue` is a mode/length
+  selector, not part of the addressing), while `0x03a0`, `0x00a0`, `0x01a2` (the
+  24Cxx page bit), `0x0150` and `0x0151` stall — i.e. the low byte is the I2C
+  address byte and this EEPROM does not answer a page-bit address. In the wedged
+  state everything, `0x01a0` included, stalls.
+* `pctv_probe eepromdump` fixed (see 16.3); `romwin --map`; `rom-window.sh
+  --eeprom` / `--map` (one wrapper, `--eeprom` switches the subcommand).
+* All read-only: request `0x02` is a read, nothing writes the EEPROM.
+
+## 16.6 State and the one remaining experiment
+
+The card is currently enumerated and in the **ROM-answers-GET_VERSION /
+I2C-wedged** state (`ram=0x00000001`, `c4 02 01a0` → EPIPE) — stable for ~30 min,
+unmoved by port reset or 200+ firmware downloads. `logs/eeprom-window-*/` holds a
+live `eepromwin` watch.
+
+The one experiment that gets bytes 72..255 is a **physical pull ≥ 60 s** (the
+only thing known to restore the I2C engine) while `eepromwin` watches:
+
+```sh
+cd ~/nixos-config/pctv-linux
+sudo ./rom-window.sh --eeprom 3600 --hold     # pull >= 60 s, re-insert, read the dump
+```
+
+If bytes 72..255 are `00`/`ff` → the self-boot image really is gone. If they hold
+a plausible firmware record → the EEPROM is intact end to end and the fault is the
+8051 fetching/executing it (rail/regulator or the chip), which is the same
+conclusion §15 reached from the Windows side, now with the EEPROM ruled out.
+
+## 16.7 THE PULL ANSWERED IT (2026-10-08 18:01): the EEPROM is config-only and blank past 0x4a
+
+> **SUPERSEDED — the measurements below are correct, the interpretation is not.**
+> It was wrong to expect a firmware image in this EEPROM: the card has no
+> self-boot image at all, the host always downloads the bridge firmware (7
+> successful kernel downloads on Oct 6/7), and this chip is a 256-byte config
+> EEPROM whose blank tail is normal. See `TRUTH.md` §2, §5, §8.
+
+Pulled the card ~18:01 (≥ 60 s out), re-inserted while `eepromwin` watched
+(`logs/eeprom-window-1791478844/`). It caught the window on iteration 3 and took
+**32/32 windows, 0 bad** — the whole reachable image, `eeprom-1791478863.bin`:
+
+```
+000: d0 04 23 2e 02 00 01 05 04 03 09 04 20 03 50 69  |..#......... .Pi|
+010: 6e 6e 61 63 6c 65 20 73 79 73 74 65 6d 16 03 50  |nnacle system..P|
+020: 43 54 56 20 33 32 30 63 78 16 03 30 30 30 30 30  |CTV 320cx..00000|
+030: 30 30 31 30 30 02 03 02 03 1c 06 06 75 30 05 37  |00100.......u0.7|
+040: 30 30 30 50 08 15 02 50 31 01 00 ff ff ff ff ff  |000P...P1.......|
+050: ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff  |................|
+   ...  (0x51..0x7e all ff)
+070: ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff e3  |................|
+080: 00 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff  |................|
+   ...  (0x81..0xff all ff)
+wrap check @255 -> ok  ff d0 04 23 2e 02 00 01
+```
+
+Histogram of the 256 bytes: **179 × `ff`**, and the only non-`ff` bytes above the
+config block are `0x7f = e3` and `0x80 = 00`. The config block ends at **0x4a**
+(`… 50 31 01 00` = "P1" + `01 00`). Bytes 0..70 are byte-identical to the 15:53
+dumps (the earlier reconstruction was off by one at the tail — the fresh dump is
+authoritative; the model string is `05` + **"7700P"** at 0x3f..0x43).
+
+**A second index form exists and it does not wrap.** The form map taken in the
+same burst found `wValue 0x02a0` answers with the *same* 8-bit index but a **+1
+offset and no wrap**:
+
+| `wValue` | `wIndex` | bytes returned | EEPROM byte |
+| --- | --- | --- | --- |
+| `0x01a0` | `0x0000` | `d0 04 23 2e 02 00 01 05` | 0 |
+| `0x02a0` | `0x0000` | `04 23 2e 02 00 01 05 04` | **1** |
+| `0x02a0` | `0x0100` | `23 2e 02 00 01 05 04 03` | **2** |
+| `0x02a0` | `0x1000` | `6e 61 63 6c 65 20 73 79` | **16** |
+| `0x02a0` | `0xff00` | `ff ff ff ff ff ff ff ff` | **256** |
+
+So `wValue`'s high byte is an index-mode selector (`0x01` = 1-byte index, wraps;
+`0x02` = 2-byte index, which for this chip lands one byte further on and does
+**not** wrap), and `0x03a0`/`0x04a0`/`0x08a0`/`0x10a0`/`0x20a0` all stall — there
+is **no form that reaches past ~256**. The one byte of "past" that is reachable,
+**byte 256, is `ff`** — and 256 is exactly where an aligned firmware image would
+have to start after a 75-byte config block.
+
+### What this settles
+
+1. **The EEPROM chip is fine.** A physical pull restores the I2C engine, and the
+   chip then ACKs 32 reads in a row and returns a coherent, reproducible config
+   block. "EEPROM dead / rails gone" is out.
+2. **The wedge is caused by invalid I2C requests, not by time.** The service was
+   alive for ~4 min at 15:53 and died at the map probe; after the pull it was
+   alive long enough for one burst and died again at the form-map sweep (which
+   sends odd/zero address bytes). Valid address bytes (`0x01a0`, `0x02a0`,
+   `0x01a1`) do not kill it; `wValue 0` and the odd address bytes do.
+3. **There is no firmware image anywhere in the reachable EEPROM.** 179 of the
+   256 reachable bytes are erased `ff`, byte 256 is `ff`, and the config block is
+   only 75 bytes. So the §15/§16 question "is the self-boot image gone?" answers
+   **yes, as far as the EEPROM can be read** — and the functional check agrees:
+   a clean power cycle (rails off ≥ 60 s) still leaves `ram=0x00000001`, i.e. the
+   boot ROM runs and loads nothing.
+4. **Therefore the card is bricked at the boot-image level, not the host level.**
+   Boot ROM: alive. EEPROM: alive, config intact. Image: absent. Host (Linux *or*
+   Windows, vendor driver or ours): irrelevant — §15 already proved the traffic is
+   identical and fails identically.
+
+### The only remaining experiment (deliberately not run)
+
+The ROM does expose an I2C **write** (`rq 0x01`, the form the Windows driver uses:
+`44 01 01a0 …` + data), so in principle the missing image could be written into
+the EEPROM and the card asked to self-boot. That is a **destructive write to
+persistent storage** on a card whose EEPROM record format is unknown (the 34 KB
+`firmware/win_fw.bin` is the *RAM download* record stream, not necessarily the
+EEPROM layout), and a wrong write would destroy the config block that still works
+(VID/PID/strings — the thing that makes the card enumerate at all). Everything in
+this repo stays read-only; if that experiment is ever wanted it needs the EEPROM
+record format first, and a plan for restoring bytes 0..0x4a.
+
+## 16.8 Correction to 16.7 (same day): the EEPROM was never the image store — and reprogramming is not the fix
+
+> **PARTLY SUPERSEDED.** Right that the EEPROM is not the image store and that
+> the Oct 6 healthy traces contain no download — but wrong about *why*: the card
+> does not run an internal image, it was **already warm** from an earlier host
+> download. And "replace the card" is wrong: it was revived 30 minutes later.
+> The cold/warm rule that explains the whole failure is in `TRUTH.md` §4.
+
+16.7 reads as if a firmware image *should* have been in the EEPROM and is missing.
+The trace evidence says otherwise, and it changes the verdict:
+
+**The healthy card never received a host download, so its image is internal to the
+DiB0700.** Counting firmware traffic (bulk OUT EP1 — that is what the download
+uses, `download_firmware()` does `libusb_bulk_transfer(dev, 0x01, …)`) across the
+traces:
+
+| trace | date | bulk-OUT EP1 (fw records) | state |
+| --- | --- | --- | --- |
+| `baseline-windows-boot.parsed` | Oct 6 17:29 | **0** (only 2 × `44 0c` GPIO) | healthy, Windows boot |
+| `guest-baseline.txt` | Oct 6 20:55 | **0** | healthy |
+| `guest-restored-2007drv.txt` | Oct 6 21:49 | **0** | healthy, vendor driver |
+| `guest-dvb7700all.txt` | Oct 6 21:45 | **0** | healthy |
+| `win7-vs-linux-trace-20261008.parsed` | Oct 8 15:29 | **3250** (= 1625 transfers = the full 34066 B image) | cold, driver *trying* to recover |
+
+So on Oct 6 the Windows driver enumerated the card and it was **already running
+fw 1.2.0** — no download, no `GET_VERSION` even. The image therefore lives
+*inside* the chip (its own boot memory), and the external EEPROM is exactly what
+it looks like: a **256-byte config EEPROM** (marker, VID/PID/bcdDevice, string
+descriptors, model "7700P"). `0x4b..0xff = ff` is **normal for that chip**, not
+the fault. FINDINGS line 47's "self-booted from ROM" is literally correct.
+
+**And that is why reprogramming cannot be the recovery.** The host can already
+hand the chip a complete image — ours and the vendor driver's, byte-identical,
+1625 records + `jumpram 0x70000000 -> ok` — and it never runs (`ram` stays
+`0x00000001`, every post-download EP0 IN stalls). A perfect boot source would not
+help, because the failure is *downstream* of the boot source: the 8051's
+fetch/execute path or the RAM the image lands in.
+
+There is also no path to the internal image: the cold-state ROM services are only
+
+```
+rq 0x04 -> 00 00 00 00 00 00 00 00     rq 0x06 -> 00 01
+rq 0x09 -> ok (0 len)                  rq 0x0d -> ok (0 len)
+rq 0x15 -> hw=66 rom=11 ram=01 fwtype=0
+```
+
+everything else STALLs — no flash read/upload/program request exists in the ROM
+(the dib0700 driver's flash services are *firmware* services, and the firmware is
+exactly what will not run).
+
+### Timeline, for the record (this is what "we recovered it before" actually was)
+
+| when | what | evidence |
+| --- | --- | --- |
+| Oct 6 (all day) | card healthy, self-loads its internal image; Windows/Linux never download | the four Oct 6 traces, 0 bulk-OUT |
+| Oct 7 ~21:58 | host hard-crashed and rebooted; card came up **cold-wedged** (§14.4) | `GET_VERSION` NACKing |
+| Oct 8 15:14/15:29 | attaching the win7 guest made the driver **download the image and fail identically**; 9 device-initiated re-enumerations looked like life but are the 8051 resetting into its ROM | 3250 bulk-OUT in the trace; §15 |
+| Oct 8 18:01 | pull + re-insert: ROM alive, I2C alive, EEPROM config intact, `ram=0x00000001` still | §16.7 |
+
+`logs/guest-w7-alive-20261008.txt` is a **VM** liveness probe (it lists
+`Device 0.2, Port 4 … Product PCTV 320cx, ID: hostdev0` — i.e. the card is
+*attached to the guest*), not evidence the card was working.
+
+Every recovery in this card's history was the same thing: **power-cycle it and the
+chip self-loads its internal image.** The old §7.1 wedge was recoverable that way
+because the image and the execution path were still sound. What is broken now is
+that path itself — so the practical answer is: **the card is dead; replace it.**
+Writing the EEPROM would not touch the fault, and there is no host-visible handle
+on the internal image to rewrite.

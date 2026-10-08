@@ -1,5 +1,13 @@
 # HANDOVER — pctv320cx native driver, on hardware
 
+> **READ `TRUTH.md` FIRST.** It is the single authority for what is known to be
+> true as of 2026-10-08 18:50. This file is a running log and contains claims that
+> were later disproved — notably the 2026-10-08 16:20/18:05 entries below, which
+> concluded "the card is dead / the self-boot image is gone". **That conclusion is
+> wrong** (retracted in `TRUTH.md` §8): the card was revived at 18:31 by the
+> in-tree driver's cold-state firmware download and is running now. Where this log
+> and `TRUTH.md` disagree, `TRUTH.md` wins.
+
 State as of **2026-10-07 ~23:30**, on **macbook-pro-2009-nixos** (MacBookPro5,1,
 kernel **7.2.3**, EFI, host config `machines/macbook-pro-2009/`).
 Pinnacle PCTV 320cx ExpressCard, **2304:022e**, enumerates as **usb 1-3**
@@ -444,3 +452,624 @@ encodings (`record[3] = 0x10` = frontend bus), `i2c_gate`, `cx_burst`,
   "Failed to run rustfmt … (non-fatal)"), and `#![allow(unsafe_op_in_unsafe_fn)]`
   at the crate top is a pre-upstream cleanup item.
 * The Win7 VM and its USB-passthrough helpers are retired.
+
+---
+
+# UPDATE 2026-10-08 ~13:45 — the bridge is cold at the instant of insertion; the download shape is not the problem
+
+Report: "the PCTV is no longer capturing video through V4L2 since the kernel
+update". Kernel is **7.2.9** (`Linux 7.2.9 #1-NixOS SMP`), card on **usb 2-3**
+(EHCI `0000:00:06.1`), module auto-loads on insertion (it is in
+`boot.extraModulePackages` via `hardware.pctv320cx.enable`).
+
+**What the V4L2 layer does.** The node is there and correct — the previous
+section's two enumeration fixes are live: `/dev/video0`,
+`Card type: Pinnacle PCTV 320cx`, `/dev/v4l/by-id/usb-Pinnacle_system_PCTV_320cx_0000000100-video-index0`.
+`v4l2-ctl -d /dev/video0 --stream-mmap` fails at stream-on with
+
+```
+pctv320cx: signal check (stream-start): decoder did not answer (0x40d errno -32, 0x40e errno -32)
+pctv320cx: arming the bridge anyway, but no signal is locked
+WARNING: CPU: 1 PID: ... at .../videobuf2-core.c:... vb2_start_streaming+0xae/0x130
+```
+
+so the capture path is dark for the same reason as before: **the DiB0700 does
+not answer**, and the CX25843 decoder is therefore unreachable over the i2c
+tunnel. (The `vb2_start_streaming` WARN is a separate driver-side bug — we arm
+and start streaming on a dead bridge instead of failing the request; still open.)
+
+**The bridge state, measured with the kernel driver off the device.** After a
+physical pull + re-insert (device number 4 → 6) with `pctv320cx` rmmod'd, so
+that `pctv_probe`/`fwtest` is the *very first* accessor after enumeration:
+
+| Access | Result |
+| --- | --- |
+| descriptors, strings, high-speed enumeration | fine (`480 Mbit`, "PCTV 320cx", serial `0000000100`) |
+| `0x15 GET_VERSION`, recipient 0 **and** 4 | `EPIPE` (stall) |
+| `0x02` legacy i2c (the EEPROM read the Windows driver does on a fresh card) | `EPIPE` |
+| `0x09 RESET`, `0x0a MASTER_RESET` (control OUT) | `EPIPE` |
+| bulk OUT EP1 firmware records | accepted, 0 errors, 1610 records |
+| `0x08` jumpram | accepted; EP1 IN then reports one constant 12 bytes `00 00 00 00 70 00 00 00 06 4a 3e e4` |
+
+FINDINGS §1 records that this card **self-boots its firmware from the config
+EEPROM** — `hw=0x66 rom=0x11 ram=0x00010200`, no download needed — and that
+GET_VERSION answered on a freshly powered card. It no longer answers *at all*,
+so the 8051 is not running even at power-on, and the download cannot revive it.
+
+**Ruled out on the host side** (all with `pctv-linux/fwtest.c`, new this
+session; build line in its header):
+
+* transfer shape — per-record short packets (mainline shape), one continuous
+  stream in full-512-byte chunks, and every record sent twice (data-toggle
+  resync): all accepted, none starts the 8051.
+* `clear_halt` on EP1..EP3 both directions; bridge `RESET`/`MASTER_RESET` after
+  the download.
+* USB port reset (`libusb_reset_device`) — succeeds, card stays cold.
+* unbind/rebind `ehci-pci`; PCI runtime PM of the EHCI (`power/control=auto` →
+  **D3hot held 60 s**). Note what that proved: the card re-enumerated after the
+  D3hot cycle **without ever losing power**, so the ExpressCard slot VBUS is not
+  switched by the controller's D-state — there is no host-side power cycle
+  available, only a physical one.
+* the payload never reaches the RAM in a *verifiable* way: the 12-byte EP1 IN
+  reply is byte-identical for the stock blob and for a blob with one data byte
+  flipped and its record checksum recomputed (`/tmp/fw_patched.fw` recipe in
+  this session's transcript), so it is an interrupt report, not a firmware ACK.
+  EP1 IN is an **interrupt** endpoint (64 B, interval 10 — FINDINGS §1), which is
+  why those reads look like canned replies.
+
+**On "since the kernel update".** The observation is real: the module verified
+working on hardware (resample fix, 375 frames @ 25.00 fps) is
+`/nix/store/fan7qif8kag65cxawdqqaj6hsymkxwd6-pctv320cx-0.1`, built against
+**7.2.3**; the only 7.2.9 builds (`aj4kz2al…`, `kpw6wkzd…`) have never worked.
+But the wedge began at the **host hard-crash** that ended the 7.2.3 session
+(FINDINGS §14.4 — nouveau BAR fault ~8 min earlier, no oops), and a physical
+power cycle does not clear it, which is *not* what the old wedge looked like
+(HANDOVER §0 / FINDINGS §7.1: a port reset used to fix it). So the kernel bump
+is not proven to be the cause; the card or the slot may simply be dead.
+
+**The two decisive tests, neither run yet.**
+
+1. **Boot the 7.2.3 generation** — `/nix/var/nix/profiles/system-15-link`
+   (nixpkgs 26.05.20260903, the last generation before the 12:22 bump; gens
+   16/17 are 26.11.20261006 → 7.2.9). Then `sudo rmmod pctv320cx` (udev
+   auto-loads it on insertion), pull the card, re-insert, and make
+   `sudo ./pctv_probe ver` the first accessor. GET_VERSION answers → 7.2.9 does
+   something during enumeration that kills the EEPROM self-boot, and the next
+   step is diffing the 7.2.3→7.2.9 usbcore/EHCI enumeration sequence. It
+   stalls → the card/slot is dead and no kernel change will help.
+2. **Test the card under Windows on this same laptop** (kernel-independent proof
+   of card health): the retired `win7` libvirt domain + USB passthrough, driven
+   by `scripts/pctv-win7-ssh.sh`. The domain may need recreating.
+
+**Do not** conclude from `dmesg`'s `dib0700: firmware started successfully` that
+the bridge is up — that message only means jumpram was *accepted*. GET_VERSION
+is the only real health check.
+
+# UPDATE 2026-10-08 ~14:20 — the userspace path WORKS end-to-end; the bridge is cold with **no kernel driver loaded at all**; and it was already cold on 7.2.3
+
+Ran the userspace path (`pctv_probe` + `capture-live.sh`) exactly as asked, as the
+sole accessor of the card. It is up and functional — it opens the device, claims
+if 0, downloads firmware, jumprams, and would capture. It gets no frames because
+the bridge will not run firmware. That is now measured with the kernel module
+**off and blocked**, which the previous update's control did not actually do.
+
+**Correction to the 13:45 update.** "`pctv_probe ver` was the first accessor
+after a physical power cycle" is **false**. `dmesg` shows udev auto-loading
+`pctv320cx` ~0.2 s after enumeration (`usbcore: registered new interface driver
+pctv320cx` at 2669.25, `GET_VERSION: errno -32` at 2669.45), i.e. the module
+probed the card, ran its own download + jumpram, and *then* the userspace tool
+was run. Every cold measurement so far was taken after a module probe.
+
+**How to keep the module off** (needed for any clean measurement):
+`blacklist` does **not** stop udev's modalias auto-load. Use an install override:
+
+```sh
+echo "install pctv320cx /nix/store/2gfxiwls9hbgwdwcy43mprchwsq36mg6-coreutils-9.11/bin/false" \
+  | sudo tee /etc/modprobe.d/99-pctv-test.conf     # temporary; gone on rebuild
+sudo rmmod pctv320cx
+sudo modprobe pctv320cx   # must fail - that is the check that it is really off
+```
+
+**New scripts:** `first-touch.sh` (waits for pull + re-insert, GET_VERSION first,
+then captures) and `hold-then-capture.sh` (same, but enforces a *timed* hold so
+the slot rails actually drop — a ~10 s hot-swap does not power-cycle the bridge).
+Both log to `logs/`.
+
+**Result** (`logs/hold-20261008-141210.log`, module off, 60 s out of the slot):
+
+| step | result |
+| --- | --- |
+| GET_VERSION as first vendor request after enumeration | `errno -32` (EPIPE) — cold |
+| download all 1610 records + jumpram `0x70000000` | accepted, still cold |
+| `libusb_reset_device` (port reset) | ok, still cold |
+| vendor blob `firmware/win_fw.bin` (1624 records) + jumpram | accepted, still cold |
+
+`fw2` (read EP1 IN after *every* one of the 1610 records) produced **two**
+12-byte replies in the whole download — at record 0 and at record 1609 (the EOF
+record) — and **nothing at all after the jumpram write**:
+
+```
+rec    0 addr 0000 type 04 len   2 -> ack 12: 00 00 00 00 70 00 00 00 07 e4 75 02
+rec 1609 addr 0000 type 01 len   0 -> ack 12: 00 00 00 00 70 00 00 00 06 4a 3e e4
+```
+
+Same 8-byte head every time, only the last four bytes move, and the two values
+alternate between runs — i.e. a small queue of pending reports being drained, not
+a per-record loader ACK. Bytes 4–7 are `70 00 00 00` = the jumpram address, so
+they are most plausibly the ROM acknowledging an *earlier* jumpram. The image
+itself never reports in.
+
+**The kernel update is exonerated — the bridge was cold 14 h before 7.2.9
+booted.** Per-boot (`journalctl -b N -k | grep -m1 "Linux version"`):
+
+| boot | kernel | bridge |
+| --- | --- | --- |
+| -3, Oct 7 **21:47:22** | **7.2.3** | **ALIVE** — module reached `decoder bring-up failed (is v4l-cx25840.fw installed?)`, which is *past* GET_VERSION/i2c |
+| -3, Oct 7 **21:58:43** | **7.2.3** | **cold** — `DiB0700 firmware download failed (errno -5)` (first cold sighting) |
+| -2, Oct 8 01:52 | 7.2.3 | cold (after the hard crash + reboot) |
+| -1, Oct 8 12:32 | 7.2.9 | cold |
+| 0, Oct 8 13:16 | 7.2.9 | cold |
+
+The 7.2.3 → 7.2.9 bump was at Oct 8 **12:22**. So the "since the kernel update"
+correlation is a coincidence, and **the boot-15 (7.2.3) test in the previous
+update is now pointless — skip it.** The card died between 21:47 and 21:58 on
+Oct 7, on 7.2.3, and never came back across a reboot and several physical power
+cycles — unlike the old wedge, which a port reset cleared (FINDINGS §7.1).
+
+**Where that leaves the path.** The userspace path is the right one and is ready:
+the moment GET_VERSION answers, `./capture-live.sh composite1 6 <tag> best`
+captures. The blocker is below every driver: the DiB0700's 8051 does not execute
+an image in its RAM — not the EEPROM self-boot, not the stock 1.20 blob, not the
+vendor's own blob — on a clean power-on with nothing else attached. Both load
+paths end in the same silicon, so the fault is the 8051/RAM (or its supply), not
+"the firmware" and not the host.
+
+**Remaining tests, all card-vs-slot-vs-machine, none kernel-related:**
+1. This card under Windows on this laptop (the retired `win7` domain +
+   passthrough, `scripts/pctv-win7-ssh.sh`) — kernel-independent.
+2. A different DiB0700 card in this ExpressCard slot (the second tuner in the
+   drawer is the same family) — tests the slot.
+3. This card in another machine — tests the card outright.
+
+**Real driver bug found while reading 7.2.3 `dib0700_devices.c`** (unrelated to
+the cold bridge, but it will matter the moment the card works):
+`stk7700ph_frontend_attach()` drives GPIO6 **low** *specifically for the 320cx*
+and high for every other board:
+
+```c
+if (idVendor == USB_VID_PINNACLE && idProduct == USB_PID_PINNACLE_EXPRESSCARD_320CX)
+        dib0700_set_gpio(dev, GPIO6, GPIO_OUT, 0);
+else    dib0700_set_gpio(dev, GPIO6, GPIO_OUT, 1);
+```
+
+§3 bug #9 ("board_init drove GPIO6 low and never raised it") was therefore
+**wrong for this board** — the original low was correct, and `gpio(6, out, 1)` in
+`board_init()` is a regression against the 320cx branch. Vendor requests never
+reach the GPIO layer on a cold bridge, which is why it has not bitten yet.
+
+---
+
+# UPDATE 2026-10-08 ~14:45 — userspace probe re-run on a full power-off + fresh boot; the bridge is still cold (hardware), and the second-card test is the one that decides it
+
+Requested: "the PCTV has not shown a picture through V4L2 since the kernel
+update — fall back to the userspace probe driver (the path known to work) and
+capture frames."  Done, on both a long hot power-off and a full machine
+reboot.  Every attempt is negative for the same reason as the 14:20 section:
+**the DiB0700 bridge is cold** (the 8051 never runs), which is below both the
+module and the userspace tool.
+
+## What was run
+
+Module blocked throughout (`/etc/modprobe.d/99-pctv-test.conf`, survives the
+reboot; `dvb_usb_dib0700` blocked by `nixos.conf`).  `lsmod` confirmed clean
+before each test; the stray in-tree `dvb_usb`/`dib*` modules loaded by the
+control experiment were `rmmod`'d afterwards.
+
+| test | result |
+| --- | --- |
+| Hot power-off, ~170 s out, `pctv_probe ver` first | `GET_VERSION … Pipe error` (cold) |
+| `pctv_probe init firmware/dvb-usb-dib0700-1.20.fw` | records accepted; every `ctrl_in rq=0x12` stalls; `scan done: 0 device(s)` |
+| ROM-path EEPROM read (`eeprom`, `c4 02 01a0`) | every read `Pipe error` |
+| `pwron all` / `demodreset` | every vendor write `Pipe error` |
+| `pctv_probe reset` (USB port reset) + `ver` | ok, still cold |
+| **Full machine power-off, boot with card OUT, then insert** (`first-touch.sh`) | cold (see below) |
+| In-tree `dvb_usb_dib0700` insmod'd | `firmware started successfully` / `warm state`, then `stk7700ph_frontend_attach: i2c_enumeration failed`; `GET_VERSION` still stalls; no frontend, only a dangling `dvb-demux` |
+| descriptor sanity | sane (`PCTV 320cx`, 1 interface, high-speed) — the bus is physically fine |
+
+## The fresh-boot run (the strongest test we can do without another card)
+
+`./first-touch.sh composite1 6 5` after a full reboot with the card out:
+
+```
+[14:38:54] present: Bus 002 Device 003: ID 2304:022e …
+[14:38:54] step 3: GET_VERSION (first vendor request after enumeration)
+device 2304:022e not found (or held by qemu/usbfs).
+...
+[14:38:54] BRIDGE COLD at first touch …
+  ctrl_in rq=0x15 value=0x0000 index=0x0000 -> Pipe error
+GET_VERSION failed -> device is COLD (no firmware running)
+```
+
+The "not found" is the card **re-enumerating under us**: `dmesg` shows device 3
+at 115.88 s, `USB disconnect` 0.12 s later, and device 4 at 116.77 s.  That is
+the card resetting its own USB link once and then never bringing up firmware —
+not the host disturbing it.  On the settled device 4, four `ver` attempts over
+~15 s were all `Pipe error`.
+
+## Verdict
+
+The 8051 does not execute an image — not the EEPROM self-boot, not the stock
+1.20 blob, not the vendor blob — and even the ROM-level vendor reads now stall.
+It survives a real power cycle and a full-reboot insertion, which the *old*
+wedge (FINDINGS §7.1) never did.  So this is hardware: the 8051 core, its
+clock/supply, or its EEPROM boot image.  §14.4's remaining tests stand, unchanged:
+
+1. **A second DiB0700 card in this slot** — separates dead-card from dead-slot.
+2. **This card in another machine** — confirms the card.
+3. If a second card is cold in this slot too, suspect the slot/controller (the
+   hard crash that preceded this may have damaged it); if it works, this card is
+   dead and a USB composite/S-Video dongle is the pragmatic replacement.
+
+The userspace path stays ready and correct — the moment a healthy card answers
+`GET_VERSION`, `./first-touch.sh` (or `./capture-live.sh composite1 6 <tag> best`)
+captures.  No kernel change is involved: the bridge went cold on 7.2.3 the night
+before the 12:22 bump (14:20 section, per-boot table), and the 7.2.9 module and
+the userspace tool fail at the identical point.
+
+Host left clean: no `pctv320cx`, no `dvb_usb_dib0700`, no `/dev/video*`, no
+`/dev/dvb`.  `first-touch.sh` / `hold-then-capture.sh` remain the scripts for the
+next attempt (both log to `pctv-linux/logs/`).
+
+---
+
+# UPDATE 2026-10-08 ~15:05 — **the bridge came back to life**, and the thing that revived it was the **Windows driver in the win7 VM**
+
+Requested: "beginning to suspect the pctv is broken — bring up the w7 VM and see if
+it is alive."  The VM is alive, and it answered the open §14.4 question (test 1,
+"this card under Windows on this laptop"): **the card is not proven dead.**
+
+## The VM
+
+`win7` was **shut off**, not deleted — the domain, its qcow2
+(`/var/lib/libvirt/images/win7.qcow2`, 17 GB allocated) and the `hostdev`
+passthrough entry are all intact, so nothing had to be recreated.
+
+```sh
+virsh -c qemu:///system start win7          # started in ~45 s, lease 192.168.122.59
+./scripts/pctv-win7-ssh.sh 'whoami & ver'   # chris-pc\chris, 6.1.7601 — SSH works
+```
+
+Guest state with the card attached (`virsh qemu-monitor-command win7 --hmp "info usb"`
+→ `Device 0.2, Port 4, Speed 480 Mb/s, Product PCTV 320cx, ID: hostdev0`):
+
+| check | result |
+| --- | --- |
+| `Ltn_hyd7700pc_64` (DiBcom 7700P kernel driver) | **RUNNING**, `ConfigManagerErrorCode 0`, device `Status OK` |
+| `Ltn_rc_64` (IR receiver) | RUNNING, OK |
+| `USB\VID_2304&PID_022E\0000000100` | present, bound, no error |
+| `dsenum.exe` | `PCTV DiB BDA Analog Capture` + `PCTV DiB BDA Analog Audio Capture` enumerate |
+| System event log (this boot) | no device/driver errors — only the two "unclean shutdown" records from the Oct 7 power-off |
+
+Do **not** read too much into the guest's `…&FN_01` / `HID\VID_2304…COL01..04`
+nodes: the host's descriptor read still shows `bNumInterfaces 1`, 4 bulk
+endpoints, no IAD, so those composite instances are Oct-6/7 leftovers that WMI
+keeps listing (Win32_PnPEntity and even Win32_USBControllerDevice associations
+survive for installed-but-absent devices).  PnP "OK" is not a bridge health
+check — GET_VERSION is.
+
+## The finding
+
+After `virsh detach-device` handed the card back to Linux, the host measured —
+for the first time since Oct 7 21:58, i.e. after ~20 h and several physical
+power-offs of nothing but EPIPE:
+
+```
+$ sudo ./pctv_probe ver
+  ctrl_in rq=0x15 value=0x0000 index=0x0000 -> 16
+GET_VERSION: 16 byte(s):
+  0000: 00 00 00 66 00 00 00 11 00 00 00 01 00 00 00 00
+  hw=0x00000066 rom=0x00000011 ram=0x00000001 fwtype=0x00000000
+```
+
+and it kept answering — 9 of 10 consecutive `ver` calls over 40 s.  **The 8051
+was executing.**  Nothing on the Linux side did that: the only thing that had
+touched the card in between was the Windows driver inside the guest.
+
+Note `ram=0x00000001`, not the healthy `ram 0x00010200` of §"First observed good
+output" — the image now running is not the 1.20 blob's.  Worth pinning down
+(which blob the Windows driver loads, and whether `ram` is a version at all).
+
+## ⚠️ The later "it went cold again" readings are NOT trustworthy — two usbfs clients
+
+Everything measured after the detach is contaminated:
+
+```
+$ for p in /proc/[0-9]*; do ls -l $p/fd | grep -q /dev/bus/usb/002 && echo "$p $(cat $p/comm)"; done
+PID 2391 .virt-manager-w:   /dev/bus/usb/002/010      # a virt-manager window holds the card
+PID 2501 .qemu-system-x8:   /dev/bus/usb/002/010      # and qemu, after re-attach
+```
+
+That is why every `pctv_probe` printed `claim if0: Resource busy`, and it
+explains the two "degraded" results I reported in-session:
+
+* `fw download failed at 0: Input/Output Error` — dmesg says the real reason:
+  `usb 2-3: usbfs: process 3646 (pctv_probe) did not claim interface 0 before
+  use`.  Bulk OUT on an unclaimed interface, not a dead bridge.
+* `ctrl_in rq=0x15 -> Operation timed out` — could be the same contention.
+
+So the sequence "warm → cold again in 2 min" is **unproven**.  The card may
+still be warm.  Re-measure with exactly one accessor.
+
+## How to re-run this cleanly
+
+1. Close the virt-manager window that holds the card (PID 2391 at the time of
+   writing) — it is the hidden claimant.  Only one of {qemu, pctv_probe, the
+   kernel module} may hold the device.
+2. Detach from the guest with a **vid/pid** XML, not the `dumpxml` copy: the
+   dumped `<source>` pins `bus='2' device='4'` and the devnum changes every
+   re-enumeration, so `virsh attach-device` then fails with *"Did not find
+   matching USB device"*.  Use `/tmp/pctv-hostdev-vidpid.xml`:
+   ```xml
+   <hostdev mode='subsystem' type='usb' managed='yes'>
+     <source><vendor id='0x2304'/><product id='0x022e'/></source>
+   </hostdev>
+   ```
+   (NB the running domain's own entry is the older pinned form plus a
+   `qemu:override` that swaps `hostdevice` for `vendorid/productid/hostport=3` —
+   that autoscan is what let qemu re-claim the card across devnum 4→10.)
+3. With the card on the host and nothing else holding it: `sudo ./pctv_probe ver`
+   → if it answers, go straight to `cxr 0x100` (expect `0x34`) and then
+   `./capture-live.sh composite1 6 <tag> best`.
+4. If it answers warm, the next question is *what the Windows driver does that
+   we don't*.  Capture it: start `sudo cat /sys/kernel/debug/usb/usbmon/2u >
+   /tmp/mon.log &` (module `usbmon` is loaded now; no tcpdump on this host),
+   then detach + re-attach the card so the guest driver re-runs its bring-up.
+   That trace is the recipe to fix `load_bridge_firmware()`/`board_init()`.
+
+## Also observed
+
+* The card re-enumerated by itself 9 times this boot (devnum 4→10, `USB
+  disconnect` + `new high-speed USB device` in dmesg, ~40 s–4 min apart) while
+  the guest driver and qemu were driving it, and **zero** times during a 150 s
+  idle with no accessor.  Consistent with dib0700 firmware-download/jumpram
+  churn, not necessarily a flaky slot.
+* `pctv_probe cxr` (i2c gate, `ctrl_out rq=0x13`) failed with `Pipe error`
+  before the revival and `Operation timed out` after — both under the
+  contention above, so the decoder tunnel is still unmeasured this session.
+* Host left as: `win7` **running**, card **attached to the guest** (port 4),
+  `pctv320cx` still blocked by `/etc/modprobe.d/99-pctv-test.conf`, `usbmon`
+  loaded.  Guest evidence bundle: `pctv-linux/logs/guest-w7-alive-20261008.txt`.
+
+---
+
+## Update 2026-10-08 ~15:30 — **answered: Windows does nothing we don't**
+
+(`logs/win7-vs-linux-20261008.md` is the evidence pack; raw trace
+`logs/raw-winretry2.bin`, parsed `logs/win7-vs-linux-trace-20261008.parsed`.)
+
+The "Windows driver binary" was finally obtained from the guest
+(`--get 'C:/Windows/System32/drivers/Ltn_hyd7700pc_64.sys'`; the earlier note that
+it was nowhere on any volume was because it lives only *inside* the VM disk).
+With it we could replay and compare apples-to-apples on the same cold card:
+
+1. **Detached the card from the guest** (empty result −110 on first detach, but
+the slot recovered by re-binding `ehci-pci`/`ohci-pci`; see "Controller
+recovery" below). Host `pctv_probe ver` → `Pipe error`: **cold**, as expected.
+2. **Linux cold bring-up** (`pctv_probe init` / `fw firmware/win_fw.bin`):
+   1624-record download + `jumpram 0x70000000` **accepted**, then `GET_VERSION`,
+   `SET_CLOCK`, every legacy i2c read → `EPIPE`. Cold.
+3. **Re-attached to the guest and let the Windows driver run StartDevice** with
+   usbmon capturing. Result: the driver's bulk-OUT stream rebuilds to exactly
+   `29ccafb3cc2414c02dab8b06f3f5bddd` — **byte-identical to `firmware/win_fw.bin`
+   and to our `pctv_probe fw` download** (`cmp` clean). Its entire cold-start
+   command sequence is:
+
+   ```
+   c4 02 01a1 (len 1)              -> EPIPE   # EEPROM read, pre-download
+   1625x bulk OUT ep1              -> all st=0  # firmware + jumpram
+   c4 02 01a0 (len 8)              -> EPIPE
+   c4 02 01a1 (len 1)              -> EPIPE
+   ```
+
+   No reset, no GPIO (`0x0c`), no `SET_CLOCK` (`0x0b`), no `ENABLE_VIDEO`
+   (`0x0f`), no `0x44`-recipient request, no DiBcom-only request. **Windows sends
+   nothing our Linux probe does not already send, and it fails in the same way.**
+
+So the Oct-8 "revival" was **not** a Windows command, and it was **not a revival
+at all**. `ram=0x00000001` is the **ROM bootloader** — mask ROM, so it always
+runs — not a working card (healthy is `ram=0x00010200`). This is exactly the
+14:20 finding: the DiB0700's 8051 runs its mask ROM but **will not execute any
+image in its RAM** — not the EEPROM self-boot, not the stock 1.20 blob, not the
+vendor blob — on a clean power-on with nothing else attached. The card has been
+in that state since **Oct 7 21:58** (first cold sighting, on the *old* 7.2.3
+kernel, 11 min after the last good boot), and no power cycle, port reset, kernel
+driver, host download or the Windows driver has brought it back. The 9
+device-initiated re-enumerations were the 8051 repeatedly resetting into its ROM.
+The Windows trace above is the kernel-independent confirmation of that: a
+different OS, the vendor's own driver, identical bytes, identical failure.
+
+**The video/capture path is not the answer either:** its extra init (GPIO + full
+DIB7000P register dump + CX25843-style decoder config + `ENABLE_VIDEO analog`,
+all already captured in `logs/analog-seq-windows.txt` / `full-seq.txt`) runs only
+*after* StartDevice succeeds. On a cold card the driver never gets past
+GET_VERSION, so the capture path is never reached. An attempt to force it via
+`sc start Ltn_hyd7700pc_64` (the service reports RUNNING; the PnP node stays
+`ConfigManagerErrorCode 10`) reached exactly the sequence in §2 above.
+
+### Where that leaves us
+
+* Nothing to add to `load_bridge_firmware()`/`board_init()` from the Windows
+trace — they already match it.
+* The blocker is **hardware/EEPROM self-boot intermittency in the DiB0700**: the
+card only answers when its own ROM boot succeeds, and there is no host command
+that forces it. The only reliable host-side actions are the ones that *perturb*
+it: full slot power-cycle (ExpressCard pull, ≥60 s) or possibly a warm
+re-enumeration storm. `libusb_reset_device` (12×) and `authorized 0→1` (×10)
+were both tried and **do not** force a ROM re-boot.
+* **Next experiment: run the ROM-window catcher** (`./rom-window.sh 1800
+  --hold`, docs `ROM-WINDOW.md`). It watches for the bridge to answer on EP0 and,
+  the instant it does, dumps both `GET_VERSION` forms, the **full config EEPROM**,
+  `GET_GPIO` and the vendor-request map. That is the one free measurement left:
+  it distinguishes "the EEPROM self-boot image is gone" (dump reads `00`/`ff`)
+  from "the 8051/RAM no longer executes an image" (dump is intact). Either way,
+  save `logs/rom-window-<epoch>/romwin.log`. Nothing else host-side can force the
+  ROM to boot.
+
+### Controller recovery (needed every detach on this box)
+
+Detaching a qemu USB hostdev tears down the EHCI/OHCI state and this MCP79
+controller does not always re-arm after a bus reset storm (`device descriptor
+read/64, error -110` on the port forever). Recovery that worked:
+
+```sh
+sudo sh -c 'echo 0000:00:06.0 > /sys/bus/pci/drivers/ohci-pci/unbind'   # background; can block
+sudo sh -c 'echo 0000:00:06.1 > /sys/bus/pci/drivers/ehci-pci/unbind'   # background; can block
+sudo sh -c 'echo 0000:00:06.0 > /sys/bus/pci/drivers/ohci-pci/bind'
+sudo sh -c 'echo 0000:00:06.1 > /sys/bus/pci/drivers/ehci-pci/bind'
+```
+
+unbind may report a hung task and the `echo …/bind` may block in `D` for ~60 s;
+run them with a `&` and wait — the devices come back (`usb4`, `usb2`) and the card
+re-enumerates. `/dev/usbmon2` and `/dev/usbmon4` both exist once `usbmon` is
+loaded; capture both buses while a device can flip between EHCI (high-speed) and
+OHCI (full-speed) on `.1`.
+
+Host left as: `win7` **running**, card **attached to the guest** (port 4),
+`pctv320cx` still blocked, `usbmon` loaded, watcher/`cat` stopped.
+
+---
+
+## 2026-10-08 16:20 — the ROM window WAS caught: EEPROM bytes 0..71 are intact, and the index law is `wIndex>>8`
+
+Full write-up: **FINDINGS §16**; tool usage: **ROM-WINDOW.md §0/§3.4**.
+
+`sudo ./rom-window.sh 1800` (dir `logs/rom-window-1791471238/`, usbmon in
+`raw-bus2.bin`) caught **19 ROM windows in 4 minutes** without any pull — the card
+was enumerated and re-enumerating on its own. Four results:
+
+1. **`GET_EEPROM` answered inside the windows**: 2048 reads per window, 0 errors,
+   19 dumps byte-identical. First EEPROM content ever read off this card.
+2. **The read is a sliding window: the 8 bytes start at EEPROM byte `wIndex>>8`.**
+   The ROM's index register is the *high byte* of `wIndex`, **8 bits**, wrapping
+   (12 index points + the byte-255 wrap). The old `eepromdump` (`wIndex = offset`)
+   re-read the same byte 32 times — the "16 KiB dump" was really **bytes 0..70**,
+   and 16-bit `wIndex` caps this request at **256 bytes**. `eepromdump` fixed.
+3. **The EEPROM is not `00`/`ff`.** Bytes 0..71 decode cleanly: `d0` marker,
+   VID/PID/bcdDevice `2304:022e 0100`, string count 5, the string descriptors
+   ("Pinnacle system", "PCTV 320cx", "0000000100"), and a model string **"7700P"**.
+   So §15's "self-boot image gone" is *not* supported by what is reachable — the
+   decisive bytes are **72..255**.
+4. **The wedge has a mechanism:** the vendor-request map probe sends `rq 0x02`
+   with `wValue 0` (I2C address byte `0x00`), and from that moment `GET_EEPROM`
+   STALLs forever while `GET_VERSION` keeps answering; port reset does not help.
+   That is the old "probing every request number wedges the stick" note explained:
+   it wedges the ROM's **I2C engine**, not the device. The map is now opt-in
+   (`romwin --map`).
+
+Also re-interpreted: **`ram=0x00000001` is a static ROM constant**, identical
+before the download, after `firmware: 1624 records` + `jumpram -> ok`, and an hour
+later — so "the download is accepted" proves nothing. Only `ram` changing to
+`0x00010200` would.
+
+Tools: `pctv_probe eepromwin` (watches for the rarer `GET_EEPROM` service and
+grabs the whole 256 B image + a `wValue`/`wIndex` form map hunting a wider index),
+fixed `eepromdump`, `romwin --map`, `rom-window.sh --eeprom|--map`. Built clean,
+all read-only.
+
+**Host left as:** card enumerated on bus 2 (dev 22), `pctv320cx` blocked,
+`win7` running but **not** holding the card, `usbmon` loaded, and a **live
+`eepromwin` watch** (`logs/eeprom-window-1791472381/`, 60 min, started 16:13) plus
+`cat /dev/usbmon2`. The card sits in the ROM-answers-GET_VERSION / I2C-wedged
+state; the watch will not catch anything until the I2C engine is restored.
+
+**Next (needs hands):** pull the ExpressCard ≥ 60 s and re-insert while the watch
+runs — that is the only known way to restore the I2C engine — then read
+`eeprom-<epoch>.bin` bytes 72..255:
+
+```sh
+cd ~/nixos-config/pctv-linux
+sudo ./rom-window.sh --eeprom 3600 --hold
+```
+
+`00`/`ff` there → the self-boot image really is gone. A plausible firmware record
+→ the EEPROM is intact end to end and the fault is the 8051 fetching/executing it
+(rail/regulator or the chip), which is where §15 pointed from the Windows side.
+
+---
+
+## 2026-10-08 18:05 — THE PULL WAS DONE: the EEPROM is config-only and blank past 0x4a → the card is bricked at the boot-image level
+
+Full write-up: **FINDINGS §16.7**. Dump: `logs/eeprom-window-1791478844/eeprom-1791478863.bin`.
+
+Pulled ≥ 60 s, re-inserted while `eepromwin` watched; it caught the window on
+iteration 3 and read **32/32 windows, 0 bad** — the whole reachable image:
+
+* Bytes **0x00..0x4a**: the config block, byte-identical to the 15:53 reads
+  (`d0` marker, `2304:022e`/bcd `0100`, 5 strings, model `05 "7700P"`, ends
+  `50 31 01 00`).
+* Bytes **0x4b..0xff**: **179 × `ff`** — erased. Only two strays: `0x7f=e3`, `0x80=00`.
+* A **second index form** exists: `wValue 0x02a0` = same 8-bit index, **+1 offset,
+  no wrap** (`ix=ff00` reads **byte 256**). `0x03a0/04a0/08a0/10a0/20a0` stall, so
+  nothing reaches past ~256 — and **byte 256, exactly where an aligned firmware
+  image would start, is `ff`**.
+
+Settles the investigation: **EEPROM chip alive** (a pull restores the I2C engine
+and it ACKs 32 reads), **boot ROM alive**, **config intact**, **no firmware image
+anywhere reachable**, and a clean power cycle still yields `ram=0x00000001` (the
+ROM loads nothing). Also confirmed the wedge rule: valid address bytes are safe,
+`wValue 0` / odd address bytes wedge the I2C engine until the next pull.
+
+**Conclusion: the card is dead, and reprogramming is not the fix — see §16.8.**
+The Oct 6 healthy traces contain **zero** firmware downloads, so the image lives
+*inside* the DiB0700; the external EEPROM is only a 256-byte config EEPROM (blank
+past 0x4a is normal for it). The host can already hand the chip a byte-identical
+image (1625 records + `jumpram -> ok`) and it never runs, so the fault is
+downstream of the boot source — the 8051's fetch/execute path or its RAM. The ROM
+offers no flash/program/upload service (`0x04/0x06/0x09/0x0d/0x15` only), so there
+is no host-visible handle on the internal image. **Replace the card.**
+
+What "recovering it with the win7 VM" actually was: on Oct 6 the card self-loaded
+its image and the driver downloaded nothing; on Oct 8 the driver downloaded the
+full image and failed identically (§15). `guest-w7-alive-20261008.txt` is a *VM*
+liveness probe, not the card working.
+
+**Host left as:** card enumerated on bus 2 (dev 23), `pctv320cx` still blocked by
+`/etc/modprobe.d/99-pctv-test.conf`, `win7` running without the card, `usbmon`
+loaded, **no watcher running** (the watch ended after its 1 window). To resume any
+of this: `sudo ./rom-window.sh --eeprom 600 --hold` and a pull.
+
+---
+
+## 2026-10-08 18:50 — THE CARD IS ALIVE. Written up in **`TRUTH.md`** (now the authority)
+
+Everything the two 2026-10-08 entries above concluded is **retracted**; read
+`TRUTH.md` instead of them. Short version:
+
+* **The card has no self-boot image.** At every power-up it is cold and **the host
+  downloads the DiB0700 firmware** — the kernel log shows that succeeding **7×** on
+  Oct 6/7. The 256-byte EEPROM is a config EEPROM only (blank tail is normal).
+* **Why a day was lost:** upstream decides cold/warm with
+  `*cold = GET_VERSION() <= 0`. The card was stuck in the ROM-idle state that
+  *answers* GET_VERSION (`ram=0x00000001`), so the kernel called it **warm, skipped
+  the download**, and failed at `i2c_enumeration`. The proven path had never run.
+* **Revival (18:31):** `insmod dvb_usb_dib0700` + staged decompressed firmware +
+  **pull ≥ 60 s** → `in cold state` → `firmware started successfully` → frontend +
+  xc2028 tuner up. Then unbind and load our module: `/dev/video2`,
+  `ram=0x00010200`, `CX25843 chip id = 0x34`, **`analog capture ready` with no
+  bring-up warning**.
+* **Host gotcha that cost two failures:** NixOS ships firmware as `.fw.zst` and
+  `request_firmware()` cannot decompress zstd — that is why `xc3028-v27.fw` and
+  `v4l-cx25840.fw` "failed with error -2". Decompress into a dir and add it to
+  `/sys/module/firmware_class/parameters/path`.
+* **New open item:** after a cold boot the CX25843 ACKs at `0x44` but every read
+  returns `0x00`; a **GPIO sweep** (`gpio <n> 1 <0|1>`, n=0..15) makes it answer
+  `0x34` and it stays. The causal pin is not isolated — likely a decoder
+  power/reset line `board_init` does not drive.
+* **Capture is not yet proven again** because **no composite/S-Video source is
+  connected** (`0x40e = 0x00`, signal absent → the decoder emits no BT.656 and no
+  buffers fill). Connect a source and `0x40e` should read `0x7f`.
+
+**Host left as:** card bound to our `pctv320cx` module, `/dev/video2` present,
+bridge firmware running (`ram=0x00010200`), decoder microcode loaded,
+`/tmp/pctv-fw` staged + on the `firmware_class` path, in-tree `dvb-usb*` modules
+loaded but unbound from the card, no watcher/usbmon running.

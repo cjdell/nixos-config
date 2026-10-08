@@ -4,7 +4,7 @@
 and contain claims that were later disproved; where they disagree with this file,
 **this file wins**. Superseded claims are listed explicitly in §8.
 
-Last updated: **2026-10-08 20:05 BST**, host `macbook-pro-2009-nixos`, kernel
+Last updated: **2026-10-08 21:35 BST**, host `macbook-pro-2009-nixos`, kernel
 **7.2.9**, ExpressCard slot `0000:00:1c.3` (EHCI bus 2, port 3).
 
 > **2026-10-08 20:05 — the userspace path works, but only after the kernel has
@@ -279,15 +279,24 @@ On a warm reboot the bridge is already booted; the handoff then finds no
 * Bridge bring-up order that works: `SET_CLOCK 0xb0` (72 MHz, gp3=1) →
   `SET_I2C_PARAM 100` → GPIO `6=1, 9=1, 4=1, 7=1, 10 pulse, 0=1` → decoder
   microcode + registers → release the demod bus.
-* **New today, not yet understood:** after a cold boot the decoder ACKs at `0x44`
-  but **reads return `0x00`** (chip id `0x00`, `0x40d/0x40e = 0x00`) in *every*
-  read form (`cxr`, `rd2`, `nrd16`, `grd1`). A **GPIO sweep** (`gpio <n> 1 <0|1>`
-  for n = 0..15) made it start answering `0x34` and it **stayed** answering
-  afterwards. The causal GPIO is **not isolated** — candidates are the pins
-  `board_init` does not touch (1, 2, 3, 5, 8, 11, 12, 13, 14, 15). Driving
-  `GPIO0=0` or `GPIO15=0` made the I2C tunnel return errors.
-  **Practical workaround right now:** if the decoder reads `0x00`, run a GPIO
-  sweep, then re-probe.
+* **Colour killer must be cleared for a chroma picture.**  `pctv_probe`'s
+  bring-up now writes `0x401 = 0xc0` (CKILLEN bit 6 off, plus the composite /
+  S-Video INPUT_MODE) and `0x420 = 0x80` (saturation 1.0×).  The vendor default
+  leaves CKILLEN set, which pins chroma to neutral — that is why the monitor
+  used to show grey in Composite mode while S-Video looked coloured.
+* **Decoder unresponsive (`0x100 = ERR/00`) is recovered by GPIO1.** After a
+  cold boot the decoder ACKs at `0x44` but **reads return `0x00`** (chip id
+  `0x00`, `0x40d/0x40e = 0x00`) in *every* read form (`cxr`, `rd2`, `nrd16`,
+  `grd1`). A **GPIO sweep** (`gpio <n> 1 <0|1>` for n = 0..15) made it start
+  answering `0x34` and it **stayed** answering afterwards. **Isolated
+  2026-10-08 21:2x: it is GPIO1** — toggling `gpio 1 1 1` (0→1) brought
+  `0x100` back to `0x34` after GPIO15 had been left low and the whole I2C
+  tunnel read `ERR`; `gpio 1 1 0` then `gpio 1 1 1` is the recovery. (GPIO1 is
+  not in `board_init`; the vendor trace also never lists it, but it behaves as
+  the decoder power/reset line.) Driving `GPIO0=0` or `GPIO15=0` made the I2C
+  tunnel return errors.
+  **Practical workaround right now:** if the decoder reads `0x00`/`ERR`, pulse
+  `pctv_probe gpio 1 1 0; pctv_probe gpio 1 1 1`, then re-probe.
 * V4L2 inputs exposed by our driver: `Composite 1`, `Composite 2`, `Composite 3`,
   `S-Video`. Format: 720×576 UYVY, interlaced, bytesperline 1440.
 
@@ -349,9 +358,9 @@ On a warm reboot the bridge is already booted; the handoff then finds no
 
 ## 9. Open questions
 
-1. **Which GPIO makes the CX25843 answer?** (Sweep works; the pin is unknown.
-   Likely a decoder power/reset line the vendor driver drives and `board_init`
-   does not.)
+1. **RESOLVED 2026-10-08** — the CX25843 power/reset line is **GPIO1**
+   (`gpio 1 1 0` → `gpio 1 1 1` restores `0x100 = 0x34` after it reads `00`/`ERR`).
+   `board_init` does not touch it.
 2. **Why does the card come up in one of two post-pull ROM states?** -> mostly
    answered 2026-10-08: it is **download order** (§2.1), not randomness. Remaining
    nuance: the `ram=1` state vs the not-answering state specifically, and whether
@@ -365,6 +374,14 @@ On a warm reboot the bridge is already booted; the handoff then finds no
    `pctv-bridge-handoff.service`, which loads `dvb_usb_dib0700` after the
    firmware path is set, waits for `/dev/dvb/adapter0`, then unbinds it to
    libusb.  Verified from a cold pull with the driver unloaded (§3.1).
+6. **Analog audio — open.**  The card has a genuine analog audio path (the
+   vendor driver registers a "BDA Analog Audio Capture" filter and configures a
+   CX2584x audio decoder), but no user-visible USB endpoint carries it: of the
+   bulk-IN endpoints only `0x82` ever delivers in analog mode, and that stream
+   is raw BT.656 video.  `0x83` stays idle for every `ENABLE_VIDEO` mode nibble
+   tried.  The vendor's BDA stream framing (which must split the audio out of
+   the capture stream) is the missing piece; nothing in the mainline dib0700
+   protocol exposes an audio request.
 
 ## 10. Tools in this directory
 

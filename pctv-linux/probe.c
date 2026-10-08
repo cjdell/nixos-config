@@ -2320,7 +2320,11 @@ static int analog2_bringup(const char *inp, int ntsc, const char *arm,
         else                 { reg &= 0xcf; reg |= (chroma - 0x400) >> 4; }
     }
     cxg_w(0x103, reg);
-    cxg_or(0x401, ~0x6, comp ? 0x00 : 0x02);
+    /* INPUT_MODE (bits 1-2) + colour-killer (bit 6) off.  The vendor default
+     * leaves CKILLEN set, which pins chroma to neutral and yields a grey
+     * picture even with a good source; capture-live.sh clears it too. */
+    cxg_or(0x401, ~0x46, comp ? 0x00 : 0x02);
+    cxg_w(0x420, 0x80);                    /* saturation = 1.0x */
     printf("input %s: mux 0x103=%02x INPUT_MODE=%s\n", inp, reg, comp ? "composite" : "s-video");
 
     /* std_setup (kernel-faithful) */

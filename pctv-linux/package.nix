@@ -29,7 +29,7 @@ stdenv.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./probe.c ./pctv-monitor.c ];
+    fileset = lib.fileset.unions [ ./probe.c ./pctv-monitor.c ./font5x7.h ];
   };
 
   nativeBuildInputs = [ pkg-config makeWrapper ];

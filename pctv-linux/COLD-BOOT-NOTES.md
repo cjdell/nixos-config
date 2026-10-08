@@ -338,8 +338,10 @@ autoRollback (it should not).
   enabled in `machines/macbook-pro-2009/default.nix`.  `noSudo = true` bakes in
   `PCTV_NO_SUDO=1` and relies on the module's udev rule
   (`GROUP="video", MODE="0660"`) plus no bound kernel driver.
-* **GUI controls:** `1`–`4` input, `g` grey, `s` snapshot → `/tmp/pctv-snap-*.ppm`,
-  `r` record raw BT.656 → `/tmp/pctv-rec-*.bt656`, space pause, `q`/ESC quit.
+* **GUI controls:** `1`/`2` / `Tab` input (an on-screen banner names the active
+  one; `-i <input>` or `PCTV_INPUT` sets it at launch), `g` grey, `s` snapshot
+  → `/tmp/pctv-snap-*.ppm`, `r` record raw BT.656 → `/tmp/pctv-rec-*.bt656`,
+  space pause, `q`/ESC quit.
 * **Headless env vars:** `SDL_VIDEODRIVER=dummy`, `PCTV_VERBOSE=1` (fps to
   stderr), `PCTV_SNAP_AFTER=N` (write one PPM then exit).
 * **Display on this host:** Wayland (kwin) + XWayland `:0`; from a plain shell
@@ -353,7 +355,14 @@ autoRollback (it should not).
 ## 8. Known non-issues / current limits
 
 * **Chroma fringing** (rainbow edges) is expected; the §14 chroma work is not in
-  the monitor yet.  Luma is correct.
+  the monitor yet.  Luma is correct.  (The bring-up now clears the CX25843
+  CKILLEN bit, `0x401` bit 6, so composite no longer comes out grey — selecting
+  Composite while only an S-Video source is connected still shows cross-colour,
+  because the two inputs share the same luma pin on this board.)
+* **Audio is not wired up.**  The card does digitise analog audio, but in
+  userspace only endpoint `0x82` ever delivers and it is BT.656 video; the
+  vendor BDA driver's audio framing has not been reverse-engineered.  See
+  TRUTH §9.
 * **PAL only** (720×576).  NTSC needs a 720×480 path.
 * **`0x40e = 0x0a` with no source** is normal; the decoder free-runs and emits
   valid **black** frames (not zero bytes).  `0x40e` bit5 set is what matters.
