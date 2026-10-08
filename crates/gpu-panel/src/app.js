@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const n1 = (v) => (v == null || !isFinite(v) ? "–" : v.toFixed(1));
 const n0 = (v) => (v == null || !isFinite(v) ? "–" : Math.round(v).toString());
+const n2 = (v) => (v == null || !isFinite(v) ? "–" : v.toFixed(2));
 
 async function api(path, body) {
   const opts = { cache: "no-store" };
@@ -45,6 +46,10 @@ const CHART_DEFS = [
   { key: "membusy", name: "Memory busy",  unit: "%",   color: "#34d399", get: (s) => s.mem_busy, fmt: n0, max: 100 },
   { key: "vram",    name: "VRAM used",    unit: "%",   color: "#60a5fa", get: (s) => s.vram_total ? (s.vram_used / s.vram_total) * 100 : 0, fmt: n1, max: 100 },
   { key: "gtt",     name: "GTT used",     unit: "%",   color: "#818cf8", get: (s) => s.gtt_total ? (s.gtt_used / s.gtt_total) * 100 : 0, fmt: n1, max: 100 },
+  { key: "cputemp", name: "CPU temp",   unit: "°C",  color: "#fda4af", get: (s) => s.cpu_temp,  fmt: n1, max: 110 },
+  { key: "cpuccd",  name: "CPU CCD",    unit: "°C",  color: "#e879f9", get: (s) => s.cpu_ccd,   fmt: n1, max: 110 },
+  { key: "cpughz",  name: "CPU clock",  unit: "GHz", color: "#a3e635", get: (s) => s.cpu_ghz,   fmt: n2, max: 6 },
+  { key: "cpupow",  name: "CPU power",  unit: "W",   color: "#2dd4bf", get: (s) => s.cpu_power, fmt: n1, max: 200 },
   { key: "pidout",  name: "PID fan duty", unit: "%",   color: "#f59e0b", get: (s) => (s.fan_cmd >= 0 ? s.fan_cmd : null), fmt: n0, max: 100 },
   { key: "piderr",  name: "Thermal error", unit: "°C", color: "#ef4444", get: (s) => (s.target > 0 ? s.ctrl_temp - s.target : null), fmt: n1 },
 ];
@@ -187,6 +192,9 @@ const TILES = [
   { k: "fan", label: "fan", get: (s) => n0(s.fan_rpm) + " rpm" },
   { k: "sclk", label: "gpu clock", get: (s) => n0(s.sclk) + " MHz" },
   { k: "vram", label: "vram", get: (s) => (s.vram_used / 1073741824).toFixed(1) + " GiB" },
+  { k: "cputemp", label: "cpu temp", get: (s) => (s.cpu_temp > 0 ? n1(s.cpu_temp) + " °C" : "–") },
+  { k: "cpughz", label: "cpu clock", get: (s) => (s.cpu_ghz > 0 ? n2(s.cpu_ghz) + " GHz" : "–") },
+  { k: "cpupow", label: "cpu power", get: (s) => (s.cpu_power > 0 ? n1(s.cpu_power) + " W" : "–") },
   { k: "perf", label: "perf", get: (s) => s.perf },
   { k: "target", label: "target", get: (s) => (s.target > 0 ? n0(s.target) + " °C" : "–") },
   { k: "pidout", label: "pid out", get: (s) => (s.fan_cmd >= 0 ? s.fan_cmd + " %" : "–") },
@@ -207,6 +215,21 @@ function pushSample(s) {
     $("updated").textContent = new Date(s.t).toLocaleTimeString();
   }
   render();
+}
+
+// ---------------------------------------------------------------------------
+// cpu identity badge (static, from the snapshot)
+// ---------------------------------------------------------------------------
+function setCpuBadge(c) {
+  if (!c) return;
+  const parts = [];
+  if (c.model) parts.push(c.model.replace(/^AMD\s+/, "").replace(/\s+\d+-Core Processor$/, ""));
+  if (c.threads) parts.push(c.threads + "T");
+  if (c.max_ghz) parts.push(n1(c.max_ghz) + " GHz max");
+  if (c.driver) parts.push(c.driver + "/" + c.governor);
+  const el = $("cpu");
+  el.textContent = "cpu: " + (parts.join(" · ") || "unknown");
+  el.title = `hwmon ${c.hwmon || "–"} · sensors ${c.temps && c.temps.length ? c.temps.join(", ") : "–"} · boost ${c.boost}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +481,7 @@ async function boot() {
     for (const s of snap.history) pushSample(s);
     pushSample(snap.current);
     applyControl(snap.control);
+    setCpuBadge(snap.cpu);
     if (snap.thermal) { fillThermalForm(snap.thermal); updateThermalLive(snap.thermal); }
   } catch (e) {
     say("initial load failed: " + e.message, true);

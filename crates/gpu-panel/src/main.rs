@@ -325,17 +325,99 @@ struct Paths {
     power_cap_default: String,
 }
 
-fn resolve_paths(bdf: &str) -> Result<Paths, String> {
-    let dev = format!("/sys/bus/pci/devices/{bdf}");
-    if !std::path::Path::new(&dev).exists() {
+/// Resolve the GPU from a PCI spec: either a full BDF (`0000:09:00.0`) or a
+/// `vendor:device` id pair (`1002:7551`). Prefer the id form — BDFs shuffle
+/// between boots on this box (PCIe re-enumeration: CPU swap, slot change, and
+/// the GPU's own upstream switch; see docs/strata-hang.md), the ids do not.
+fn resolve_paths(spec: &str) -> Result<Paths, String> {
+    let candidates = candidates(spec)?;
+    let mut errs = Vec::new();
+    for dev in candidates {
+        match find_hwmon(&dev) {
+            Ok(hwmon) => return Ok(build_paths(dev, hwmon)),
+            Err(e) => errs.push(e),
+        }
+    }
+    Err(format!(
+        "{} — amdgpu devices exporting an hwmon: {}",
+        errs.join("; "),
+        list_hwmon_devices()
+    ))
+}
+
+/// The sysfs PCI device directories `spec` names: one dir for a BDF, every
+/// match for a `vendor:device` pair (sorted, so the choice is deterministic).
+fn candidates(spec: &str) -> Result<Vec<String>, String> {
+    let s = spec.trim().to_ascii_lowercase();
+    if s.matches(':').count() == 3 {
+        return Ok(vec![format!("/sys/bus/pci/devices/{s}")]);
+    }
+    let (vendor, device) = s.split_once(':').ok_or_else(|| {
+        format!("expected a PCI BDF (0000:09:00.0) or a vendor:device id (1002:7551), got {spec}")
+    })?;
+    let want = (format!("0x{vendor}"), format!("0x{device}"));
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/bus/pci/devices") {
+        for e in rd.flatten() {
+            let dir = format!("/sys/bus/pci/devices/{}", e.file_name().to_string_lossy());
+            let id = (id_of(&dir, "vendor"), id_of(&dir, "device"));
+            if id == want {
+                out.push(dir);
+            }
+        }
+    }
+    out.sort();
+    if out.is_empty() {
+        return Err(format!("no PCI device with id {s}"));
+    }
+    Ok(out)
+}
+
+/// Lowercased sysfs id file (`vendor` / `device`) of a PCI device dir.
+fn id_of(dir: &str, which: &str) -> String {
+    read_trim(&format!("{dir}/{which}"))
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// The amdgpu hwmon directory under `dev` (the one exporting power1_average).
+fn find_hwmon(dev: &str) -> Result<String, String> {
+    if !std::path::Path::new(dev).exists() {
         return Err(format!("no such PCI device: {dev}"));
     }
-    let hwmon = std::fs::read_dir(format!("{dev}/hwmon"))
+    std::fs::read_dir(format!("{dev}/hwmon"))
         .map_err(|e| format!("{dev}/hwmon: {e}"))?
         .flatten()
         .map(|e| format!("{dev}/hwmon/{}", e.file_name().to_string_lossy()))
         .find(|p| std::path::Path::new(&format!("{p}/power1_average")).exists())
-        .ok_or_else(|| format!("no amdgpu hwmon under {dev}"))?;
+        .ok_or_else(|| format!("no amdgpu hwmon under {dev}"))
+}
+
+/// Every PCI device currently exporting an hwmon, as `bdf (vendor:device)` —
+/// in the error message, so a shuffled BDF is obvious from the log line.
+fn list_hwmon_devices() -> String {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/bus/pci/devices") {
+        for e in rd.flatten() {
+            let dir = format!("/sys/bus/pci/devices/{}", e.file_name().to_string_lossy());
+            if std::path::Path::new(&format!("{dir}/hwmon")).exists() {
+                out.push(format!(
+                    "{} ({}:{})",
+                    e.file_name().to_string_lossy(),
+                    id_of(&dir, "vendor"),
+                    id_of(&dir, "device")
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        "none".to_string()
+    } else {
+        out.join(", ")
+    }
+}
+
+fn build_paths(dev: String, hwmon: String) -> Paths {
 
     let mut temps = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&hwmon) {
@@ -371,7 +453,7 @@ fn resolve_paths(bdf: &str) -> Result<Paths, String> {
     } else {
         String::new()
     };
-    Ok(Paths {
+    Paths {
         dev: dev.clone(),
         hwmon: hwmon.clone(),
         temps,
@@ -381,7 +463,213 @@ fn resolve_paths(bdf: &str) -> Result<Paths, String> {
         perf_level: format!("{dev}/power_dpm_force_performance_level"),
         power_cap: format!("{hwmon}/power1_cap"),
         power_cap_default: format!("{hwmon}/power1_cap_default"),
-    })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CPU telemetry (package/CCD temps, per-core clocks, package power)
+// ---------------------------------------------------------------------------
+//
+// The panel is about the GPU, but the two share this box's cooling, power and
+// PCIe link, so the CPU columns are the context for a GPU stall or a fan
+// fight. Every source is optional and reads 0 when absent: k10temp/coretemp
+// for temperatures, cpufreq for clocks, a powercap "package-0" domain (RAPL)
+// for package power.
+
+#[derive(Clone)]
+struct Cpu {
+    /// k10temp (AMD) or coretemp (Intel) hwmon directory; empty when neither
+    /// driver is loaded.
+    hwmon: String,
+    /// Temperature inputs by label: `Tctl`/`Tdie` is the package limit, `Tccd*`
+    /// are the per-CCD sensors (Zen 2+). Sorted, so the columns are stable.
+    temps: Vec<(String, String)>,
+    /// One `scaling_cur_freq` per logical core — the per-core spread is what
+    /// shows boost and amd-pstate behaviour, a single average hides it.
+    cur_freq: Vec<String>,
+    /// `cpuinfo_max_freq` (core 0): the boost ceiling the governor aims at.
+    max_freq: String,
+    /// Global boost enable (`cpufreq/boost`), governor and pstate driver.
+    boost: String,
+    governor: String,
+    driver: String,
+    /// RAPL package domain: cumulative `energy_uj` and its wrap range.
+    energy: String,
+    energy_max: u64,
+}
+
+fn detect_cpu() -> Cpu {
+    let mut hwmon = String::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/class/hwmon") {
+        for e in rd.flatten() {
+            let dir = format!("/sys/class/hwmon/{}", e.file_name().to_string_lossy());
+            if matches!(
+                read_trim(&format!("{dir}/name")).as_deref(),
+                Some("k10temp") | Some("coretemp")
+            ) {
+                hwmon = dir;
+                break;
+            }
+        }
+    }
+
+    let mut temps = Vec::new();
+    if !hwmon.is_empty() {
+        if let Ok(rd) = std::fs::read_dir(&hwmon) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(prefix) = name.strip_suffix("_label") {
+                    if !prefix.starts_with("temp") {
+                        continue;
+                    }
+                    let input = format!("{hwmon}/{prefix}_input");
+                    if std::path::Path::new(&input).exists() {
+                        if let Some(label) = read_trim(&format!("{hwmon}/{name}")) {
+                            temps.push((label, input));
+                        }
+                    }
+                }
+            }
+        }
+        temps.sort();
+    }
+
+    let mut found: Vec<(usize, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu") {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let rest = match name.strip_prefix("cpu") {
+                Some(r) if !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()) => r,
+                _ => continue,
+            };
+            let f = format!("/sys/devices/system/cpu/{name}/cpufreq/scaling_cur_freq");
+            if std::path::Path::new(&f).exists() {
+                found.push((rest.parse().unwrap_or(usize::MAX), f));
+            }
+        }
+    }
+    found.sort_by_key(|(i, _)| *i);
+
+    // RAPL: the package domain is the one named "package-0"; the sub-dirs
+    // ("core", "uncore") are subsets of it. energy_uj is a cumulative counter
+    // that wraps at max_energy_range_uj.
+    let mut energy = String::new();
+    let mut energy_max = 0;
+    if let Ok(rd) = std::fs::read_dir("/sys/class/powercap") {
+        for e in rd.flatten() {
+            let dir = format!("/sys/class/powercap/{}", e.file_name().to_string_lossy());
+            if read_trim(&format!("{dir}/name")).as_deref() != Some("package-0") {
+                continue;
+            }
+            let f = format!("{dir}/energy_uj");
+            if std::path::Path::new(&f).exists() {
+                energy = f;
+                energy_max = read_u64(&format!("{dir}/max_energy_range_uj")).unwrap_or(0);
+            }
+            break;
+        }
+    }
+
+    Cpu {
+        hwmon,
+        temps,
+        cur_freq: found.into_iter().map(|(_, p)| p).collect(),
+        max_freq: "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq".to_string(),
+        boost: "/sys/devices/system/cpu/cpufreq/boost".to_string(),
+        governor: "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor".to_string(),
+        driver: "/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver".to_string(),
+        energy,
+        energy_max,
+    }
+}
+
+/// Hottest CPU temperature whose label starts with `prefix` (millidegrees ->
+/// degrees), 0.0 when no such sensor exists. "Tccd" therefore reports the
+/// hottest CCD rather than one arbitrary one.
+fn cpu_temp_by(cpu: &Cpu, prefix: &str) -> f64 {
+    let pre = prefix.to_ascii_lowercase();
+    let mut best: Option<f64> = None;
+    for (label, path) in &cpu.temps {
+        if !label.to_ascii_lowercase().starts_with(&pre) {
+            continue;
+        }
+        if let Some(v) = read_f64(path) {
+            best = Some(best.map_or(v, |b| b.max(v)));
+        }
+    }
+    best.map(|v| v / 1000.0).unwrap_or(0.0)
+}
+
+/// Per-core `scaling_cur_freq` (kHz) as (mean, min, max) GHz.
+fn cpu_clocks(cpu: &Cpu) -> (f64, f64, f64) {
+    let (mut sum, mut n, mut lo, mut hi) = (0.0f64, 0usize, f64::MAX, 0.0f64);
+    for p in &cpu.cur_freq {
+        if let Some(khz) = read_f64(p) {
+            sum += khz;
+            n += 1;
+            lo = lo.min(khz);
+            hi = hi.max(khz);
+        }
+    }
+    if n == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    (sum / n as f64 / 1e6, lo / 1e6, hi / 1e6)
+}
+
+/// Package power in watts, differencing the cumulative RAPL counter between
+/// samples (wrapping at `energy_max`). `prev` carries the previous reading.
+fn cpu_power(cpu: &Cpu, prev: &mut Option<(i64, u64)>) -> f64 {
+    if cpu.energy.is_empty() {
+        *prev = None;
+        return 0.0;
+    }
+    let cur = match read_u64(&cpu.energy) {
+        Some(v) => v,
+        None => return 0.0,
+    };
+    let now = now_ms();
+    let watts = match prev.take() {
+        Some((t, e)) if now > t => {
+            let dj = if cur >= e {
+                cur - e
+            } else {
+                cpu.energy_max.saturating_sub(e) + cur
+            };
+            dj as f64 / 1e6 / ((now - t) as f64 / 1000.0)
+        }
+        _ => 0.0,
+    };
+    *prev = Some((now, cur));
+    watts
+}
+
+/// Static CPU identity/limits for the header, read once at startup.
+fn cpu_info_json(cpu: &Cpu) -> String {
+    let model = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .unwrap_or_default();
+    format!(
+        "{{\"model\":\"{}\",\"hwmon\":\"{}\",\"driver\":\"{}\",\"governor\":\"{}\",\"threads\":{},\"max_ghz\":{},\"boost\":{},\"temps\":[{}]}}",
+        json_escape(&model),
+        json_escape(&cpu.hwmon),
+        json_escape(&read_trim(&cpu.driver).unwrap_or_default()),
+        json_escape(&read_trim(&cpu.governor).unwrap_or_default()),
+        cpu.cur_freq.len(),
+        fnum(read_u64(&cpu.max_freq).unwrap_or(0) as f64 / 1e6),
+        read_u64(&cpu.boost).map(|v| v as i64).unwrap_or(-1),
+        cpu.temps
+            .iter()
+            .map(|(l, _)| format!("\"{}\"", json_escape(l)))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -413,17 +701,30 @@ struct Sample {
     fan_cmd: i32,
     ctrl_temp: f64,
     target: f64,
+    /// CPU context: package (Tctl/Tdie) and hottest-CCD temperature, mean and
+    /// per-core spread of the current clock in GHz, the boost ceiling,
+    /// package power, and the global boost enable (-1 when unknown).
+    cpu_temp: f64,
+    cpu_ccd: f64,
+    cpu_ghz: f64,
+    cpu_ghz_min: f64,
+    cpu_ghz_max: f64,
+    cpu_max_ghz: f64,
+    cpu_power: f64,
+    cpu_boost: i32,
 }
 
 impl Sample {
     fn to_json(&self) -> String {
         format!(
-            "{{\"t\":{},\"edge\":{},\"hotspot\":{},\"mem_temp\":{},\"fan_rpm\":{},\"fan_pwm\":{},\"power\":{},\"cap\":{},\"sclk\":{},\"mclk\":{},\"volt\":{},\"gpu_busy\":{},\"mem_busy\":{},\"vram_used\":{},\"vram_total\":{},\"gtt_used\":{},\"gtt_total\":{},\"perf\":\"{}\",\"fan_cmd\":{},\"ctrl_temp\":{},\"target\":{}}}",
+            "{{\"t\":{},\"edge\":{},\"hotspot\":{},\"mem_temp\":{},\"fan_rpm\":{},\"fan_pwm\":{},\"power\":{},\"cap\":{},\"sclk\":{},\"mclk\":{},\"volt\":{},\"gpu_busy\":{},\"mem_busy\":{},\"vram_used\":{},\"vram_total\":{},\"gtt_used\":{},\"gtt_total\":{},\"perf\":\"{}\",\"fan_cmd\":{},\"ctrl_temp\":{},\"target\":{},\"cpu_temp\":{},\"cpu_ccd\":{},\"cpu_ghz\":{},\"cpu_ghz_min\":{},\"cpu_ghz_max\":{},\"cpu_max_ghz\":{},\"cpu_power\":{},\"cpu_boost\":{}}}",
             self.t, fnum(self.edge), fnum(self.hotspot), fnum(self.mem_temp),
             self.fan_rpm, self.fan_pwm, fnum(self.power), fnum(self.cap),
             self.sclk, self.mclk, self.volt, self.gpu_busy, self.mem_busy,
             self.vram_used, self.vram_total, self.gtt_used, self.gtt_total,
-            json_escape(&self.perf), self.fan_cmd, fnum(self.ctrl_temp), fnum(self.target)
+            json_escape(&self.perf), self.fan_cmd, fnum(self.ctrl_temp), fnum(self.target),
+            fnum(self.cpu_temp), fnum(self.cpu_ccd), fnum(self.cpu_ghz), fnum(self.cpu_ghz_min),
+            fnum(self.cpu_ghz_max), fnum(self.cpu_max_ghz), fnum(self.cpu_power), self.cpu_boost
         )
     }
 }
@@ -437,8 +738,19 @@ fn temp_by_label(p: &Paths, label: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn take_sample(p: &Paths) -> Sample {
+fn take_sample(p: &Paths, cpu: &Cpu, rapl: &mut Option<(i64, u64)>) -> Sample {
     let pwm = read_u64(&format!("{}/pwm1", p.hwmon)).unwrap_or(0);
+    let clocks = cpu_clocks(cpu);
+    // Kernels label the package sensor either Tctl (which already is the max of
+    // Tdie and the CCDs) or Tdie; take whichever is present.
+    let cpu_pkg = {
+        let t = cpu_temp_by(cpu, "Tctl");
+        if t > 0.0 {
+            t
+        } else {
+            cpu_temp_by(cpu, "Tdie")
+        }
+    };
     Sample {
         t: now_ms(),
         edge: temp_by_label(p, "edge"),
@@ -462,6 +774,14 @@ fn take_sample(p: &Paths) -> Sample {
         fan_cmd: -1,
         ctrl_temp: 0.0,
         target: 0.0,
+        cpu_temp: cpu_pkg,
+        cpu_ccd: cpu_temp_by(cpu, "Tccd"),
+        cpu_ghz: clocks.0,
+        cpu_ghz_min: clocks.1,
+        cpu_ghz_max: clocks.2,
+        cpu_max_ghz: read_u64(&cpu.max_freq).unwrap_or(0) as f64 / 1e6,
+        cpu_power: cpu_power(cpu, rapl),
+        cpu_boost: read_u64(&cpu.boost).map(|v| v as i32).unwrap_or(-1),
     }
 }
 
@@ -1444,6 +1764,9 @@ struct Shared {
     /// Last curve handed to the SMU, so the fan thread only writes on change.
     last_curve: Mutex<Vec<(i32, f64)>>,
     paths: Paths,
+    /// Static CPU identity/limits (model, threads, governor, boost ceiling),
+    /// rendered once at startup for the header.
+    cpu_info: String,
     state_path: String,
 }
 
@@ -1559,12 +1882,13 @@ fn snapshot_json(sh: &Shared) -> String {
     let ctl = sh.ctl();
     let thermal = sh.thermal.lock().unwrap().to_json();
     format!(
-        "{{\"now\":{},\"current\":{},\"history\":{},\"control\":{},\"thermal\":{}}}",
+        "{{\"now\":{},\"current\":{},\"history\":{},\"control\":{},\"thermal\":{},\"cpu\":{}}}",
         now_ms(),
         cur.to_json(),
         downsampled_json(&hist, 600),
         ctl.to_json(),
-        thermal
+        thermal,
+        sh.cpu_info
     )
 }
 
@@ -1969,7 +2293,8 @@ const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut listen = "127.0.0.1:8087".to_string();
-    let mut pci = "0000:03:00.0".to_string();
+    // vendor:device id, not a BDF: the BDF moves between boots on this box.
+    let mut pci = "1002:7551".to_string();
     let mut interval_ms: u64 = 500;
     let mut history_secs: u64 = 1800;
     let mut state_path = "/var/lib/gpu-panel/settings.json".to_string();
@@ -1990,7 +2315,7 @@ fn main() {
             "--state" => state_path = need(i),
             "-h" | "--help" => {
                 println!(
-                    "gpu-panel [--listen ADDR] [--pci BDF] [--interval-ms N] [--history-secs N] [--state PATH]"
+                    "gpu-panel [--listen ADDR] [--pci BDF|vendor:device] [--interval-ms N] [--history-secs N] [--state PATH]"
                 );
                 return;
             }
@@ -2016,6 +2341,27 @@ fn main() {
     for (label, _) in &paths.temps {
         log(&format!("  temperature sensor: {label}"));
     }
+
+    let cpu = detect_cpu();
+    log(&format!(
+        "CPU: hwmon={} threads={} rapl={} sensors={}",
+        if cpu.hwmon.is_empty() {
+            "none".to_string()
+        } else {
+            cpu.hwmon.clone()
+        },
+        cpu.cur_freq.len(),
+        if cpu.energy.is_empty() {
+            "none".to_string()
+        } else {
+            cpu.energy.clone()
+        },
+        cpu.temps
+            .iter()
+            .map(|(l, _)| l.clone())
+            .collect::<Vec<_>>()
+            .join("/")
+    ));
 
     let history_cap = ((history_secs * 1000) / interval_ms.max(1)) as usize;
     // One-time migration: the state file was `thermal.json` before the panel
@@ -2099,7 +2445,8 @@ fn main() {
         signal(SIGINT, handler);
     }
 
-    let first = take_sample(&paths);
+    let mut rapl0 = None;
+    let first = take_sample(&paths, &cpu, &mut rapl0);
     let sh = Arc::new(Shared {
         cur: Mutex::new(first),
         history: Mutex::new(VecDeque::with_capacity(history_cap.min(1 << 16))),
@@ -2109,6 +2456,7 @@ fn main() {
         settings: Mutex::new(settings),
         last_curve: Mutex::new(Vec::new()),
         paths: paths.clone(),
+        cpu_info: cpu_info_json(&cpu),
         state_path: state_path.clone(),
     });
 
@@ -2116,28 +2464,33 @@ fn main() {
     {
         let sh = sh.clone();
         let sp = paths.clone();
+        let cpu = cpu.clone();
         thread::Builder::new()
             .name("sampler".into())
-            .spawn(move || loop {
-                let mut s = take_sample(&sp);
-                {
-                    let th = sh.thermal.lock().unwrap();
-                    if th.active {
-                        s.fan_cmd = th.duty.round() as i32;
-                        s.ctrl_temp = th.measured;
-                        s.target = th.target;
+            .spawn(move || {
+                // Carries the previous RAPL counter for the power delta.
+                let mut rapl: Option<(i64, u64)> = None;
+                loop {
+                    let mut s = take_sample(&sp, &cpu, &mut rapl);
+                    {
+                        let th = sh.thermal.lock().unwrap();
+                        if th.active {
+                            s.fan_cmd = th.duty.round() as i32;
+                            s.ctrl_temp = th.measured;
+                            s.target = th.target;
+                        }
                     }
-                }
-                *sh.cur.lock().unwrap() = s.clone();
-                {
-                    let mut h = sh.history.lock().unwrap();
-                    h.push_back(s);
-                    while h.len() > sh.history_cap {
-                        h.pop_front();
+                    *sh.cur.lock().unwrap() = s.clone();
+                    {
+                        let mut h = sh.history.lock().unwrap();
+                        h.push_back(s);
+                        while h.len() > sh.history_cap {
+                            h.pop_front();
+                        }
                     }
+                    sh.seq.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(interval_ms.max(100)));
                 }
-                sh.seq.fetch_add(1, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(interval_ms.max(100)));
             })
             .expect("spawn sampler");
     }

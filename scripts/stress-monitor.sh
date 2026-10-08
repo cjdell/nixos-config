@@ -32,7 +32,7 @@
 #
 # ENV OVERRIDES
 #   INTERVAL=10        telemetry sample period, seconds
-#   GPU_PCI=0000:03:00.0   which amdgpu to watch (default: the R9700)
+#   GPU_PCI=1002:7551      which amdgpu to watch (default: the R9700, by id)
 #
 # LOGS (in /tmp, ephemeral — paste the peaks into the doc if they matter)
 #   /tmp/stress-<TAG>-<YYYYmmdd-HHMMSS>.{stress,monitor,summary}.log
@@ -56,7 +56,7 @@ fi
 shift 2
 
 INTERVAL="${INTERVAL:-10}"
-GPU_PCI="${GPU_PCI:-0000:03:00.0}"
+GPU_PCI="${GPU_PCI:-1002:7551}"
 
 # ---- hardware discovery (nothing here is assumed to exist) ----------------
 hwmon_by_name() {
@@ -67,11 +67,19 @@ hwmon_by_name() {
   return 1
 }
 hwmon_by_dev() {
-  local h
+  # $1 = hwmon name ("amdgpu"), $2 = PCI BDF (0000:09:00.0) or a vendor:device
+  # id (1002:7551). Prefer the id: BDFs shuffle between boots on this box.
+  local h dev want
   for h in /sys/class/hwmon/hwmon*; do
     [ "$(cat "$h/name" 2>/dev/null)" = "$1" ] || continue
-    [ "$(basename "$(readlink -f "$h/device" 2>/dev/null)")" = "$2" ] \
-      && { printf '%s\n' "$h"; return 0; }
+    dev="$(readlink -f "$h/device" 2>/dev/null)"
+    if [ "$(printf '%s' "$2" | tr -cd : | wc -c)" -eq 3 ]; then
+      [ "$(basename "$dev")" = "$2" ] && { printf '%s\n' "$h"; return 0; }
+    else
+      [ "$(cat "$dev/vendor" 2>/dev/null)" = "0x${2%%:*}" ] &&
+        [ "$(cat "$dev/device" 2>/dev/null)" = "0x${2##*:}" ] &&
+        { printf '%s\n' "$h"; return 0; }
+    fi
   done
   return 1
 }

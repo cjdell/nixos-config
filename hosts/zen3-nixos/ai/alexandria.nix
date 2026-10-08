@@ -21,8 +21,10 @@
 # HIP "cuda" device.
 #
 # GPU: the R9700 (Radeon AI PRO R9700, Navi 48 / gfx1201, 32 GB) — render node
-# /dev/dri/renderD128 (by-path pci-0000:03:00.0-render; render minors are NOT
-# card order on this box: Vega iGPU is card0 but renderD130, RX 580 renderD129).
+# /dev/dri/r9700 (udev symlink by PCI id 1002:7551, created in ai/gpu-panel.nix).
+# Do NOT hardcode a renderD minor or a BDF: the 5950X CPU swap re-enumerated the
+# bus, so the R9700 moved 03:00.0/renderD128 -> 09:00.0/renderD129 and renderD128
+# is now the RX 580.
 # ⚠️ The R9700 also hosts llama-swap's resident coding model (~26 GB VRAM) and
 # a 64 GiB RAM prompt cache (`-cram 65536` — the OOM history): unload the LLM
 # before a TTS run or the model load will fail / push the box toward OOM:
@@ -112,7 +114,7 @@ in
       "--add-host=host.containers.internal:host-gateway"
       "--add-host=host.docker.internal:host-gateway"
       "--device=/dev/kfd"
-      "--device=/dev/dri/renderD128"
+      "--device=/dev/dri/r9700"
     ];
   };
 

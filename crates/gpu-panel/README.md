@@ -9,6 +9,10 @@ binary via `include_str!`.
 ```
 browser ──HTTP/SSE──> gpu-panel ──read──> /sys/bus/pci/devices/<bdf>/…
                           │                (temps, fan, power, clocks, util, VRAM)
+                          ├──read───> /sys/class/hwmon/<k10temp>/temp*_input
+                          │           + cpu*/cpufreq/scaling_cur_freq
+                          │           + /sys/class/powercap/package-0/energy_uj
+                          │           (CPU temps, per-core clocks, package power)
                           ├──write───> gpu_od/fan_ctrl/*        (fan curve, fan limits)
                           ├──write───> hwmon/power1_cap         (power cap)
                           ├──write───> power_dpm_force_performance_level
@@ -20,8 +24,17 @@ browser ──HTTP/SSE──> gpu-panel ──read──> /sys/bus/pci/devices/<
   nothing else is holding an opinion about the fan, the cap or the clocks.
   `--state` (`/var/lib/gpu-panel/settings.json`) is the source of truth and is
   re-applied at startup.
-- **The GPU is resolved by PCI BDF** (`--pci 0000:03:00.0`), not by DRM card
-  number — those swap between boots.
+- **The GPU is resolved by PCI id** (`--pci 1002:7551`), not by DRM card number
+  or BDF — both shuffle between boots on this box (PCIe re-enumeration: the
+  R9700 has been `03:00.0` and `09:00.0`). A full BDF is still accepted, and a
+  failed lookup prints every device that exports an hwmon.
+- **The CPU columns are read-only context** (the GPU is what this panel
+  controls): package temperature from the `k10temp`/`coretemp` hwmon (`Tctl`,
+  falling back to `Tdie`) plus the hottest `Tccd*`, the mean/min/max of the
+  per-core `scaling_cur_freq` in GHz with `cpuinfo_max_freq` as the ceiling,
+  and package power differenced from the RAPL `package-0` `energy_uj` counter
+  (wrap-aware). Every source is optional and reads 0 when absent; `energy_uj`
+  is mode 0400 root, so the power column needs the service's root.
 - **The fan has exactly one writer**: the fan thread. It writes the PID curve
   while the thermal loop is armed, the configured curve while fan control is
   enabled, and hands the fan back to the firmware otherwise (including on
@@ -32,7 +45,7 @@ browser ──HTTP/SSE──> gpu-panel ──read──> /sys/bus/pci/devices/<
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/` | dashboard (embedded HTML/JS/CSS) |
-| GET | `/api/snapshot` | current sample + backfilled history + control state + thermal state |
+| GET | `/api/snapshot` | current sample + backfilled history + control state + thermal state + static `cpu` info (model, threads, governor/driver, boost ceiling, sensor labels) |
 | GET | `/api/stream` | SSE, one JSON sample per tick |
 | GET | `/api/control` | control state (ranges + current values, read from sysfs) |
 | GET | `/api/thermal` | PID controller state |

@@ -57,13 +57,22 @@ in
     "d /var/lib/gpu-panel 0755 root root - -"
   ];
 
+  # Stable render node for the R9700, by PCI id. Both the BDF and the renderD
+  # minor shuffle between boots on this box (the 5950X CPU swap re-enumerated
+  # the bus: the R9700 went 03:00.0/renderD128 -> 09:00.0/renderD129, and
+  # renderD128 is now the RX 580), so anything needing the R9700's DRM node
+  # pins this symlink instead of a minor: --device=/dev/dri/r9700.
+  services.udev.extraRules = ''
+    SUBSYSTEM=="drm", KERNEL=="renderD*", ATTR{device/vendor}=="0x1002", ATTR{device/device}=="0x7551", SYMLINK+="dri/r9700"
+  '';
+
   systemd.services.gpu-panel = {
     description = "GPU panel - telemetry + overdrive control web UI (R9700)";
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
 
     serviceConfig = {
-      ExecStart = "${gpu-panel}/bin/gpu-panel --listen 127.0.0.1:8087 --pci 0000:03:00.0 --state /var/lib/gpu-panel/settings.json";
+      ExecStart = "${gpu-panel}/bin/gpu-panel --listen 127.0.0.1:8087 --pci 1002:7551 --state /var/lib/gpu-panel/settings.json";
       Restart = "always";
       RestartSec = 5;
       # Runs as root: the gpu_od fan-curve, power-cap and pp_od_clk_voltage

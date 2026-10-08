@@ -119,9 +119,10 @@ let
         "llama.ai.chrisdell.info" # old llama-swap UI name, now a Strata alias
         "llm.ai.chrisdell.info" # old OpenAI-compatible name, now Strata
       ];
-      # The engine is a HIP build (only gfx1201 kernels), and the box also
-      # has the 5700G's Vega 8 iGPU. Pin HIP to the R9700 (amd-smi GPU 0,
-      # BDF 03:00.0, UUID 47ff7551-…) so the engine never probes the iGPU.
+      # The engine is a HIP build (only gfx1201 kernels). Since the 5950X CPU
+      # swap there is no iGPU at all, and amd-smi lists exactly one HIP device:
+      # the R9700 (GPU 0, UUID 47ff7551-…; BDF 09:00.0 now, 03:00.0 before —
+      # match by UUID, not BDF). HIP_VISIBLE_DEVICES=0 pins that one.
       backend = "hip";
       env.HIP_VISIBLE_DEVICES = "0";
       # Local #879 instrumentation (see strata-package.nix): when the finiteness

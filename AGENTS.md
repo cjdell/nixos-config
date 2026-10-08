@@ -797,6 +797,23 @@ both run `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…`):
   (`HIP_VISIBLE_DEVICES`, `HSA_OVERRIDE_GFX_VERSION` are gone). Don't
   "simplify" this back to plain indices.
 
+- **CPU swap 2026-10-08 (5700G → 5950X): the PCIe bus re-enumerated, so BDFs and
+  render minors are NOT stable.** The R9700 moved `0000:03:00.0`→`0000:09:00.0`
+  (renderD128→renderD129) and the RX 580 `06:00.0`→`04:00.0` (it owns
+  renderD128 now and is the console — the 5950X has **no iGPU**, so every
+  "Vega iGPU" note in this file is history). `03:00.0` is now an AMD-500-series
+  switch port, which is why `gpu-panel` crash-looped on a hardcoded BDF and
+  `gpu.ai.chrisdell.info` 502'd. **Match GPUs by PCI id/UUID, never a BDF or a
+  renderD minor**: `gpu-panel --pci 1002:7551` (id-based sysfs scan), the R9700's
+  DRM node via the udev symlink `/dev/dri/r9700` (`services.udev.extraRules` in
+  `hosts/zen3-nixos/ai/gpu-panel.nix`), HIP by `amd-smi list` UUID
+  `47ff7551-…`. Two swap side effects still open: **Resizable BAR is off**
+  (`lspci -vv -s 09:00.0`: BAR0 256 MB, was 32 GB — re-enable Above-4G Decoding +
+  Re-Size BAR in the BIOS) and the **TPM changed**, which had invalidated
+  libvirt's sealed `secrets-encryption-key` and made every `nixos-rebuild switch`
+  exit 4 (regenerated 2026-10-08; the old blob is kept as
+  `/var/lib/libvirt/secrets/secrets-encryption-key.stale-tpm`).
+
 - **The r9700 HIP fork is gone (all llama.cpp forks removed 2026-09-26).**
   `rdna-boosts`/`llama-cpp-rdna` (stew675) was the r9700 build until
   2026-08-23 (zero MTP draft acceptance on HIP: spec_decode counters stayed 0);
