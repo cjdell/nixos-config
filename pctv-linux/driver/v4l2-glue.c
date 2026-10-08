@@ -520,6 +520,22 @@ struct pctv_glue *pctv_glue_create(struct usb_interface *intf,
 	glue->vdev->ctrl_handler = &glue->ctrl_hdl;
 	glue->vdev->v4l2_dev = &glue->v4l2_dev;
 	glue->vdev->device_caps = glue->info.caps;
+	/* Kernel 7.2.9 turned video_device->name from `const char *` into
+	 * `char name[64]` (include/media/v4l2-dev.h), so it must be copied, not
+	 * assigned.  video_device_alloc() leaves it empty and nothing fills it
+	 * in, which is why /sys/class/video4linux/videoN/name read as an empty
+	 * string: QUERYCAP was unaffected (pctv_querycap copies info.card
+	 * itself), so the card showed up in v4l2-ctl but stayed unlabelled for
+	 * anything enumerating through sysfs.
+	 */
+	strscpy(glue->vdev->name, glue->info.card, sizeof(glue->vdev->name));
+	/* ->index is the driver's to set ("attribute to differentiate multiple
+	 * indices on one physical device").  Left alone it came out as 1, and
+	 * udev's 60-persistent-v4l.rules names the symlink from $attr{index} -
+	 * so the card only ever got v4l/by-id/...-video-index1 and apps that
+	 * resolve the primary node via -index0 skipped it.
+	 */
+	glue->vdev->index = 0;
 	video_set_drvdata(glue->vdev, glue);
 
 	glue->queue = (struct vb2_queue) {

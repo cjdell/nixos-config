@@ -10,6 +10,70 @@ Pinnacle PCTV 320cx ExpressCard, **2304:022e**, enumerates as **usb 1-3**
 
 ---
 
+# UPDATE 2026-10-08 ~13:00 — "the card is not in V4L" was qv4l2 opening the wrong node; two enumeration defects fixed; the module can no longer be reloaded
+
+Kernel is **7.2.9** now (this section's predecessor said 7.2.3), and the card
+came back on **usb 2-3**.  Report: "the PCTV does not show up in the V4L2 test
+utility, only the camera".
+
+**It was in V4L2 the whole time.**  `qv4l2` started without arguments opens
+`/dev/video0` — `utils/qv4l2/qv4l2.cpp`: `else device = "/dev/video0";` — and
+video0/video1 on this host are the iSight, so the Input combo shows only
+`Camera`.  The card was `/dev/video3` (the number moved when it re-enumerated
+at t≈260 s).  `qv4l2 -d /dev/video3` opens it and shows all four inputs
+(`Composite 1/2/3`, `S-Video`) plus the `CX25843` tuner entity; `./pctv-view.sh
+--ctl` is the wrapper that finds the node by card name.  Its Ctrl+O dialog is a
+plain file picker over `/dev` filtered by `video*`, so it lists bare node names
+with no product labels — another way to conclude "the card isn't there".
+
+Two real defects found while checking that, both fixed in `v4l2-glue.c`:
+
+1. **`/sys/class/video4linux/videoN/name` was empty.**  Kernel 7.2.9 changed
+   `struct video_device::name` from `const char *` to `char name[64]`
+   (`include/media/v4l2-dev.h`) — the driver never set the field at all, so the
+   first attempt to set it failed to compile with *"assignment to expression
+   with array type"*, which is how the change surfaced.  QUERYCAP was
+   unaffected (`pctv_querycap()` copies `info.card` itself), which is exactly
+   why `v4l2-ctl -D` showed `Pinnacle PCTV 320cx` while anything enumerating
+   through sysfs saw a blank.  Now `strscpy(glue->vdev->name,
+   glue->info.card, …)`.
+2. **No `v4l/by-id/…-video-index0` symlink.**  `vdev->index` was left unset and
+   came out as 1; `60-persistent-v4l.rules` builds the symlink name from
+   `$attr{index}`, so the card only ever had `-video-index1` and tools that
+   resolve the primary node via `-index0` skipped it.  Now `glue->vdev->index =
+   0`.  Not yet verified live — see the unload blocker below.
+
+**Blocker, new and open: the loaded module cannot be unloaded.**  `refcnt` stays
+at **1** with no interface bound and no node open (opening `/dev/video3` takes
+it to 2, closing returns it to 1), so `rmmod` fails with "Module is in use" and
+`insmod` then fails with "File exists" — which `reload-module.sh` used to report
+as the udev race.  It is not the race: on this kernel neither a registered
+`usb_driver` nor its bound interfaces pin the module (`btusb`: 3 interfaces
+bound, refcnt **0**), so the reference is the driver's own and nothing ever
+drops it.  Where it is taken is **unidentified** — the disconnect path
+(`pctv_glue_unregister` → `vb2_video_unregister_device`, then
+`video_device_release`, which is the documented pattern per the
+`video_register_device()` kernel-doc note) looks normal.  Until that is found,
+the rmmod/insmod loop only works in a boot where the card was never probed; a
+rebuild lands via `nixos-rebuild switch` + reboot.
+
+Scripts: `reload-module.sh` hardcoded `lib/modules/7.2.3/updates/pctv320cx.ko.xz`
+— dead the moment the kernel moved, and it reported that as "no module".  It now
+resolves the `.ko*` from the build output (any version, any compression), refuses
+a build whose kernel differs from `uname -r` instead of letting insmod fail with
+vermagic noise, and prints the stuck-refcnt diagnosis above.  `build-module.sh`
+now reports the kernel the module was built for and warns when it is not the
+running one.  (This module has no `srcversion` field, so "did my build load?"
+is answered by a dmesg marker, not by comparing srcversions.)
+
+The card is still **cold-wedged** this boot (`GET_VERSION: errno -32`,
+`fw record … failed: errno -71` once mid-download, `DiB0700 firmware download
+failed (errno -5)`), so the node registers — probe deliberately keeps the node
+on bring-up failure — but capture stays dark until §0 (power off, pull the
+card) is done.
+
+---
+
 # UPDATE 2026-10-08 ~02:00 — vertical jiggle diagnosed and fixed; chroma ramp explained
 
 Two follow-up defects reported on the live picture, both traced to their
