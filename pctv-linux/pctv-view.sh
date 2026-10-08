@@ -133,7 +133,7 @@ rec)
     libx264 | libx265 | libsvtav1 | libaom-av1) enc+=(-preset "$PRESET" -crf "$CRF") ;;
     mjpeg) enc+=(-q:v "$CRF") ;;
   esac
-  cmd=(ffmpeg -f v4l2 -input_format yuyv422 -video_size "$WH" -framerate "$FPS" -i "$NODE")
+  cmd=(ffmpeg -f v4l2 -input_format uyvy422 -video_size "$WH" -framerate "$FPS" -i "$NODE")
   [ -n "$SECS" ] && cmd+=(-t "$SECS")
   cmd+=("${enc[@]}" -an "$OUT")
   echo "record: ${cmd[*]}"

@@ -50,7 +50,7 @@ stdenv.mkDerivation {
     longDescription = ''
       Rust + C kernel module for the analog side of the Pinnacle PCTV 320cx
       ExpressCard: DiB0700 USB bridge (firmware download, I2C tunnel),
-      Conexant CX25843 decoder, BT.656 to YUYV capture over videobuf2.
+      Conexant CX25843 decoder, BT.656 to UYVY capture over videobuf2.
       See FINDINGS.md in this directory for the hardware reverse-engineering.
     '';
     homepage = "https://github.com/cjdell/nixos-config/tree/master/pctv-linux";

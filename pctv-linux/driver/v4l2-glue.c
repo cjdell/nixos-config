@@ -104,7 +104,12 @@ static void pctv_pix_from_fmt(struct v4l2_pix_format *dst, const struct pctv_fmt
 	dst->sizeimage = src->sizeimage;
 	dst->field = src->field;
 	dst->colorspace = src->colorspace;
-	dst->pixelformat = V4L2_PIX_FMT_YUYV;
+	/*
+	 * The CX25843 BT.656 output is Cb Y Cr Y, i.e. UYVY.  Labelling it YUYV
+	 * (as this driver used to) swaps luma and chroma: the luma bytes get
+	 * read as Cb/Cr and the picture comes out a solid green.
+	 */
+	dst->pixelformat = V4L2_PIX_FMT_UYVY;
 	dst->priv = 0;
 }
 
@@ -126,7 +131,7 @@ static int pctv_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 	if (f->index > 0)
 		return -EINVAL;
 
-	f->pixelformat = V4L2_PIX_FMT_YUYV;
+	f->pixelformat = V4L2_PIX_FMT_UYVY;
 	return 0;
 }
 

@@ -16,7 +16,7 @@
 //!   - talks to the CX25843 over the bridge's vendor I2C tunnel,
 //!   - programs the decoder for composite / S-Video in PAL or NTSC,
 //!   - arms the bridge and streams BT.656 8-bit video over bulk-IN,
-//!   - deframes BT.656 into YUYV frames and hands them to videobuf2.
+//!   - deframes BT.656 into UYVY (Cb Y Cr Y) frames and hands them to videobuf2.
 //!
 //! The V4L2 face (struct video_device, struct vb2_queue, the ioctl table and
 //! the control handler) lives in v4l2-glue.c, because those are embedded C
@@ -149,7 +149,7 @@ const ACTIVE_BYTES: usize = 1440;
 const PAL_LINES: usize = 288;
 const NTSC_LINES: usize = 243;
 
-/// Bytes per active line kept in the frame: 720 pixels of YUYV.
+/// Bytes per active line kept in the frame: 720 pixels of UYVY (Cb Y Cr Y).
 const ACTIVE_PIXEL_BYTES: usize = 1440;
 
 /// Capture URBs in flight.  8 x 64 KiB covers ~1.5 frames of BT.656, which is
@@ -1014,28 +1014,44 @@ impl Pctv320cxInner {
 const SAV0: u8 = 0xff;
 const SAV1: u8 = 0x00;
 const SAV2: u8 = 0x00;
-/// Status byte bit 0 is H: 0 for a start-of-active-video switch, 1 for the
-/// end-of-active-video switch.  Bit 6 is F: which field this line belongs to.
-const SAV_STATUS_H: u8 = 0x01;
+/// BT.656 status byte (`FF 00 00 XY`): bit 7 is fixed 1, bit 6 is F (which
+/// field), bit 5 is V (vertical blanking), bit 4 is H (0 = SAV, start of
+/// active video; 1 = EAV, end of active video).  Bits 3..0 are the protection
+/// bits.  The earlier code tested bit 0 (a protection bit) as H, which
+/// accepted EAV codes such as `0xda` and rejected the field-2 SAV `0xc7`.
 const SAV_STATUS_F: u8 = 0x40;
+const SAV_STATUS_V: u8 = 0x20;
+const SAV_STATUS_H: u8 = 0x10;
 
 /// Deframer state, only touched from the URB completion (softirq) and reset
 /// when streaming starts.
 ///
-/// The CX25843 as configured here emits a valid SAV switch per line but does
-/// not put a usable line number in the status word.  The F bit of the status
-/// byte is reliable though, so each line goes to its field's interleaved slot
-/// (even rows = field 0, odd rows = field 1) - which is what
-/// V4L2_FIELD_INTERLACED means to userspace.  The decoder trims blanking, so
-/// every line it emits is an active line.
+/// The CX25843 emits whole BT.656 lines (mode 2): SAV, active video, EAV,
+/// blanking.  Active lines carry V=0; the vertical-blanking lines carry V=1
+/// and their 1440 bytes are blanking level, not picture.  Each active line
+/// goes to its field's interleaved slot (even rows = field 0, odd rows =
+/// field 1), which is what V4L2_FIELD_INTERLACED means to userspace.
+///
+/// A frame is completed on the *field boundary* after both fields have been
+/// seen, never on a line count: mode 2 drops ~5% of lines, so a 576-line
+/// target slips a little further into the following frame each time and the
+/// picture rolls.
 struct Deframer {
     /// Buffer currently being filled (from the vb2 handoff), and its address.
     vb: *mut bindings::vb2_buffer,
     addr: *mut u8,
     size: u32,
-    /// Active lines written so far, per field (0 = even/top field).
+    /// Active lines written so far in this buffer, per field.
     lines: [u32; 2],
-    lines_needed: u32,
+    /// Field of the last active line written, `None` until the first one.
+    field: Option<usize>,
+    /// Fields started since the current buffer was handed out.
+    fields: u32,
+    /// Frames still to throw away before handing one out.  Streaming joins
+    /// the BT.656 stream mid-field, so the first assembled buffer holds the
+    /// tail of one field and the head of the next; discard it (and restart
+    /// in the same buffer) so userspace's first frame is complete.
+    preroll: u32,
 }
 
 impl Deframer {
@@ -1045,17 +1061,30 @@ impl Deframer {
             addr: core::ptr::null_mut(),
             size: 0,
             lines: [0, 0],
-            lines_needed: 0,
+            field: None,
+            fields: 0,
+            preroll: 1,
         }
     }
 
-    fn reset(&mut self, std_sel: u32) {
+    fn reset(&mut self, _std_sel: u32) {
         *self = Self::new();
-        self.lines_needed = if std_sel == STD_NTSC {
-            (NTSC_LINES * 2) as u32
-        } else {
-            (PAL_LINES * 2) as u32
-        };
+    }
+
+    /// Take the next videobuf2 buffer.  Returns false when the queue is dry.
+    unsafe fn acquire(&mut self, glue: *mut bindings::pctv_glue) -> bool {
+        self.addr = core::ptr::null_mut();
+        self.size = 0;
+        self.lines = [0, 0];
+        self.field = None;
+        self.fields = 0;
+        self.vb = bindings::pctv_glue_next_buffer(glue);
+        if self.vb.is_null() {
+            return false;
+        }
+        self.addr = bindings::pctv_glue_buffer_addr(self.vb) as *mut u8;
+        self.size = bindings::pctv_glue_buffer_size(self.vb);
+        true
     }
 }
 
@@ -1075,27 +1104,59 @@ impl Pctv320cxInner {
                 pos += 1;
                 continue;
             }
-            if data[pos + 3] & SAV_STATUS_H != 0 {
-                // End of active video: skip it, the next SAV follows in the
-                // line's blanking.
+            let status = data[pos + SYNC_BYTES - 1];
+
+            // Only the SAV (H=0) sits immediately before active video; the
+            // EAV (H=1) ends the line.
+            if status & SAV_STATUS_H != 0 {
                 pos += 1;
                 continue;
             }
 
-            if d.vb.is_null() {
-                d.vb = bindings::pctv_glue_next_buffer(glue);
-                if d.vb.is_null() {
-                    // No buffer to fill: drop the rest of this URB.
-                    dropped.fetch_add(1, Relaxed);
-                    return;
-                }
-                d.addr = bindings::pctv_glue_buffer_addr(d.vb) as *mut u8;
-                d.size = bindings::pctv_glue_buffer_size(d.vb);
-                d.lines = [0, 0];
+            // Vertical blanking (V=1): the payload is blanking level, not
+            // picture.  Skipping the whole line keeps the marker search in
+            // phase.
+            if status & SAV_STATUS_V != 0 {
+                pos += LINE_BYTES;
+                continue;
             }
 
-            // Even rows are field 0 (F=0), odd rows field 1 (F=1).
-            let field = ((data[pos + 3] & SAV_STATUS_F) != 0) as usize;
+            if d.vb.is_null() && !d.acquire(glue) {
+                // No buffer to fill: drop the rest of this URB.
+                dropped.fetch_add(1, Relaxed);
+                return;
+            }
+
+            // Even rows are field 0 (F=0), odd rows field 1 (F=1).  A change
+            // of field starts a new field; after both have been captured the
+            // frame is complete and the next one begins.
+            let field = ((status & SAV_STATUS_F) != 0) as usize;
+            if d.field != Some(field) {
+                if d.fields >= 2 {
+                    if d.preroll > 0 {
+                        // Startup frame: keep the buffer and fill it again
+                        // from this field boundary.
+                        d.preroll -= 1;
+                        d.fields = 0;
+                    } else {
+                        // Both fields in: report the whole buffer, not just
+                        // up to the last line written (the fields interleave,
+                        // so a variable bytesused makes raw dumps impossible
+                        // to frame align).
+                        bindings::pctv_glue_buffer_done(glue, d.vb, d.size);
+                        d.vb = core::ptr::null_mut();
+                        d.addr = core::ptr::null_mut();
+                        if !d.acquire(glue) {
+                            dropped.fetch_add(1, Relaxed);
+                            return;
+                        }
+                    }
+                }
+                d.lines = [0, 0];
+                d.fields += 1;
+                d.field = Some(field);
+            }
+
             let line = d.lines[field] as usize;
             let off = (2 * line + field) * ACTIVE_PIXEL_BYTES;
             if d.addr != core::ptr::null_mut() && off + ACTIVE_BYTES <= d.size as usize {
@@ -1106,19 +1167,10 @@ impl Pctv320cxInner {
                 );
             }
             d.lines[field] += 1;
-            if d.lines[0] + d.lines[1] >= d.lines_needed {
-                // Report the whole frame, not just up to the last line that
-                // arrived: the fields interleave, so the last line written is
-                // not necessarily the last row of the buffer, and a variable
-                // bytesused makes raw dumps impossible to frame-align.
-                bindings::pctv_glue_buffer_done(glue, d.vb, d.size);
-                d.vb = core::ptr::null_mut();
-                d.addr = core::ptr::null_mut();
-            }
 
             // A line is always 1728 bytes on the wire: 4 sync + 1440 active
-            // + 284 blanking.  Skipping the whole line also keeps the marker
-            // search in phase.
+            // + 4 EAV + 280 blanking.  Skipping the whole line also keeps the
+            // marker search in phase.
             pos += LINE_BYTES;
         }
     }

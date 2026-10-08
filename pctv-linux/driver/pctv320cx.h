@@ -36,7 +36,7 @@ struct pctv_glue;
 
 /*
  * A capture buffer must be able to hold the largest frame we can ever
- * produce: 720 active pixels x 576 active lines x YUYV.  The size is fixed
+ * produce: 720 active pixels x 576 active lines x UYVY.  The size is fixed
  * (independent of the selected TV standard) so that VIDIOC_S_FMT never has
  * to resize an already allocated queue.
  */
