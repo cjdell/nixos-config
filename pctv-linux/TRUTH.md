@@ -237,6 +237,15 @@ reload — only a pull or a host power-cycle loses it.
   the card was in the `ram=0x00000001` state did **not** boot (1610 records,
   `jumpram -> ok`, `ram` unchanged). The kernel's download from the **cold** state
   does boot.
+* **Confirmed from true cold on the 2026-10-08 19:25 boot** (COLD-BOOT-NOTES §0):
+  userspace download (1610 records + `jumpram -> ok`) leaves `GET_VERSION` at
+  `Pipe error`, both in a fresh process and in-process (`pctv_probe init`).
+  Separately, the kernel's `cold state → firmware started successfully → warm
+  state` log is **not** proof the bridge booted — a bind that then fails with
+  `stk7700ph_frontend_attach: i2c_enumeration failed` is a half-boot (seen this
+  session). A fully booted bridge is the one that logs
+  `registering adapter 0 frontend 0 (DiBcom 7000PC)` and thereafter survives
+  unbind (`warm state`, no re-download) — as in `logs/kernrevive-1791480502/`.
 * **modprobe is blocked** for `pctv320cx`, `dvb_usb_dib0700` (NixOS
   `install … false` rules, not in `/etc/modprobe.d` — check
   `modprobe --show-config`). Use `insmod` with the `.ko.xz` path.

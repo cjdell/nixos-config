@@ -49,6 +49,18 @@ stdenv.mkDerivation {
     install -Dm755 pctv_probe "$out/bin/pctv_probe"
     install -Dm755 pctv-monitor "$out/bin/pctv-monitor"
 
+    # Wrap the probe as well, not just the GUI.  Without this the firmware
+    # paths only live in pctv-monitor's environment, and the default GUI path
+    # launches the probe through `sudo -n`, whose env_reset drops every
+    # PCTV_* variable: probe.c then falls back to a relative
+    # "firmware/dvb-usb-dib0700-1.20.fw" and fails with "open fw: No such
+    # file or directory", leaving the bridge cold (all Pipe errors after).
+    # Wrapping pctv_probe means `sudo -n <wrapper>` re-establishes the paths.
+    wrapProgram "$out/bin/pctv_probe" \
+      --set PCTV_DECODER_FW "${libreelec-dvb-firmware}/lib/firmware/v4l-cx25840.fw" \
+      --set PCTV_BRIDGE_FW "${libreelec-dvb-firmware}/lib/firmware/dvb-usb-dib0700-1.20.fw" \
+      ${lib.optionalString noSudo "--set PCTV_NO_SUDO 1"}
+
     wrapProgram "$out/bin/pctv-monitor" \
       --set PCTV_PROBE "$out/bin/pctv_probe" \
       --set PCTV_DECODER_FW "${libreelec-dvb-firmware}/lib/firmware/v4l-cx25840.fw" \

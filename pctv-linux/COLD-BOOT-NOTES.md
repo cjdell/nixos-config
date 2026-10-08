@@ -10,6 +10,78 @@ for what we just changed.
 
 ---
 
+## 0. RESULT — 2026-10-08 ~19:25 cold boot: **it did not work**, for a fixable
+and a fundamental reason
+
+Run against kernel 7.2.9, card cold (`GET_VERSION` → `Pipe error`).
+
+**Finding 1 (bug, fixed in `package.nix`): the GUI never even saw the firmware
+path.** `pctv-monitor` sets `PCTV_PROBE`/`PCTV_BRIDGE_FW`/`PCTV_DECODER_FW`,
+but its child launches the probe through `sudo -n`, and sudo's `env_reset`
+**drops every `PCTV_*` variable**. `probe.c` then falls back to the relative
+path `firmware/dvb-usb-dib0700-1.20.fw`, so the cold-boot log is:
+
+```
+stream: bridge not running -> downloading firmware/dvb-usb-dib0700-1.20.fw
+open fw: No such file or directory
+stream: bridge firmware download failed
+   (then every ctrl_out/ctrl_in -> Pipe error)
+```
+
+Only `pctv-monitor` was wrapped (to set `PCTV_PROBE`); `pctv_probe` itself was
+not, and `PCTV_PROBE` pointed at the *raw* binary. Fix: wrap `pctv_probe` too
+(so `sudo -n <wrapper>` restores the firmware paths), not just the GUI.
+(Confirm with `sudo env` — `sudo -n env | grep -i pctv` prints nothing.)
+
+**Finding 2 (fundamental, open): the userspace cold download does not boot the
+bridge.** With the path supplied explicitly:
+
+```
+firmware: 1610 record(s) written
+jumpram -> 0x70000000 ok
+-- GET_VERSION --
+  ctrl_in rq=0x15 ... -> Pipe error
+GET_VERSION failed -> device is COLD (no firmware running)
+```
+
+This was checked both in a fresh process and inside the *same* process
+(`pctv_probe init`, which downloads and then immediately re-reads
+`GET_VERSION`), so it is not a handle-close artefact. It confirms the previous
+`ram=0x00000001` ROM-idle observation (TRUTH §7) from a **true-cold** state and
+matches HANDOVER's 14:20 result: **bytes are identical to the kernel's, but the
+kernel boots the card and userspace does not.** Do not keep re-testing the blob
+shape.
+
+**The kernel download can fully boot the card** — `logs/kernrevive-1791480502/`
+(t ≈ 14001 s) shows `cold state → downloading firmware → firmware started
+successfully → registering adapter 0 frontend 0 (**DiBcom 7000PC**)`, and once
+like that it survives unbind (t ≈ 14120: rebind is `warm state`, no download).
+But it is **not reliable**: binding `dib0700` here produced `warm state` with
+`stk7700ph_frontend_attach: i2c_enumeration failed`, i.e. the bridge firmware
+did not actually take — the same half-booted state klog t ≈ 13866. Which state
+you get is the unresolved ROM sub-state question (TRUTH §9.2).
+
+**Consequences / what to do**
+
+1. The stated goal (userspace-only, kernel driver blacklisted) **cannot
+   cold-boot the card**. The only downloader known to work is the kernel's.
+2. To revive the card now: **physical pull ≥ 60 s**, re-insert, then either
+   (a) let the kernel download and hand off — but note detaching `dib0700`
+   after a *successful* boot keeps the bridge warm while detaching after a
+   half-boot resets it — or (b) `insmod` the in-tree modules (§5.3).
+   The card is currently in the half-booted state; a pull is required.
+3. Reliable cold boots need an architecture change (let `dvb_usb_dib0700` do
+   the download, with uncompressed firmware + `firmware_class.path`, and keep
+   the userspace monitor on the warm bridge). Decide before more userspace
+   download work.
+
+> Operational trap hit during this session: a `pctv_probe fw2` left running
+> holds interface 0 via usbfs and (a) makes `lsmod`-checking misleading and
+> (b) blocks `dib0700` from binding with `Device or resource busy`. `pgrep -a
+> pctv_probe` before binding anything.
+
+---
+
 ## 1. What changed, and why a cold boot is interesting
 
 Before: the out-of-tree **`pctv320cx.ko` V4L2 kernel module** warmed the card
