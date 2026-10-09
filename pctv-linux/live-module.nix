@@ -114,6 +114,17 @@ in
     # path; the userspace package carries its own uncompressed copies.
     hardware.enableRedistributableFirmware = true;
 
+    # The monitor's only cushion between a 27 MB/s BT.656 stream and a 2-core
+    # box that is simultaneously running ffmpeg, the SDL display, kwin and the
+    # USB workers is a pipe. The unprivileged default cap (fs.pipe-max-size =
+    # 1 MiB) is 39 ms of slack, and one scheduling hiccup past that makes the
+    # probe's non-blocking write fail and discard a whole 32 KiB URB = 19
+    # BT.656 lines; the parser then splices the field across the hole, which is
+    # exactly the "one interlaced field is misaligned" glitch seen in the live
+    # view and in the recorded .mpg. Raise the cap so pctv-monitor can ask for
+    # 32 MiB (1.2 s of slack) instead of 1 MiB.
+    boot.kernel.sysctl."fs.pipe-max-size" = lib.mkDefault "67108864";
+
     # `pctv-monitor` is the SDL2 live view + MPEG-2 capture GUI: it spawns
     # pctv_probe, deframes BT.656 to UYVY, shows it, and pipes it - together
     # with the selected ALSA audio input - to ffmpeg for a PAL-DVD-style .mpg.
@@ -141,7 +152,9 @@ in
     # `Found stored profile 'off'` beat the priority rule until
     # `device.restore-profile = false` was set.)
     services.pipewire.wireplumber.extraConfig.pctv320cx-audio = lib.mkIf (cfg.audioProfile != "") {
-      "wireplumber.settings" = { "device.restore-profile" = false; };
+      "wireplumber.settings" = {
+        "device.restore-profile" = false;
+      };
       "device.profile.priority.rules" = [
         {
           matches = [ { "device.name" = "alsa_card.*"; } ];

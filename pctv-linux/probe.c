@@ -2444,6 +2444,17 @@ static int cmd_analog2(int argc, char **argv)
  */
 static volatile sig_atomic_t stream_stop;
 static int stream_inflight;
+/* Data actually lost to a consumer that is not draining stdout fast enough.
+ * Every chunk lost here is whole BT.656 lines: the parser resyncs on the next
+ * SAV and keeps filling the SAME field, so the lines after the gap land one
+ * (or several) rows early - a field that is vertically misaligned against the
+ * other one.  Counted so the glitch is measurable instead of inferred. */
+static unsigned long long stream_drop_chunks, stream_drop_bytes;
+/* When each drop happened, so they can be lined up against the consumer's
+ * own per-second counters (PCTV_VERBOSE prints bytes_in every second). */
+#define DROP_LOG 256
+static double drop_t[DROP_LOG];
+static struct timespec stream_t0;
 static void stream_on_sig(int sig) { (void)sig; stream_stop = 1; }
 
 static void stream_cb(struct libusb_transfer *t)
@@ -2463,6 +2474,14 @@ static void stream_cb(struct libusb_transfer *t)
                      * data - and that looks like a dead card. */
                     stream_stop = 1;
                     break;
+                }
+                stream_drop_chunks++;
+                stream_drop_bytes += (unsigned long long)(len - off);
+                if (stream_drop_chunks <= DROP_LOG) {
+                    struct timespec dn;
+                    clock_gettime(CLOCK_MONOTONIC, &dn);
+                    drop_t[stream_drop_chunks - 1] =
+                        (dn.tv_sec - stream_t0.tv_sec) + 1e-9 * (dn.tv_nsec - stream_t0.tv_nsec);
                 }
                 break;   /* EAGAIN: drop the rest of this chunk */
             }
@@ -2555,6 +2574,7 @@ static int cmd_stream(int argc, char **argv)
     if (bufsz < 512) bufsz = 512;
     struct libusb_transfer *tr[ACAP_URBS];
     unsigned char *buf[ACAP_URBS];
+    clock_gettime(CLOCK_MONOTONIC, &stream_t0);
     for (int i = 0; i < ACAP_URBS; i++) {
         buf[i] = malloc(bufsz);
         tr[i] = libusb_alloc_transfer(0);
@@ -2575,7 +2595,10 @@ static int cmd_stream(int argc, char **argv)
         libusb_handle_events_timeout_completed(NULL, &tv, NULL);
     }
     for (int i = 0; i < ACAP_URBS; i++) { libusb_free_transfer(tr[i]); free(buf[i]); }
-    fprintf(stderr, "stream: stopped\n");
+    fprintf(stderr, "stream: stopped (%llu chunks, %llu B dropped on EAGAIN)\n",
+            stream_drop_chunks, stream_drop_bytes);
+    for (unsigned long long i = 0; i < stream_drop_chunks && i < DROP_LOG; i++)
+        fprintf(stderr, "stream: EAGAIN drop at t=%.3f s\n", drop_t[i]);
     return 0;
 }
 

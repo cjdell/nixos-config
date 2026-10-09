@@ -61,6 +61,13 @@
 #define H 576
 #define FIELD_MAX 296
 #define RBUF (8u << 20)          /* 8 MiB read/parse buffer */
+/* One BT.656 line as this card actually ships it: SAV(4) + 1440 active +
+ * EOF(4) + 280 B of H-blanking tail = 1728 B.  Measured from a raw dump: the
+ * deltas between guard codes alternate 1444 / 284, and 15625 lines/s * 1728 =
+ * 27.0 MB/s, exactly the rate the probe streams at.  The pitch is fixed, so a
+ * guard code that is not 1728 B after the previous one proves bytes vanished -
+ * see parse(). */
+#define LINE_BYTES (4 + W * 2 + 284)
 #define UV_SIZE ((size_t)H * W * 2)  /* one 720x576 UYVY frame */
 
 /* This card has exactly one composite input (the yellow RCA) and one S-Video
@@ -109,7 +116,54 @@ static int  parity_mask = 0;         /* which field parities are in fuv */
 static int  field_repeat = 0;        /* same parity twice: feed anyway */
 static int  frame_ready = 0;
 static unsigned long long frames = 0;
+/* Fields committed with fewer than the 288 active lines a PAL field has.  The
+ * only way to lose lines is a gap in the byte stream (the probe drops a whole
+ * 32 KiB URB when the monitor's pipe is full), and the parser then keeps
+ * filling the same field - so the lines after the gap land too early and the
+ * field is sheared against the other one.  Counting them makes the visible
+ * glitch measurable. */
+static unsigned long long fields_short = 0;
+/* Frames fed with one field left over from the PREVIOUS frame (the same parity
+ * arrived twice, so one parity's rows were never refreshed).  That is the
+ * classic "one field is misaligned / combed" frame: half of it is a 40 ms-old
+ * image.  Counted to tell a stale-field feed from a lost-lines feed. */
+static unsigned long long fields_repeat = 0;
+/* Guard codes found at a pitch other than LINE_BYTES: bytes were discarded
+ * between them (the probe's write into a full pipe failed with EAGAIN and it
+ * drops the rest of the 32 KiB URB = 19 lines).  Without this the field is
+ * spliced across the hole - every line after it lands ~19 rows early, which is
+ * the "one interlaced field is misaligned" glitch.  On a gap the half-built
+ * field AND the half-fed frame are discarded instead. */
+static unsigned long long fields_gap = 0;
+/* Fields thrown away because they were spliced across such a gap (set by
+ * parse(), reaped by field_line() at the field boundary).  Losing a field costs
+ * one frame of picture; committing it costs a field whose lower half sits ~19
+ * rows too high. */
+static unsigned long long fields_dropped = 0;
+/* 0 = assembling normally, 1 = this field contains a stream hole, 2 = this field
+ * starts right after a discarded one, so it may have lost its head lines in the
+ * same hole.  A hole therefore costs two fields of picture - and never a frame
+ * that looks like one field slid vertically out of the picture. */
+static int field_state = 0;
+/* Timestamped log of the two anomaly kinds, so they can be lined up against
+ * each other (a lost chunk and a stale-field feed are the same event seen from
+ * the two ends of the pipe) and against the capture window. */
+#define ANOM_LOG 128
+struct anom { unsigned long t; char kind; };
+static struct anom anom[ANOM_LOG];
+static int nanom = 0;
+static void anom_note(unsigned long t, char kind)
+{
+    if (nanom < ANOM_LOG) { anom[nanom].t = t; anom[nanom].kind = kind; nanom++; }
+}
 static unsigned long long bytes_in = 0;   /* bytes read from the probe */
+/* The read/parse buffer is at file scope so cap_start() and cap_stop() can keep
+ * the probe pipe drained while they block (pump()).  Leaving it undrained for
+ * the 2 s audio wait at capture start and the ffmpeg flush at capture stop is
+ * what throws away the first and last frames of every recording. */
+static unsigned char *rbuf;
+static size_t rlen;
+static void parse_reset(void);          /* defined with the parser */
 
 static void die(const char *m)
 {
@@ -307,11 +361,33 @@ static void child_stop(void)
     if (child_fd >= 0) { close(child_fd); child_fd = -1; }
 }
 
+/* Grow a pipe to `want` MiB, halving until the kernel allows it, and report
+ * what was actually achieved.  F_SETPIPE_SZ is refused above
+ * fs.pipe-max-size for an unprivileged process, and at the 1 MiB default the
+ * 27 MB/s BT.656 stream has only 39 ms of cushion - one desktop hiccup and the
+ * probe discards a whole 32 KiB URB.  live-module.nix raises the cap to 64 MiB
+ * so the 32 MiB asked for here (1.2 s of slack) is granted; the ladder keeps
+ * the monitor working on a host where that sysctl is not set. */
+static int pipe_slack(int fd, int want_mib, const char *what)
+{
+    for (int mib = want_mib; mib >= 1; mib /= 2)
+        if (fcntl(fd, F_SETPIPE_SZ, mib << 20) > 0) {
+            if (mib < want_mib)
+                fprintf(stderr, "pctv-monitor: %s pipe: %d MiB "
+                                "(fs.pipe-max-size too low for %d MiB)\n",
+                        what, mib, want_mib);
+            return mib;
+        }
+    fprintf(stderr, "pctv-monitor: %s pipe: cannot grow (default 64 KiB)\n", what);
+    return 0;
+}
+
 static void child_start(int input)
 {
     int p[2];
     if (pipe(p) < 0) die("pipe");
-    fcntl(p[0], F_SETPIPE_SZ, 1 << 20);
+    pipe_slack(p[0], 32, "stream");
+    parse_reset();
     signal(SIGPIPE, SIG_IGN);
 
     child = fork();
@@ -356,8 +432,11 @@ static void field_commit(void)
 {
     if (field_lines <= 0) return;
     int rows = field_lines < 288 ? field_lines : 288;
+    if (field_lines < 288) { fields_short++; anom_note(SDL_GetTicks(), 'S'); }
     int parity = field_F ? 1 : 0;
-    if (parity_mask & (1 << parity)) field_repeat = 1;
+    if (parity_mask & (1 << parity)) {
+        field_repeat = 1; fields_repeat++; anom_note(SDL_GetTicks(), 'R');
+    }
     for (int r = 0; r < rows; r++) {
         int out = 2 * r + parity;
         if (out >= H) continue;
@@ -382,9 +461,21 @@ static void field_line(const unsigned char *act, int xy)
     int F = (xy >> 6) & 1;
     int V = (xy >> 5) & 1;
     if (V) return;                        /* vertical blanking, not picture */
-    if (field_lines > 0 && F != field_F) field_commit();
+    if (field_lines > 0 && F != field_F) {
+        if (field_state) {
+            /* Spliced across a hole, or missing its head lines after one: throw
+             * this field away rather than show/encode a vertically shifted half.
+             */
+            fields_dropped++;
+            anom_note(SDL_GetTicks(), 'D');
+            field_lines = 0;
+            field_state = (field_state == 1) ? 2 : 0;
+        } else field_commit();
+    }
+    if (V) return;                        /* vertical blanking, not picture */
     if (field_lines == 0) field_F = F;
     if (field_lines >= FIELD_MAX) return;
+    if (field_state) { field_lines++; return; }  /* unusable: count only */
     unsigned char *Y = fY[field_lines];
     unsigned char *Cb = fCb[field_lines];
     unsigned char *Cr = fCr[field_lines];
@@ -397,6 +488,15 @@ static void field_line(const unsigned char *act, int xy)
 }
 
 /* Parse as much of [d,d+n) as possible; return bytes consumed. */
+/* Bytes since the start of the previous guard code, carried across parse()
+ * calls: -1 = no code seen yet (start of stream, or after a resync). */
+static long line_pitch = -1;
+static void parse_reset(void)
+{
+    line_pitch = -1;
+    field_state = 0;        /* nothing is in flight across a stream restart */
+}
+
 static size_t parse(const unsigned char *d, size_t n)
 {
     size_t i = 0;
@@ -404,14 +504,73 @@ static size_t parse(const unsigned char *d, size_t n)
         if (d[i] == 0xFF && d[i + 1] == 0x00 && d[i + 2] == 0x00) {
             int xy = d[i + 3];
             if ((xy & 0x10) == 0) {           /* SAV begins the active part */
+                if (line_pitch >= 0 && line_pitch != LINE_BYTES) {
+                    /* The line pitch never varies, so this is a hole in the
+                     * stream, not a quirk of the source.  Splicing the field
+                     * across it is what misaligns it, and the frame made from
+                     * it is wrong in both outputs (display and encoder) - so
+                     * throw the field and the half-built frame away and start
+                     * again from this line. Costs one frame, not a glitch. */
+                    fields_gap++;
+                    anom_note(SDL_GetTicks(), 'G');
+                    field_state = 1;      /* the rest of this field is unusable */
+                    parity_mask = 0;      /* and so is the half-built frame */
+                }
+                line_pitch = 0;
                 field_line(d + i + 4, xy);
                 i += 4 + W * 2;
+                line_pitch += 4 + W * 2;
                 continue;
             }
         }
         i++;
+        if (line_pitch >= 0) line_pitch++;
     }
     return i;
+}
+
+/* Read everything the probe has queued and parse it.  The main loop calls this
+ * once per iteration; cap_start() and cap_stop() must call it too while they
+ * wait, or nobody drains the pipe, it fills in tens of milliseconds and the
+ * probe starts discarding stream data.  Returns 1 if the child died. */
+static int pump(void)
+{
+    int dead = 0;
+    for (;;) {
+        size_t space = RBUF - rlen;
+        if (space < 4 + W * 2) break;
+        ssize_t r = read(child_fd, rbuf + rlen, space);
+        if (r > 0) {
+            bytes_in += (unsigned long long)r;
+            if (recording && rec_file) fwrite(rbuf + rlen, 1, r, rec_file);
+            rlen += r;
+            continue;
+        }
+        if (r == 0) { child_stop(); dead = 1; }      /* child died */
+        break;                                       /* EAGAIN */
+    }
+    /* Always parse: pausing freezes the display, not the capture. */
+    if (rlen > 0) {
+        size_t used = parse(rbuf, rlen);
+        if (used > 0) { memmove(rbuf, rbuf + used, rlen - used); rlen -= used; }
+    }
+    /* Only if parse() could not move anything: keep the tail rather than
+     * wedging on a full buffer, and say so (at most once a second). */
+    if (RBUF - rlen < 4 + W * 2) {
+        memmove(rbuf, rbuf + RBUF / 2, RBUF / 2);
+        rlen = RBUF / 2;
+        parse_reset();              /* re-hunting for a guard code... */
+        field_state = 1;            /* ...and the half-discarded is a hole */
+        static unsigned long long sync_drops = 0, last_warn = 0;
+        sync_drops++;
+        unsigned long long t = SDL_GetTicks();
+        if (t - last_warn > 1000) {
+            last_warn = t;
+            fprintf(stderr, "pctv-monitor: no BT.656 sync in %d B ("
+                            "%llu drops total)\n", RBUF / 2, sync_drops);
+        }
+    }
+    return dead;
 }
 
 /* ------------------------------------------------------------------ output */
@@ -1354,8 +1513,11 @@ static int cap_start(void)
     int vp[2], ap[2];
     if (pipe(vp) < 0) return -1;
     if (pipe(ap) < 0) { close(vp[0]); close(vp[1]); return -1; }
-    fcntl(vp[1], F_SETPIPE_SZ, 4 << 20);
-    fcntl(ap[1], F_SETPIPE_SZ, 1 << 20);
+    /* 8 MiB = 10 frames of cushion between the 829 KB/frame memcpy and ffmpeg's
+     * encoder; the old unchecked 4 MiB request was silently refused (it is
+     * above fs.pipe-max-size), leaving the default 64 KiB = two frames. */
+    pipe_slack(vp[1], 8, "encoder video");
+    pipe_slack(ap[1], 1, "encoder audio");
     {   /* the audio write end is non-blocking: drop rather than stall video */
         int fl = fcntl(ap[1], F_GETFL, 0);
         fcntl(ap[1], F_SETFL, fl | O_NONBLOCK);
@@ -1369,6 +1531,7 @@ static int cap_start(void)
             int up = audio_ok;
             pthread_mutex_unlock(&amtx);
             if (up) break;
+            pump();                 /* keep the stream moving while we wait */
             usleep(50000);
         }
     }
@@ -1459,6 +1622,7 @@ static void cap_stop(void)
             pid_t r = waitpid(pid, &st, WNOHANG);
             if (r == pid) break;
             if (r < 0) break;
+            pump();                           /* the live stream keeps running */
             usleep(10000); waited += 10;
         }
         if (waited >= 10000) { kill(pid, SIGTERM); waitpid(pid, NULL, 0); }
@@ -1777,8 +1941,9 @@ int main(int argc, char **argv)
                    pthread_mutex_unlock(&amtx); }
     show_overlay(8000);
 
-    unsigned char *rbuf = malloc(RBUF);
-    size_t rlen = 0;
+    rbuf = malloc(RBUF);
+    if (!rbuf) die("out of memory for the parse buffer");
+    rlen = 0;
     int running = 1;
     unsigned long long last_frames = 0, snap_after = 0;
     { const char *s = getenv("PCTV_SNAP_AFTER"); if (s) snap_after = strtoull(s, NULL, 0); }
@@ -1899,41 +2064,10 @@ int main(int argc, char **argv)
             }
         }
 
-        /* drain the child's stdout; stop when the parse buffer is nearly full
-         * so parse() can make room - discarding here would lose stream data */
+        /* drain the child's stdout and decode it (pump() also covers the
+         * buffer-full/no-sync case); stop when the probe dies */
         unsigned long t_stage = SDL_GetTicks();
-        for (;;) {
-            size_t space = RBUF - rlen;
-            if (space < 4 + W * 2) break;
-            ssize_t r = read(child_fd, rbuf + rlen, space);
-            if (r > 0) {
-                bytes_in += (unsigned long long)r;
-                if (recording && rec_file) fwrite(rbuf + rlen, 1, r, rec_file);
-                rlen += r;
-                continue;
-            }
-            if (r == 0) { child_stop(); running = 0; break; }   /* child died */
-            break;                                              /* EAGAIN */
-        }
-        /* Always parse: pausing freezes the display, not the capture. */
-        if (rlen > 0) {
-            size_t used = parse(rbuf, rlen);
-            if (used > 0) { memmove(rbuf, rbuf + used, rlen - used); rlen -= used; }
-        }
-        /* Only if parse() could not move anything: keep the tail rather than
-         * wedging on a full buffer, and say so (at most once a second). */
-        if (RBUF - rlen < 4 + W * 2) {
-            memmove(rbuf, rbuf + RBUF / 2, RBUF / 2);
-            rlen = RBUF / 2;
-            static unsigned long long sync_drops = 0, last_warn = 0;
-            sync_drops++;
-            unsigned long long t = SDL_GetTicks();
-            if (t - last_warn > 1000) {
-                last_warn = t;
-                fprintf(stderr, "pctv-monitor: no BT.656 sync in %d B ("
-                                "%llu drops total)\n", RBUF / 2, sync_drops);
-            }
-        }
+        if (pump()) running = 0;
 
         /* a complete interlaced frame is ready for the encoder */
         {   /* parse stage: stream read + BT.656 decode, top of loop to here */
@@ -2098,8 +2232,15 @@ int main(int argc, char **argv)
     child_stop();
     if (rec_file) fclose(rec_file);
     free(rbuf);
-    fprintf(stderr, "pctv-monitor: %llu fields, %llu encoded frames, "
-                    "%llu B from the probe\n", frames, cap_vframes, bytes_in);
+    fprintf(stderr, "pctv-monitor: %llu fields (%llu short = lines lost, "
+                    "%llu stale-field feeds, %llu stream gaps, %llu fields "
+                    "dropped), %llu encoded frames, %llu B from the probe\n",
+            frames, fields_short, fields_repeat, fields_gap, fields_dropped,
+            cap_vframes, bytes_in);
+    fprintf(stderr, "pctv-monitor: anomalies (S=short field, R=stale field, "
+                    "G=stream gap, D=field dropped): ");
+    for (int i = 0; i < nanom; i++) fprintf(stderr, " %c@%lums", anom[i].kind, anom[i].t);
+    fprintf(stderr, "\n");
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
