@@ -286,6 +286,8 @@ static void usage(const char *p)
         "  --boost <0-3>       input boost step (Line/Mic/Internal Mic Boost)\n"
         "  --agc/--no-agc      automatic gain control (default on): keeps the\n"
         "                      peaks near -18 dBFS by driving the codec\n"
+        "  --monitor           start with input monitoring on: play the captured\n"
+        "                      samples out of the host's speakers (key: o)\n"
         "  --out-dir <dir>     where captures go (default ~/Videos, else /tmp)\n"
         "  --bitrate <kbps>    MPEG-2 video bitrate (default 6000)\n"
         "  --ffmpeg <path>     ffmpeg binary (default PCTV_FFMPEG or 'ffmpeg')\n"
@@ -293,7 +295,7 @@ static void usage(const char *p)
         "  --capture-seconds N stop after N seconds and exit (headless test)\n"
         "\n"
         "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
-        "        -/+ gain | b boost | m mute | c MPEG-2 capture | r raw BT.656 |\n"
+        "        -/+ gain | b boost | m mute | o monitor input | c MPEG-2 capture |\n"
         "        s snapshot | g grey | space pause display | q/ESC quit\n", p);
 }
 
@@ -486,7 +488,13 @@ static int cur_gain_pct = -1, cur_boost_step = -1;
 static int cap_muted = 0;
 static int pend_gain_pct = -1, pend_gain_step = 0, pend_boost_cycle = 0,
            pend_boost_step = -1, pend_mute_toggle = 0, pend_agc_toggle = 0,
-           pend_manual = 0;
+           pend_manual = 0, pend_mon_toggle = 0;
+/* Input monitoring: play back, on the host's output, exactly the samples the
+ * capture would write, so the gain can be judged by ear before committing to a
+ * recording.  Opened lazily (only while it is on) so the desktop's audio is not
+ * held hostage the rest of the time. */
+static int mon_on = 0;
+static char mon_dev[64] = "";
 /* Automatic gain control: on by default, toggled with `A' (shift+a) or
  * --agc/--no-agc, and remembered in the config file.  Any manual gain key
  * turns it off - the user's hand wins. */
@@ -802,6 +810,39 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
             pk, gain_db);
 }
 
+/* Open the host's playback stream for input monitoring.  Tries the desktop's
+ * default route first (so it co-exists with PipeWire) and then the capture
+ * card's own playback stream.  Returns NULL with a reason in err. */
+static snd_pcm_t *mon_open(char *err, size_t n)
+{
+    char hwdev[64];
+    snprintf(hwdev, sizeof hwdev, "%s", srcs[cur_src].dev);
+    /* Prefer the capture card's own playback stream: a direct monitor path that
+     * works whatever the desktop audio daemon is doing (this box's PipeWire card
+     * profile was "Off", which silently routes "default" to a Dummy Output).
+     * If something else holds the output, fall back to the default route. */
+    const char *cands[3] = { hwdev, "default", NULL };
+    snd_pcm_t *m = NULL;
+    err[0] = 0;
+    for (int q = 0; q < 2 && !m; q++) {
+        int e = snd_pcm_open(&m, cands[q], SND_PCM_STREAM_PLAYBACK, 0);
+        if (e < 0) { snprintf(err, n, "%s: %s", cands[q], snd_strerror(e)); m = NULL; continue; }
+        int rates[] = { audio_rate, 48000, 44100 };
+        int ok = 0;
+        for (unsigned w = 0; w < sizeof rates / sizeof rates[0]; w++) {
+            e = snd_pcm_set_params(m, SND_PCM_FORMAT_S16_LE,
+                                   SND_PCM_ACCESS_RW_INTERLEAVED, 2, rates[w],
+                                   1 /* allow resample */, 60000 /* latency us */);
+            if (e >= 0) { ok = 1; snprintf(mon_dev, sizeof mon_dev, "%s", cands[q]); break; }
+        }
+        if (!ok) {
+            snprintf(err, n, "%s: params: %s", cands[q], snd_strerror(e));
+            snd_pcm_close(m); m = NULL;
+        }
+    }
+    return m;
+}
+
 /* Open the PCM for the current source; returns 0 on success. */
 static int audio_open_pcm(snd_pcm_t **pcm, char *err, size_t n)
 {
@@ -829,7 +870,8 @@ static int audio_open_pcm(snd_pcm_t **pcm, char *err, size_t n)
 static void *audio_thread(void *arg)
 {
     (void)arg;
-    snd_pcm_t *pcm = NULL;
+static snd_pcm_t *pcm = NULL;
+    snd_pcm_t *mon = NULL;
     short buf[1024 * 2];
 
     for (;;) {
@@ -861,6 +903,13 @@ static void *audio_thread(void *arg)
 
             char err[96] = "";
             int ok = audio_open_pcm(&pcm, err, sizeof err) == 0;
+            /* The monitor follows the input: if it was on, re-open it against the
+             * new rate/device so the pitch stays right. */
+            if (mon_on && !mon) {
+                char merr[96] = "";
+                mon = mon_open(merr, sizeof merr);
+                if (!mon) { mon_on = 0; fprintf(stderr, "pctv-monitor: input monitor lost: %s\n", merr); }
+            }
             pthread_mutex_lock(&amtx);
             snprintf(audio_err, sizeof audio_err, "%s", err);
             if (ok) audio_ok = 1;
@@ -929,6 +978,57 @@ static void *audio_thread(void *arg)
             pend_mute_toggle = 0;
             audio_apply_controls();
         }
+        /* Input monitoring: open (or release) the host's playback stream.  It is
+         * opened on demand and never held otherwise, so PipeWire/the desktop can
+         * use the output when we are not listening. */
+        if (pend_mon_toggle) {
+            pend_mon_toggle = 0;
+            if (mon) {
+                snd_pcm_drain(mon); snd_pcm_close(mon); mon = NULL; mon_dev[0] = 0;
+                mon_on = 0;
+                fprintf(stderr, "pctv-monitor: input monitor off\n");
+            } else {
+                char merr[96] = "";
+                mon = mon_open(merr, sizeof merr);
+                if (!mon) {
+                    mon_on = 0;
+                    /* amtx is already held here (this whole control block runs
+                     * under it) - locking it again would deadlock. */
+                    snprintf(audio_err, sizeof audio_err, "monitor %s", merr);
+                    fprintf(stderr, "pctv-monitor: input monitor failed: %s\n", merr);
+                } else {
+                    mon_on = 1;
+                    /* Make sure the output is actually audible: PipeWire leaves
+                     * the codec's Master wherever the desktop put it, and a
+                     * muted or near-silent Master makes the test look like a
+                     * dead input.  Only ever raise it, never turn it up past a
+                     * moderate level. */
+                    if (mixer) {
+                        snd_mixer_elem_t *ms = find_selem(mixer, "Master", 0);
+                        if (ms) {
+                            long lo, hi, v;
+                            int sw = 1;
+                            if (snd_mixer_selem_has_playback_switch(ms) &&
+                                snd_mixer_selem_get_playback_switch(ms, SND_MIXER_SCHN_MONO, &sw) >= 0 &&
+                                !sw)
+                                snd_mixer_selem_set_playback_switch_all(ms, 1);
+                            if (snd_mixer_selem_get_playback_dB_range(ms, &lo, &hi) >= 0 &&
+                                snd_mixer_selem_get_playback_dB(ms, SND_MIXER_SCHN_MONO, &v) >= 0) {
+                                long want = lo + (hi - lo) * 70 / 100;   /* mid-high, not full */
+                                if (v < lo + (hi - lo) * 30 / 100) {
+                                    snd_mixer_selem_set_playback_dB_all(ms, want, 0);
+                                    fprintf(stderr, "pctv-monitor: monitor raised Master to "
+                                                    "%.1f dB (was %.1f)\n", want / 100.0, v / 100.0);
+                                } else
+                                    fprintf(stderr, "pctv-monitor: monitor: Master %.1f dB\n", v / 100.0);
+                            }
+                        }
+                    }
+                    fprintf(stderr, "pctv-monitor: input monitor on -> %s (the exact "
+                                    "samples the capture writes)\n", mon_dev);
+                }
+            }
+        }
         pthread_mutex_unlock(&amtx);
 
         int r = snd_pcm_readi(pcm, buf, 1024);
@@ -971,9 +1071,22 @@ static void *audio_thread(void *arg)
         else agc_win_pk = -99.0;
         pthread_mutex_unlock(&amtx);
 
+        /* Input monitoring: the same buffer, unaltered, that cap_feed_audio()
+         * hands to the muxer - so what you hear is what the file gets. */
+        if (mon) {
+            int w = snd_pcm_writei(mon, buf, r);
+            if (w == -EPIPE) snd_pcm_recover(mon, w, 1);
+            else if (w == -EINTR || w == -ERESTART) { /* retry next round */ }
+            else if (w < 0) {
+                snd_pcm_close(mon); mon = NULL; mon_dev[0] = 0; mon_on = 0;
+                fprintf(stderr, "pctv-monitor: input monitor closed (%s)\n", snd_strerror(-w));
+            }
+        }
+
         cap_feed_audio(buf, (size_t)r * 2 * sizeof(short));
     }
     if (pcm) snd_pcm_close(pcm);
+    if (mon) { snd_pcm_drain(mon); snd_pcm_close(mon); mon = NULL; }
     pthread_mutex_lock(&amtx);
     if (mixer) { snd_mixer_close(mixer); mixer = NULL; }
     audio_ok = 0;
@@ -1345,7 +1458,7 @@ static void draw_audio_panel(SDL_Renderer *ren)
     int y = H - 96;
 
     pthread_mutex_lock(&amtx);
-    int ok = audio_ok, rate = audio_rate, muted = cap_muted, agc = agc_on;
+    int ok = audio_ok, rate = audio_rate, muted = cap_muted, agc = agc_on, mon = mon_on;
     double p0 = pk_db[0], p1 = pk_db[1], r0 = rms_db[0], r1 = rms_db[1];
     double h0 = hold_db[0], h1 = hold_db[1], g = gain_db, bo = boost_db;
     unsigned cl = clips, xr = xruns;
@@ -1403,6 +1516,13 @@ static void draw_audio_panel(SDL_Renderer *ren)
     else { verdict = "OK - level in range"; col[0] = 90; col[1] = 220; col[2] = 110; }
     SDL_SetRenderDrawColor(ren, col[0], col[1], col[2], 255);
     draw_text(ren, x, y + 2 * bh + 20, 1, verdict);
+    if (mon) {          /* what you hear is the buffer the muxer would be given */
+        SDL_SetRenderDrawColor(ren, 90, 190, 255, 255);
+        draw_text(ren, x, y + 2 * bh + 31, 1,
+                  strcasecmp(srcs[cur_src].item, "Mic") &&
+                  strcasecmp(srcs[cur_src].item, "Internal Mic")
+                  ? "MONITOR ON - speakers (o)" : "MONITOR ON - speakers (o)  feedback risk: mic input");
+    }
     if (cl || xr) {
         snprintf(t, sizeof t, "clips %u  xruns %u  %d Hz", cl, xr, rate);
         SDL_SetRenderDrawColor(ren, 180, 180, 180, 255);
@@ -1417,7 +1537,7 @@ int main(int argc, char **argv)
     char saved[200];
     int want_capture = 0;
     long capture_secs = 0;
-    int gain_pct = -1, boost_step = -1, agc_cli = -1;
+    int gain_pct = -1, boost_step = -1, agc_cli = -1, mon_cli = 0;
     const char *audio_arg = NULL;
 
     /* input: saved choice, then PCTV_INPUT, then -i/--input (highest priority) */
@@ -1506,6 +1626,8 @@ int main(int argc, char **argv)
             agc_cli = 1;
         } else if (!strcmp(argv[i], "--no-agc")) {
             agc_cli = 0;
+        } else if (!strcmp(argv[i], "--monitor")) {
+            mon_cli = 1;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(argv[0]);
             return 0;
@@ -1579,6 +1701,8 @@ int main(int argc, char **argv)
                            pthread_mutex_unlock(&amtx); }
     else if (saved_boost >= 0) { pthread_mutex_lock(&amtx); pend_boost_step = saved_boost;
                                  pthread_mutex_unlock(&amtx); }
+    if (mon_cli) { pthread_mutex_lock(&amtx); pend_mon_toggle = 1;
+                   pthread_mutex_unlock(&amtx); }
     show_overlay(8000);
 
     unsigned char *rbuf = malloc(RBUF);
@@ -1630,6 +1754,11 @@ int main(int argc, char **argv)
                     }
                     else if (frames > 0) cap_start();
                     else cap_pending = 1;      /* no video yet: start on frame 1 */
+                    show_overlay(4000);
+                    break;
+                case SDLK_o:
+                    pthread_mutex_lock(&amtx); pend_mon_toggle = 1;
+                    pthread_mutex_unlock(&amtx);
                     show_overlay(4000);
                     break;
                 case SDLK_h: help_on = !help_on; show_overlay(4000); break;
@@ -1771,7 +1900,7 @@ int main(int argc, char **argv)
                          "1/2/Tab video   a audio   A agc   -/+ gain   b boost   m mute");
                 draw_panel(ren, 10, 8 + 7 * 2 + 12, hint, 1);
                 snprintf(hint, sizeof hint,
-                         "c MPEG-2 capture   r raw   s snap   g grey   space pause   q quit");
+                         "c MPEG-2 capture   o monitor   r raw   s snap   g grey   space pause   q quit");
                 draw_panel(ren, 10, 8 + 7 * 2 + 12 + 12, hint, 1);
             }
         }
@@ -1789,14 +1918,14 @@ int main(int argc, char **argv)
             snprintf(h4, sizeof h4, " m             mute capture             g  colour / grey");
             snprintf(h5, sizeof h5, " c             MPEG-2 capture on/off    r  raw BT.656 dump");
             snprintf(h6, sizeof h6, " s             snapshot frame (PPM)     space  freeze display");
-            snprintf(h7, sizeof h7, " q / ESC       quit (Ctrl-C also finalises a capture)");
+            snprintf(h7, sizeof h7, " o             monitor input on speakers (hear the gain first)");
             pthread_mutex_lock(&amtx);
             snprintf(h8, sizeof h8, " audio: %s  gain %+.1f dB  boost %+.1f dB  AGC %s",
                      srcs[cur_src].label, gain_db, boost_db, agc_on ? "on" : "off");
             pthread_mutex_unlock(&amtx);
             snprintf(h9, sizeof h9, " video: %s  720x576 interlaced 25 fps  %d kbps", INPUT_LABEL[cur_input], mpeg2_kbps);
             snprintf(h10, sizeof h10, " out: %.180s", out_dir);
-            snprintf(h11, sizeof h11, " recording: red border + REC badge; drops counted there");
+            snprintf(h11, sizeof h11, " q/ESC quit - Ctrl-C also finalises a capture; H closes this");
             hl[0] = h0; hl[1] = h1; hl[2] = h2; hl[3] = h3; hl[4] = h4; hl[5] = h5;
             hl[6] = h6; hl[7] = h7; hl[8] = h8; hl[9] = h9; hl[10] = h10; hl[11] = h11;
             draw_panel_lines(ren, 10, 70, hl, 12, 1);

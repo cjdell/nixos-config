@@ -92,7 +92,8 @@ nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix {}'
 
 Monitor keys: `1`/`2` switch video input (Composite, S-Video), `Tab` cycles,
 `a` cycles the **audio input**, `A` toggles **automatic gain control**,
-`-`/`+` capture gain, `b` input boost, `m` mute, `c` **MPEG-2 capture**, `r`
+`-`/`+` capture gain, `b` input boost, `m` mute, **`o` monitors the input on the
+speakers**, `c` **MPEG-2 capture**, `r`
 raw BT.656 dump, `s` snapshot, `g` colour/grey, space pause the display,
 `q`/ESC quit (Ctrl-C works too and still
 finalises the `.mpg`).  The active input is named in an on-screen banner (and
@@ -170,6 +171,30 @@ describe the same signal.
   input, line 2 = `<gain%> <boost step> <agc>`), so the next launch comes back
   where you left it - including AGC off, if that is where you left it.
 
+### Input monitoring (`o`) - hear the gain before you record
+
+`o` plays back, on the host's output, **exactly the samples the capture would
+write** - the same buffer, unaltered, after the codec's gain and boost.  So the
+meter and your ears judge the same signal, before committing to a recording.
+
+* Toggled with `o` (or `--monitor` at launch).  The output stream is opened only
+  while monitoring is on and closed again, so the desktop's audio is not held
+  the rest of the time.
+* It prefers the capture card's own playback stream (`hw:<card>,<device>`) and
+  falls back to the default route.  Direct hardware on purpose: this box's
+  PipeWire card profile was `Off`, which silently routes `default` to a **Dummy
+  Output** - the monitor would have looked broken.  (`wpctl status` shows the
+  sink; `wpctl set-profile <card> <n>` picks e.g. *Analog Stereo Output*.  Pick
+  an **output-only** profile, not Duplex: Duplex makes PipeWire grab the capture
+  device that `pctv-monitor` needs exclusively.)
+* If the codec's `Master` is muted or near silent (PipeWire leaves it wherever
+  the desktop put it), monitoring raises it to a moderate level and says so, so
+  a silent output is never mistaken for a dead input.
+* Latency is roughly 60-100 ms (capture period + a 60 ms playback buffer).  That
+  is fine for judging level, too slow to play along with.
+* If the selected input is a **Mic** or **Internal Mic**, the panel says
+  `feedback risk` - speakers into a mic will howl; use line in or headphones.
+
 ### MPEG-2 capture (`c`)
 
 The deframed UYVY is piped to `ffmpeg` on stdin and the ALSA PCM on fd 3; the
@@ -215,6 +240,9 @@ PCTV_SNAP_AFTER=120 SDL_VIDEODRIVER=dummy ./pctv-monitor     # saves one frame, 
 SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor --audio line --capture --capture-seconds 6
 # watch the AGC work (one log line per gain move, including boost staging):
 SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor --agc --gain 0 --capture --capture-seconds 10
+# check the monitor path reaches the hardware (both streams must show RUNNING,
+# owned by the same pid, in /proc/asound/card0/pcm0{p,c}/sub0/status):
+SDL_VIDEODRIVER=dummy ./pctv-monitor -i svideo --monitor --capture-seconds 10
 # or drive the stream directly:
 sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 ```
