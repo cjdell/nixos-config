@@ -494,7 +494,8 @@ static long line_pitch = -1;
 static void parse_reset(void)
 {
     line_pitch = -1;
-    field_state = 0;        /* nothing is in flight across a stream restart */
+    field_state = 2;        /* a stream restart begins mid-line: the field in
+                             * progress after it is not trustworthy either */
 }
 
 static size_t parse(const unsigned char *d, size_t n)
