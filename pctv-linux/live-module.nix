@@ -90,7 +90,13 @@ in
     # path; the userspace package carries its own uncompressed copies.
     hardware.enableRedistributableFirmware = true;
 
-    environment.systemPackages = [ pctvLive desktopItem ];
+    # `pctv-monitor` is the SDL2 live view + MPEG-2 capture GUI: it spawns
+    # pctv_probe, deframes BT.656 to UYVY, shows it, and pipes it - together
+    # with the selected ALSA audio input - to ffmpeg for a PAL-DVD-style .mpg.
+    # The audio is metered live (pctv-linux/README.md); the card's own
+    # audio-over-USB path is still undecoded, so the L/R RCAs have to land on a
+    # host input (line-in on this box).
+    environment.systemPackages = [ pctvLive desktopItem pkgs.alsa-utils ];
 
     # `dvb_usb_dib0700` must be the FIRST downloader after a cold power-up
     # (TRUTH.md §2.1); the handoff unit loads it once the firmware path is

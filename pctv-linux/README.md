@@ -90,21 +90,71 @@ nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix {}'
 ./pctv-monitor                      # as your desktop user; it sudo -n's the probe
 ```
 
-Monitor keys: `1`/`2` switch input (Composite, S-Video), `Tab` cycles,
-`g` colour/grey, `s` snapshot to `/tmp/pctv-snap-*.ppm`, `r` toggle raw BT.656
-recording to `/tmp/pctv-rec-*.bt656`, space pause, `q`/ESC quit.  The active
-input is named in an on-screen banner (and in the window title, with the live
-field rate: ~50 fields/s = 25 interlaced fps for PAL); the controls hint is
-shown for a few seconds after start and after each input change.
+Monitor keys: `1`/`2` switch video input (Composite, S-Video), `Tab` cycles,
+`a` cycles the **audio input**, `-`/`+` capture gain, `b` input boost, `m`
+mute, `c` **MPEG-2 capture**, `r` raw BT.656 dump, `s` snapshot, `g`
+colour/grey, space pause the display, `q`/ESC quit (Ctrl-C works too and still
+finalises the `.mpg`).  The active input is named in an on-screen banner (and
+in the window title, with the live field rate: ~50 fields/s = 25 interlaced fps
+for PAL); the controls hint is shown for a few seconds after start and after
+each input change.
 
 The input can also be chosen at launch, which is what the `.desktop` entry and
 scripts use:
 
 ```sh
 pctv-monitor -i svideo          # or -i composite
-pctv-monitor -l                 # list the input names
+pctv-monitor -l                 # list the video input names
+pctv-monitor -L                 # list the audio input names
 PCTV_INPUT=svideo pctv-monitor  # same, via the environment
 ```
+
+### Audio input + level meter
+
+The card's own analog audio path over USB is still undecoded (TRUTH §9.6), so
+the pigtail's L/R RCAs go into a **host** input - on this box the 3.5 mm jack,
+configured as line-in.  `pctv-monitor` captures that from ALSA and meters it
+live, because "is the audio actually there, and is it in range" is otherwise
+invisible on a picture.
+
+* `-L` lists the inputs: they come from `/proc/asound/pcm` plus the codec's
+  `Input Source` selector - the host-side equivalent of the vendor driver's
+  "Audio Tuner In" / "Audio Line In" crossbar pins.  On the ALC889A here: the
+  analogue ADC (`hw:0,0`) as `Internal Mic` / `Mic` / `Line`, the S/PDIF
+  receiver (`hw:0,1`), and the alternate ADC (`hw:0,2`) with its own three.
+* Default is the first **Line** input (the RCAs are line level); the choice is
+  remembered in `~/.config/pctv-monitor/audio`, and `--audio <name>` /
+  `PCTV_AUDIO=...` / `--alsa-dev hw:1,0` override it.
+* The panel shows two stereo meters (-60..0 dBFS) with a shaded **-12..-3 dBFS
+  target zone**, a moving RMS marker, a decaying peak-hold, the codec gain and
+  boost in dB, a clip counter, and a verdict: `NO SIGNAL` / `LOW - raise gain
+  (+)` / `OK - level in range` / `HOT` / `TOO HOT`.
+* Gain staging happens in the codec, not in software: `-`/`+` drive its
+  `Capture` control (-16..+30 dB, 0.75 dB/step on the ALC889A), `b` cycles the
+  per-input `* Boost` (0/12/18/24 dB), `--gain <0-100>` sets a percentage of
+  the hardware range at startup.
+* ALSA is opened exclusively; if something else holds the device the panel
+  shows the ALSA error instead of pretending there is silence.
+
+### MPEG-2 capture (`c`)
+
+The deframed UYVY is piped to `ffmpeg` on stdin and the ALSA PCM on fd 3; the
+result is a plain PAL-DVD-style program stream - `mpeg2video` 720×576
+interlaced (top field first) at 25 fps, `-b:v`/`-maxrate` 6000k, `-bufsize`
+1835008, `-g 15`, `+ilme+ildct`, 4:3, plus `mp2` 48 kHz stereo 192k.
+
+* Files land in `~/Videos/pctv-cap-<timestamp>.mpg` (`--out-dir`,
+  `PCTV_OUT_DIR`, falls back to `/tmp`); bitrate via `--bitrate <kbps>` /
+  `PCTV_MPEG2_BITRATE`.
+* The encoder starts on the **first decoded frame**, not on the key press, so
+  both streams share PTS 0 - otherwise a capture started while the decoder is
+  still hunting carries up to 8 s of extra audio (the lock poll, see below).
+* Both pipes are `poll()`ed and the audio pipe is non-blocking: a slow encoder
+  costs counted frame drops, never a wedged GUI or a stalled USB drain.
+* `ffprobe` reports `field_order=bb` for these files even though the sequence
+  extension carries `top_field_first=1` (read the byte after `00 00 01 B5`);
+  that is a probe quirk - do not "fix" the encoder flags.  `-top 1` is not even
+  accepted as an encoding option in ffmpeg 9.
 
 The card has one composite input (the yellow RCA) and one S-Video connector;
 the other two RCAs are L/R audio.  Composite and S-Video share the same
@@ -117,9 +167,16 @@ Headless checks (no display needed):
 ```sh
 SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor          # prints fps to stderr
 PCTV_SNAP_AFTER=120 SDL_VIDEODRIVER=dummy ./pctv-monitor     # saves one frame, exits
+# 6 s MPEG-2 capture, then exit (the audio meter still updates in the log):
+SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor --audio line --capture --capture-seconds 6
 # or drive the stream directly:
 sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 ```
+
+With **no source playing** the decoder's lock poll (`poll for a real lock`,
+16 × 500 ms in `analog2_bringup`) delays the first data by ~8 s; the monitor
+just shows no picture until then, and captures queued with `--capture` start at
+the first frame.  Settle time after a cold plug is another ~10 s (TRUTH §1).
 
 Notes / current limits:
 
@@ -128,10 +185,13 @@ Notes / current limits:
   which the vendor default leaves on and which pins the picture to grey);
   residual rainbow fringing at chroma edges is the §14 resampling work, not
   yet applied here.
-* **Audio is not implemented.**  The card's analog audio is digitised on-card
-  but the only stream endpoint that ever delivers is `0x82`, and it carries
-  raw BT.656 video; the vendor Windows BDA driver's audio framing (which is
-  what splits audio out of the USB stream) is not decoded yet.  See TRUTH §9.
+* **The card's own audio-over-USB is still undecoded** (TRUTH §9.6): the
+  analog audio is digitised on-card, but the only stream endpoint that ever
+  delivers is `0x82`, and it carries raw BT.656 video; the vendor Windows BDA
+  driver's audio framing is not decoded.  `pctv-monitor` therefore captures the
+  **host's** ALSA input (line-in) for the pigtail's L/R RCAs, with the selectable
+  input and live meter described above - which is also what the MPEG-2 capture
+  muxes.
 * PAL only for now; the parser keys off the BT.656 F/V bits but the output
   geometry is hard-wired to 720×576.
 * The child needs raw USB.  It is launched via `sudo -n`; a udev rule (below)

@@ -382,6 +382,19 @@ On a warm reboot the bridge is already booted; the handoff then finds no
    tried.  The vendor's BDA stream framing (which must split the audio out of
    the capture stream) is the missing piece; nothing in the mainline dib0700
    protocol exposes an audio request.
+9.7 **Decision (2026-10-09): the userspace stack takes audio from the host, not
+   from the card.**  Since `0x82` carries only BT.656 (§9.6), `pctv-monitor`
+   captures the pigtail's L/R RCAs from the host's ALSA input — line-in on this
+   box — and meters them live.  Measured here (ALC889A, codec id `0x10ec0885`):
+   the analogue ADC is `hw:0,0` with `Input Source` index 0 = `Internal Mic /
+   Mic / Line`, its `Capture` spanning -16..+30 dB (47 steps, 0.75 dB each);
+   `Line Boost`/`Mic Boost`/`Internal Mic Boost` give 0/12/18/24 dB; the second
+   ADC (`ALC889A Alt Analog`, `hw:0,2`) mirrors the same three selectors and
+   `hw:0,1` is the S/PDIF receiver.  Two gotchas: `Input Source`/`Capture` are
+   numbered per **ADC**, not per PCM device, and the mixer attaches to the card
+   (`hw:0`), not to `hw:0,0`.  A quiet line source sat at -70 dBFS at +11 dB,
+   so the boost stage is what makes the meter move; nothing clipped at 60 % of
+   the capture range.
 
 ## 10. Tools in this directory
 
@@ -390,7 +403,7 @@ On a warm reboot the bridge is already booted; the handoff then finds no
 | `pctv_probe` (`./pctv_probe` for usage) | userspace libusb tool. Key sub-commands: `ver`, `clock`, `i2cparam`, `gpio`, `scan`, `identify`, `cxr`/`cxw`, `rd2`, `nrd16`/`nwr16`, `grd1`/`gwr1`, `video`, `cap`, `analog2`, `regseq`, `fw`, `eepromdump` (fixed index), `romwin`, `eepromwin`, **`stream`** (bring-up + continuous raw BT.656 to stdout — the userspace driver behind `pctv-monitor`) |
 | `rom-window.sh` | wrapper for `romwin` / `--eeprom` for `eepromwin`; preflight, artifacts, dmesg capture. Read-only to persistent storage |
 | `build.sh` / `build-module.sh` | build the probe / build `pctv320cx.ko` against the running kernel |
-| `pctv-monitor.c` / `build-monitor.sh` | **userspace live monitor GUI (SDL2)** — spawns `pctv_probe stream`, deframes BT.656, displays/snapshots/records. No kernel module |
+| `pctv-monitor.c` / `build-monitor.sh` | **userspace live monitor GUI (SDL2 + ALSA)** — spawns `pctv_probe stream`, deframes BT.656, displays/snapshots, captures **MPEG-2** (720×576 interlaced mpeg2video + MP2 via ffmpeg) with a selectable ALSA audio input and a live dBFS meter (§9.7). No kernel module |
 | `analog-try.sh`, `capture-analog.sh`, `clock-tune.sh` | analog bring-up + capture experiments |
 | `driver/` | the Rust out-of-tree kernel driver (`package.nix` builds it) |
 | `ROM-WINDOW.md` | how to catch ROM/EEPROM windows and interpret them |

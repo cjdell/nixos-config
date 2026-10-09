@@ -1,7 +1,9 @@
 # Userspace PCTV 320cx live stack: `pctv_probe` (libusb driver) +
 # `pctv-monitor` (SDL2 live/capture GUI).  No kernel module involved; the GUI
 # spawns the probe, which does the bridge/decoder bring-up and streams raw
-# BT.656 on stdout.
+# BT.656 on stdout.  The GUI deframes that into UYVY and pipes it to ffmpeg for
+# MPEG-2 capture, and records the audio from ALSA (the card's own audio-over-USB
+# path is still undecoded - see TRUTH.md 9.6).
 #
 #   pkgs.callPackage ./pctv-linux/package.nix { }
 #   pkgs.callPackage ./pctv-linux/package.nix { noSudo = true; }
@@ -9,6 +11,9 @@
 # `noSudo` bakes in PCTV_NO_SUDO=1 so the monitor opens the USB device as the
 # invoking user (needs the udev rule from live-module.nix and no kernel driver
 # bound).  Without it the probe is launched through `sudo -n`.
+#
+# `ffmpeg` is only needed at capture time; it is put on the wrapper's PATH (and
+# in PCTV_FFMPEG) so the GUI finds it without the user installing anything.
 #
 # The decoder/bridge firmware are taken uncompressed from
 # libreelec-dvb-firmware (the variant proven on the hardware); the NixOS
@@ -19,6 +24,8 @@
 , makeWrapper
 , libusb1
 , SDL2
+, alsa-lib
+, ffmpeg
 , libreelec-dvb-firmware
 , noSudo ? false
 }:
@@ -33,14 +40,15 @@ stdenv.mkDerivation {
   };
 
   nativeBuildInputs = [ pkg-config makeWrapper ];
-  buildInputs = [ libusb1 SDL2 ];
+  buildInputs = [ libusb1 SDL2 alsa-lib ];
 
   dontConfigure = true;
 
   buildPhase = ''
     runHook preBuild
     $CC -O2 -Wall -o pctv_probe probe.c $(pkg-config --cflags --libs libusb-1.0)
-    $CC -O2 -Wall -o pctv-monitor pctv-monitor.c $(pkg-config --cflags --libs sdl2)
+    $CC -O2 -Wall -o pctv-monitor pctv-monitor.c \
+      $(pkg-config --cflags --libs sdl2 alsa) -lm -lpthread
     runHook postBuild
   '';
 
@@ -65,6 +73,8 @@ stdenv.mkDerivation {
       --set PCTV_PROBE "$out/bin/pctv_probe" \
       --set PCTV_DECODER_FW "${libreelec-dvb-firmware}/lib/firmware/v4l-cx25840.fw" \
       --set PCTV_BRIDGE_FW "${libreelec-dvb-firmware}/lib/firmware/dvb-usb-dib0700-1.20.fw" \
+      --set PCTV_FFMPEG "${ffmpeg}/bin/ffmpeg" \
+      --prefix PATH : "${lib.makeBinPath [ ffmpeg ]}" \
       ${lib.optionalString noSudo "--set PCTV_NO_SUDO 1"}
 
     runHook postInstall
@@ -74,7 +84,9 @@ stdenv.mkDerivation {
     description = "Userspace live monitor + driver for the Pinnacle PCTV 320cx analog inputs";
     longDescription = ''
       libusb bring-up of the DiB0700 bridge and CX25843 decoder, continuous
-      BT.656 capture, and an SDL2 viewer/snapshot/recorder.  The V4L2
+      BT.656 capture, and an SDL2 viewer that captures MPEG-2 (720x576
+      interlaced mpeg2video + MP2) from the composite/S-Video inputs plus a
+      selectable ALSA audio input with a live level meter.  The V4L2
       kernel-module route is not used.
     '';
     homepage = "https://github.com/cjdell/nixos-config/tree/master/pctv-linux";
