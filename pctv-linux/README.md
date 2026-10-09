@@ -183,10 +183,14 @@ meter and your ears judge the same signal, before committing to a recording.
 * It prefers the capture card's own playback stream (`hw:<card>,<device>`) and
   falls back to the default route.  Direct hardware on purpose: this box's
   PipeWire card profile was `Off`, which silently routes `default` to a **Dummy
-  Output** - the monitor would have looked broken.  (`wpctl status` shows the
-  sink; `wpctl set-profile <card> <n>` picks e.g. *Analog Stereo Output*.  Pick
-  an **output-only** profile, not Duplex: Duplex makes PipeWire grab the capture
-  device that `pctv-monitor` needs exclusively.)
+  Output** - the monitor would have looked broken.  Diagnose with `wpctl status`
+  (sink list) and `pw-dump <card-id>` (profile list), then select one, e.g.
+  `wpctl set-profile 48 3` for *Analog Stereo Output*.  Pick an **output-only**
+  profile, not Duplex: Duplex makes PipeWire grab the capture device that
+  `pctv-monitor` needs exclusively - if that has happened, the panel and the log
+  say `hw:0,0 busy - the audio daemon holds it; use an output-only profile
+  (wpctl set-profile)`.  This profile choice is **not persisted** in the NixOS
+  config yet, so it may need re-selecting after a reboot.
 * If the codec's `Master` is muted or near silent (PipeWire leaves it wherever
   the desktop put it), monitoring raises it to a moderate level and says so, so
   a silent output is never mistaken for a dead input.

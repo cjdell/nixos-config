@@ -507,7 +507,7 @@ static volatile int athr_reopen = 0;
 
 static int   audio_ok = 0;        /* PCM open and streaming */
 static int   audio_rate = 48000;
-static char  audio_err[96];
+static char  audio_err[160];
 static double pk_db[2], rms_db[2], hold_db[2];
 static unsigned clips = 0, xruns = 0;
 static double gain_db = 0, boost_db = 0;
@@ -850,7 +850,18 @@ static int audio_open_pcm(snd_pcm_t **pcm, char *err, size_t n)
     *pcm = NULL;
     if (cur_src == 0) { snprintf(err, n, "no input selected"); return -1; }
     int e = snd_pcm_open(pcm, s->dev, SND_PCM_STREAM_CAPTURE, 0);
-    if (e < 0) { snprintf(err, n, "%s: %s", s->dev, snd_strerror(e)); return e; }
+    if (e < 0) {
+        if (e == -EBUSY)
+            /* The usual cause on a desktop box: PipeWire/WirePlumber picked a
+             * duplex profile and holds the capture stream itself.  Say what to
+             * do instead of showing "Device or resource busy" (full command in
+             * the README). */
+            snprintf(err, n, "%s busy - the audio daemon holds it; use an "
+                             "output-only profile (wpctl set-profile)", s->dev);
+        else
+            snprintf(err, n, "%s: %s", s->dev, snd_strerror(e));
+        return e;
+    }
     int rates[] = { 48000, 44100, 32000 };
     for (unsigned r = 0; r < sizeof rates / sizeof rates[0]; r++) {
         e = snd_pcm_set_params(*pcm, SND_PCM_FORMAT_S16_LE,
@@ -901,18 +912,19 @@ static snd_pcm_t *pcm = NULL;
                 pthread_mutex_unlock(&amtx);
             } else if (m) snd_mixer_close(m);
 
-            char err[96] = "";
+            char err[160] = "";
             int ok = audio_open_pcm(&pcm, err, sizeof err) == 0;
             /* The monitor follows the input: if it was on, re-open it against the
              * new rate/device so the pitch stays right. */
             if (mon_on && !mon) {
-                char merr[96] = "";
+                char merr[160] = "";
                 mon = mon_open(merr, sizeof merr);
                 if (!mon) { mon_on = 0; fprintf(stderr, "pctv-monitor: input monitor lost: %s\n", merr); }
             }
             pthread_mutex_lock(&amtx);
             snprintf(audio_err, sizeof audio_err, "%s", err);
             if (ok) audio_ok = 1;
+            else fprintf(stderr, "pctv-monitor: audio: %s\n", err);   /* once per retry */
             pthread_mutex_unlock(&amtx);
             if (!ok) { usleep(500000); continue; }
         }
@@ -988,7 +1000,7 @@ static snd_pcm_t *pcm = NULL;
                 mon_on = 0;
                 fprintf(stderr, "pctv-monitor: input monitor off\n");
             } else {
-                char merr[96] = "";
+                char merr[160] = "";
                 mon = mon_open(merr, sizeof merr);
                 if (!mon) {
                     mon_on = 0;
@@ -1462,7 +1474,7 @@ static void draw_audio_panel(SDL_Renderer *ren)
     double p0 = pk_db[0], p1 = pk_db[1], r0 = rms_db[0], r1 = rms_db[1];
     double h0 = hold_db[0], h1 = hold_db[1], g = gain_db, bo = boost_db;
     unsigned cl = clips, xr = xruns;
-    char err[96]; snprintf(err, sizeof err, "%s", audio_err);
+    char err[160]; snprintf(err, sizeof err, "%s", audio_err);
     pthread_mutex_unlock(&amtx);
 
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
