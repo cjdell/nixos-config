@@ -913,17 +913,18 @@ static void audio_apply_controls(void)
  *     AGC_DEADBAND_DB of the target it does not move at all, so a settled
  *     source is left completely alone.
  *
- * One fast path exists and it only ever pulls DOWN: if the ADC clipped in this
- * interval, or a block arrived within AGC_CLIP_GUARD_DB of full scale, the gain
- * slews at AGC_EMERG_DBPS toward where THIS peak would sit at the target.  That
- * is damage control for a source measured stepping ~20 dB inside a second, not
- * a way of squeezing the programme; reaching back up is slow again. */
+ * One fast path exists and it only ever pulls DOWN: if the ADC actually clipped
+ * in this interval, the gain slews at AGC_EMERG_DBPS toward where THIS peak
+ * would sit at the target.  That is damage control for a source measured
+ * stepping ~20 dB inside a second, not a way of squeezing the programme;
+ * reaching back up is slow again.  A merely loud peak is NOT an emergency - the
+ * old loop treated everything above -3 dBFS as one, and that is what made it
+ * pump. */
 #define AGC_TARGET_DBFS   (-18.0)
 #define AGC_WINDOW_S        30     /* peak window: "average over ~30 s" */
 #define AGC_RATE_DBPS       0.5    /* how fast the calibration may move */
 #define AGC_EMERG_DBPS      4.0    /* only while the ADC is at/over full scale */
 #define AGC_DEADBAND_DB     0.4
-#define AGC_CLIP_GUARD_DB   3.0
 
 static double agc_win_pk = -99.0;      /* peak since the last tick */
 static double agc_slot_pk = -99.0;     /* peak of the current 1 s slot */
@@ -939,6 +940,30 @@ static void agc_reset(void)
     agc_win_pk = agc_slot_pk = agc_slow_src = -99.0;
     agc_slot = 0; agc_ring_ready = 0; agc_slot_t = agc_last_t = 0;
     agc_acc = 0.0;
+}
+
+/* Trade one step of the coarse input boost for room in the fine Capture
+ * volume, and compensate with the fine stage in the same breath so the TOTAL
+ * gain does not move.  The old code re-seated the fine stage at a fixed
+ * 60 %/40 % of its range, which jumped the gain by tens of dB in one instant -
+ * the one place a slow loop could still make an audible step. */
+static void stage_boost(int dir, double keep_total, double spdb)
+{
+    long blo, bhi;
+    snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
+    if (dir > 0 && boost_val >= bhi) return;
+    if (dir < 0 && boost_val <= blo) return;
+    snd_mixer_selem_set_capture_volume_all(el_boost, boost_val + dir);
+    audio_apply_controls();              /* refresh boost_db / gain_db / cap_val */
+    long v = cap_lo + lround((keep_total - boost_db - cap_db_lo / 100.0) * spdb);
+    if (v > cap_hi) v = cap_hi;
+    if (v < cap_lo) v = cap_lo;
+    snd_mixer_selem_set_capture_volume_all(el_cap, v);
+    audio_apply_controls();
+    agc_acc = 0.0;
+    fprintf(stderr, "pctv-monitor: AGC: staging, boost %s -> total %+.1f dB "
+                    "(capture %+.1f, boost %+.1f)\n",
+            dir > 0 ? "up" : "down", gain_db + boost_db, gain_db, boost_db);
 }
 
 static void agc_tick(double win_pk, unsigned long long clips_now)
@@ -959,7 +984,10 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
     if (dt <= 0.0 || dt > 5.0) dt = 0.05;
     double spdb = (cap_db_hi > cap_db_lo)
         ? (double)(cap_hi - cap_lo) / ((double)(cap_db_hi - cap_db_lo) / 100.0)
-        : 1.0;
+        : 1.0 / 0.75;   /* fallback if the dB query ever fails: this ALC889's
+                         * Capture volume moves 0.75 dB per step.  Measured on
+                         * this box it does report its range - 46 steps over
+                         * 46 dB, so spdb = 1.00 and gain_db is exact. */
 
     if (!agc_ring_ready) {
         for (int i = 0; i < AGC_WINDOW_S; i++) agc_ring[i] = -99.0;
@@ -984,12 +1012,25 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
     last_clips = clips_now;
     double total = gain_db + boost_db;
 
+    /* Seed the window with the first real measurement instead of making the
+     * loop sit out its first slot (and then slew from a reference that is only
+     * one second of programme).  The window fills second by second after this,
+     * so the slew is still driven by the loudest recent peak, not by one block.
+     * The codec's dB query fails on this chip (see spdb above), so "total" is
+     * then a step count, not dB - only trust the seed once the units agree. */
+    if (agc_slow_src <= -90.0 && pk > -90.0 && fabs(total) < 45.0)
+        agc_slow_src = pk - total;
+
     double want;
     if (agc_slow_src <= -75.0) want = total;   /* at/below the codec's own noise:
                                                 * do not hunt a dead input */
     else want = AGC_TARGET_DBFS - agc_slow_src;
 
-    int emerg = clip_delta > 0 || pk > -AGC_CLIP_GUARD_DB;
+    /* The fast path is for the ADC actually being at full scale - a measured
+     * clip - and nothing else.  A near-full-scale peak is not an emergency:
+     * the old loop treated anything above -3 dBFS as one and that is what made
+     * it pump. */
+    int emerg = clip_delta > 0;
     if (emerg) {
         double want_now = AGC_TARGET_DBFS - (pk - total);
         if (want_now < want) want = want_now;  /* the fast path only pulls down */
@@ -1011,51 +1052,27 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
     if (err < -lim) err = -lim;
     if (err == 0.0) return;
 
-    /* Staging: the Capture volume is a much quieter gain stage than the input
-     * boost, so once the fine control has drifted to the bottom of its range,
-     * trade a boost step for headroom in it.  The two limits are far apart
-     * (this fires below 20 % of the range, boost-up only when the fine control
-     * wants to exceed its top), so it cannot oscillate. */
-    if (err > 0.0 && el_boost && cap_val < cap_lo + (cap_hi - cap_lo) / 5) {
-        long blo, bhi;
-        snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
-        if (boost_val > blo) {
-            snd_mixer_selem_set_capture_volume_all(el_boost, boost_val - 1);
-            snd_mixer_selem_set_capture_volume_all(el_cap,
-                                                   cap_lo + (cap_hi - cap_lo) * 60 / 100);
-            audio_apply_controls();
-            agc_acc = 0.0;
-            fprintf(stderr, "pctv-monitor: AGC: staging, boost down -> capture %+.1f dB\n",
-                    gain_db);
-            return;
-        }
+    /* Staging: the Capture volume is the fine stage and the input boost the
+     * coarse one.  When the fine stage runs out of room in the direction the
+     * loop wants to go, trade a boost step for room in it - compensated, so the
+     * total never jumps. */
+    if (el_boost) {
+        if (err < 0.0 && cap_val <= cap_lo)
+            stage_boost(-1, total, spdb);
+        else if (err > 0.0 && cap_val >= cap_hi)
+            stage_boost(+1, total, spdb);
+        else if (err > 0.0 && cap_val < cap_lo + (cap_hi - cap_lo) / 5)
+            stage_boost(-1, total, spdb);
     }
 
     /* Slew, never step: accumulate the dB and apply whole mixer steps only when
-     * they add up, so 0.5 dB/s on a 0.75 dB/step codec moves once every 1.5 s. */
+     * they add up, so 0.5 dB/s on a 1 dB/step codec moves once every 2 s. */
     agc_acc += err;
     long dsteps = lround(agc_acc * spdb);
     if (dsteps == 0) return;
     agc_acc -= (double)dsteps / spdb;
 
     long v = cap_val + dsteps;
-    if (v > cap_hi && el_boost) {                 /* out of headroom: boost up */
-        long blo, bhi;
-        snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
-        if (boost_val < bhi) {
-            snd_mixer_selem_set_capture_volume_all(el_boost, boost_val + 1);
-            v = cap_lo + (cap_hi - cap_lo) * 40 / 100;
-            fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, boost step up\n", pk);
-        } else v = cap_hi;
-    } else if (v < cap_lo && el_boost) {          /* bottomed out: boost down */
-        long blo, bhi;
-        snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
-        if (boost_val > blo) {
-            snd_mixer_selem_set_capture_volume_all(el_boost, boost_val - 1);
-            v = cap_lo + (cap_hi - cap_lo) * 60 / 100;
-            fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, boost step down\n", pk);
-        } else v = cap_lo;
-    }
     if (v > cap_hi) v = cap_hi;
     if (v < cap_lo) v = cap_lo;
     if (v == cap_val) { agc_acc = 0.0; return; }
