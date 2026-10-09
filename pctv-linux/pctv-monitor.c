@@ -115,6 +115,24 @@ static int  field_F = -1, field_lines = 0;
 static int  parity_mask = 0;         /* which field parities are in fuv */
 static int  field_repeat = 0;        /* same parity twice: feed anyway */
 static int  frame_ready = 0;
+/* ---- good-frame gate -----------------------------------------------------
+ * A frame whose two fields do not belong together is far more visible than the
+ * same picture shown twice: a field spliced across a stream hole sits ~19 rows
+ * off, and a frame built from a repeated field has one half 40 ms older than
+ * the other.  So keep the last clean frame and re-show / re-encode it when the
+ * new one is not clean.  Holding costs a repeated frame - and 25 fps is kept,
+ * so the encoder and the audio stay in step - while a glitch costs a frame that
+ * is half someone else's picture.
+ *
+ * `f' toggles it (default on).  If it would hold EVERY frame for two seconds
+ * the source itself never produces a clean one (not 288 active lines, odd
+ * sync), and a frozen display is worse than a comb, so it switches itself off
+ * and says so. */
+static int   gate_on = 1;
+static int   have_good = 0;                  /* good_fb/good_fuv are valid */
+static int   gate_holds = 0;                 /* consecutive frames held */
+static unsigned long long frames_held = 0;
+static unsigned char *good_fb, *good_fuv;    /* the last frame that passed */
 static unsigned long long frames = 0;
 /* Fields committed with fewer than the 288 active lines a PAL field has.  The
  * only way to lose lines is a gap in the byte stream (the probe drops a whole
@@ -388,6 +406,7 @@ static void child_start(int input)
     if (pipe(p) < 0) die("pipe");
     pipe_slack(p[0], 32, "stream");
     parse_reset();
+    have_good = 0;            /* a new input is a new picture: nothing to hold */
     signal(SIGPIPE, SIG_IGN);
 
     child = fork();
@@ -432,10 +451,11 @@ static void field_commit(void)
 {
     if (field_lines <= 0) return;
     int rows = field_lines < 288 ? field_lines : 288;
-    if (field_lines < 288) { fields_short++; anom_note(SDL_GetTicks(), 'S'); }
+    int bad = 0;
+    if (field_lines < 288) { fields_short++; anom_note(SDL_GetTicks(), 'S'); bad = 1; }
     int parity = field_F ? 1 : 0;
     if (parity_mask & (1 << parity)) {
-        field_repeat = 1; fields_repeat++; anom_note(SDL_GetTicks(), 'R');
+        field_repeat = 1; fields_repeat++; anom_note(SDL_GetTicks(), 'R'); bad = 1;
     }
     for (int r = 0; r < rows; r++) {
         int out = 2 * r + parity;
@@ -450,6 +470,28 @@ static void field_commit(void)
         }
     }
     parity_mask |= 1 << parity;
+    if (bad && gate_on && have_good) {
+        /* Not clean: show and encode the last frame that was. */
+        memcpy(fb, good_fb, sizeof fb);
+        memcpy(fuv, good_fuv, UV_SIZE);
+        frames_held++;
+        anom_note(SDL_GetTicks(), 'H');
+        if (++gate_holds >= 50) {
+            gate_on = 0;
+            fprintf(stderr, "pctv-monitor: frame gate held 50 frames in a row - "
+                            "this source has no clean frames, gate off\n");
+        }
+    } else {
+        gate_holds = 0;
+        if (gate_on) {
+            if (!good_fb) { good_fb = malloc(sizeof fb); good_fuv = malloc(UV_SIZE); }
+            if (good_fb && good_fuv) {
+                memcpy(good_fb, fb, sizeof fb);
+                memcpy(good_fuv, fuv, UV_SIZE);
+                have_good = 1;
+            }
+        }
+    }
     frame_ready = 1;
     frames++;
     field_lines = 0;
@@ -472,7 +514,6 @@ static void field_line(const unsigned char *act, int xy)
             field_state = (field_state == 1) ? 2 : 0;
         } else field_commit();
     }
-    if (V) return;                        /* vertical blanking, not picture */
     if (field_lines == 0) field_F = F;
     if (field_lines >= FIELD_MAX) return;
     if (field_state) { field_lines++; return; }  /* unusable: count only */
@@ -1982,6 +2023,13 @@ int main(int argc, char **argv)
                 case SDLK_q: case SDLK_ESCAPE: running = 0; break;
                 case SDLK_SPACE: paused = !paused; show_overlay(2000); break;
                 case SDLK_g: grey = !grey; show_overlay(2000); break;
+                case SDLK_f:
+                    gate_on = !gate_on; gate_holds = 0;
+                    fprintf(stderr, "pctv-monitor: frame gate %s\n",
+                            gate_on ? "on - bad frames are replaced by the last "
+                                    "good one" : "off - every frame is shown");
+                    show_overlay(2000);
+                    break;
                 case SDLK_s: snapshot_ppm(); break;
                 case SDLK_r: rec_toggle(); break;
                 case SDLK_c:
@@ -2107,7 +2155,7 @@ int main(int argc, char **argv)
                          "1/2/Tab video   a audio   A agc   -/+ gain   b boost   m mute");
                 draw_panel(ren, 10, 8 + 7 * 2 + 12, hint, 1);
                 snprintf(hint, sizeof hint,
-                         "c MPEG-2 capture   o monitor   r raw   s snap   g grey   space pause   q quit");
+                         "c MPEG-2 capture   o monitor   r raw   s snap   g grey   f frame gate   space pause   q quit");
                 draw_panel(ren, 10, 8 + 7 * 2 + 12 + 12, hint, 1);
             }
         }
@@ -2115,9 +2163,9 @@ int main(int argc, char **argv)
 
         /* `H' - the key reference, left up until H is pressed again */
         if (help_on) {
-            const char *hl[12];
+            const char *hl[13];
             char h0[200], h1[200], h2[200], h3[200], h4[200], h5[200], h6[200],
-                 h7[200], h8[200], h9[200], h10[200], h11[200];
+                 h7[200], h8[200], h9[200], h10[200], h11[200], h12[200];
             snprintf(h0, sizeof h0, "HELP (press H to close)");
             snprintf(h1, sizeof h1, " 1 / 2 / Tab   video input: Composite, S-Video");
             snprintf(h2, sizeof h2, " a             audio input (cycle)      A  automatic gain");
@@ -2133,9 +2181,14 @@ int main(int argc, char **argv)
             snprintf(h9, sizeof h9, " video: %s  720x576 interlaced 25 fps  %d kbps", INPUT_LABEL[cur_input], mpeg2_kbps);
             snprintf(h10, sizeof h10, " out: %.180s", out_dir);
             snprintf(h11, sizeof h11, " q/ESC quit - Ctrl-C also finalises a capture; H closes this");
+            snprintf(h12, sizeof h12,
+                     " f             frame gate (%s): hold the last good frame instead of "
+                     "showing one that is spliced, short or 40 ms out of step - held %llu/%llu",
+                     gate_on ? "on" : "off", frames_held, frames);
             hl[0] = h0; hl[1] = h1; hl[2] = h2; hl[3] = h3; hl[4] = h4; hl[5] = h5;
             hl[6] = h6; hl[7] = h7; hl[8] = h8; hl[9] = h9; hl[10] = h10; hl[11] = h11;
-            draw_panel_lines(ren, 10, 70, hl, 12, 1);
+            hl[12] = h12;
+            draw_panel_lines(ren, 10, 70, hl, 13, 1);
         }
 
         /* capture status, top right: recording has to be unmistakable - a red
@@ -2211,10 +2264,12 @@ int main(int argc, char **argv)
                 pthread_mutex_lock(&amtx);
                 fprintf(stderr, "monitor: %s | in %llu B rlen %zu | maxgap %lums "
                                 "(%s %lums %s %lums %s %lums) vq %d/%d | "
+                                "held %llu/%llu | "
                                 "audio %s ok=%d L %.1f R %.1f pk %.1f clips %u gain %+.1f dB\n",
                         title, bytes_in, rlen, gap_max,
                         stage_name[0], stage_max[0], stage_name[1], stage_max[1],
                         stage_name[2], stage_max[2], vq_count, VQ_SLOTS,
+                        frames_held, frames,
                         srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
                         hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips, gain_db);
                 pthread_mutex_unlock(&amtx);
@@ -2235,11 +2290,12 @@ int main(int argc, char **argv)
     free(rbuf);
     fprintf(stderr, "pctv-monitor: %llu fields (%llu short = lines lost, "
                     "%llu stale-field feeds, %llu stream gaps, %llu fields "
-                    "dropped), %llu encoded frames, %llu B from the probe\n",
+                    "dropped), %llu encoded frames, %llu held (gate), "
+                    "%llu B from the probe\n",
             frames, fields_short, fields_repeat, fields_gap, fields_dropped,
-            cap_vframes, bytes_in);
+            cap_vframes, frames_held, bytes_in);
     fprintf(stderr, "pctv-monitor: anomalies (S=short field, R=stale field, "
-                    "G=stream gap, D=field dropped): ");
+                    "G=stream gap, D=field dropped, H=frame held): ");
     for (int i = 0; i < nanom; i++) fprintf(stderr, " %c@%lums", anom[i].kind, anom[i].t);
     fprintf(stderr, "\n");
     SDL_DestroyTexture(tex);
