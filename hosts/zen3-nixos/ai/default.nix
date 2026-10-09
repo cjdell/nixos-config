@@ -72,6 +72,12 @@
   };
 
   config = {
+    # The quant this box serves. Both packs are built by hand under
+    # /home/cjdell/Strata/pack and the unit's ConditionPathExists refuses to
+    # start one that is not there, so moving between them is this one line + a
+    # rebuild.  ud-iq4-xs since 2026-10-09 (docs/strata.md "UD-IQ4_XS").
+    ai.strataModel = "ud-iq4-xs";
+
     environment.systemPackages = with pkgs; [
       rocmPackages.rocminfo
       rocmPackages.amdsmi

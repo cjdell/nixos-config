@@ -844,20 +844,24 @@ both run `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41/…`, the pr
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
-`Qwen3.8-Flash-Next-IQ3_S` (GSQ-RCO GGUF, no MTP head). Docs:
+`Qwen3.8-Flash-Next-UD-IQ4_XS` (Unsloth ~4-bit GGUF) since 2026-10-09 19:23 —
+switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
 [`docs/strata.md`](docs/strata.md).
 
-- **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`,
-  default `"iq3s"` = live). `hosts/zen3-nixos/ai/strata.nix` carries
-  `models.iq3s` / `models.ud-iq4-xs` (GGUF + pack paths, `--ple-gguf` only for the
-  2-shard pack, and `--resident-budget-gib 55` for the UD one). The second pack is
+- **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
+  sets `"ud-iq4-xs"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
+  carries `models.iq3s` / `models.ud-iq4-xs` (GGUF + pack paths, `--ple-gguf` only for
+  the 2-shard pack, and `--resident-budget-gib 55` for the UD one). The second pack is
   Unsloth **UD-IQ4_XS** (93.7 GB / 3 shards, fetched by
   `scripts/fetch-strata-udiq4xs.sh`, packed by `scripts/repack-strata-udiq4xs.sh`
   with **`--compat-bf16` required** — its 195 `hc_*` projections are Q8_0, which the
-  AMD build cannot read natively in 0.1.41). Prepared 2026-10-09, **not switched**:
-  it costs +8.6 GiB of resident experts and ~2,000 GPU expert-cache slots (est.
-  33-37 tok/s at 255 K vs 41), while 262144 ctx itself is unaffected. Analysis and
-  the measured quant mix: [`docs/strata.md`](docs/strata.md) "UD-IQ4_XS".
+  AMD build cannot read natively in 0.1.41). **Live since 2026-10-09 19:23**, and it
+  is **~20 % slower at decode than IQ3_S** (48-57 tok/s at 90-93 % expert-cache hits
+  vs 62-68 at 92-97 %, same 66-70 K depth): 10,679 cache slots instead of 13,104, so
+  1.7x the misses at 1.18x the bytes each. Prefill is unchanged (~1,250 tok/s) and
+  262144 ctx is unaffected; RAM is calmer (39 GiB, `MemorySwapPeak` 0). Flip the line
+  back to `"iq3s"` if decode speed matters more than the weights. Analysis, quant mix
+  and measurements: [`docs/strata.md`](docs/strata.md) "UD-IQ4_XS".
 - **A long-context reply can collapse to one repeated token (or a thinking-only
   turn with no answer).** This is the **fp16-overflow #606 class**, not a model
   quality issue: a `q8_1` activation block stores its scale and 32-value sum as

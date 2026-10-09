@@ -1,8 +1,10 @@
-# Strata on zen3-nixos (Qwen3.8-Flash-Next IQ3_S)
+# Strata on zen3-nixos (Qwen3.8-Flash-Next)
 
-Status: **live on IQ3_S** (2026-10-06, up from IQ3_XXS). Strata
-(`github.com/Niko1221/Strata`) is the engine that runs the ~84 GB GSQ-RCO
-model on the 32 GiB R9700 that llama.cpp could only do at ~6.5 tok/s. It
+Status: **live on UD-IQ4_XS** since 2026-10-09 19:23 (IQ3_S from 2026-10-06,
+IQ3_XXS before that). `ai.strataModel` switches pack in one line, and IQ3_S is the
+faster of the two (~20 % on decode) — see "UD-IQ4_XS" below. Strata
+(`github.com/Niko1221/Strata`) is the engine that runs the ~84-94 GB Qwen3.8-Flash-Next
+on the 32 GiB R9700 that llama.cpp could only do at ~6.5 tok/s. It
 replaces llama-swap on this box (see "Why llama-swap is off" below). This doc
 records the install (which is half hand-prepared outside Nix), the config, and
 the measured context / memory ceilings that were the point of the exercise.
@@ -148,12 +150,14 @@ to us, read off the tree:
   57-token prompt decoded at 47.9 tok/s with 6/6 drafts accepted. No
   `verify: non-finite logits` fire on the first requests.
 
-## UD-IQ4_XS (prepared 2026-10-09, NOT switched)
+## UD-IQ4_XS (live since 2026-10-09 19:23)
 
-Unsloth's ~4-bit **UD-IQ4_XS** is the one rung above IQ3_S this box can run.
-Everything is in place — shards fetched and hash-verified, pack built, config
-switch added — and `config.ai.strataModel` stays `"iq3s"`, so the live service
-is untouched until someone flips it.
+Unsloth's ~4-bit **UD-IQ4_XS** is the one rung above IQ3_S this box can run, and
+`ai.strataModel = "ud-iq4-xs"` has served it since **2026-10-09 19:23:07**
+(`ExecStart` → `--config /nix/store/n53b8vynrljmpbv3ajfcq3sx1rmdmd3l-strata-ud-iq4-xs.json`,
+model id `qwen3.8-flash-next-ud-iq4-xs`). It is **slower than IQ3_S** — see
+"Measured" below — so `"iq3s"` is the fallback if decode speed matters more than
+the weights.
 
 **Files**: `scripts/fetch-strata-udiq4xs.sh` (three shards at the revision
 `setup.py` pins, sizes + SHA-256 from `UNSLOTH_IQ4_XS_SHARDS`),
@@ -198,13 +202,29 @@ That is **+8.6 GiB** over the IQ3_S engine's 46.84 GiB of resident experts
 (~24 GiB of `available` left). Without the flag the engine sizes its own arena
 for all 55.4 GiB and the box OOMs.
 
-**What it costs**: the 24.87 GiB GPU expert cache holds ~11,000 of its experts
-instead of 13,104 (avg blob 2.421 MB vs 2.046 MB), so 44.9 % of the 24,576 slots
-instead of 53.1 %. Estimated from the live hit rates (91.0 % at 113 K depth,
+**What it costs** (predicted): the 24.87 GiB GPU expert cache holds ~11,000 of its
+experts instead of 13,104 (avg blob 2.421 MB vs 2.046 MB), so 44.9 % of the 24,576
+slots instead of 53.1 %. Estimated from the live hit rates (91.0 % at 113 K depth,
 97 % short) and upstream's cold arm at 255 K: **~33-37 tok/s at 255 K** (vs 41),
 55-70 short-context, prefill −5-10 %. `--max-context 262144` itself is
 unaffected — the int8 KV is 13,728 B/token (13 cells × 1056 B) and
 quant-independent, so `--kv-resident 32768` still costs 0.42 GiB of VRAM.
+
+**Measured after the switch** (2026-10-09 19:23-19:30, real agent traffic at
+66-70 K-token prompts): expert cache **10,679 experts / 24.08 GiB** — the
+prediction was ~11,000, so the slot math was right. `ready` in 22 s, VRAM
+32,370/32,624 MB, `MemoryCurrent` 39 GiB with **`MemorySwapPeak` 0** (the IQ3_S
+unit had peaked at 5.3 GiB of swap), and no `FITS`/`DOES NOT FIT` line is printed
+by `strata-server` at all — the "filling the GPU's expert cache (N experts, X GiB
+of VRAM)" line is the plan you have to read. Decode **48-57 tok/s (52-56 once the cache is warm) at 90-93 %
+hits (+4.4-7.0 % of routed experts over PCIe)**, against 62-68 tok/s at 92-97 %
+for IQ3_S at the same depth: **~20 % slower**, worse than the 55-70 short-context
+estimate. The hit rate is nearly unchanged, so the loss is per-miss cost — 1.7×
+as many misses (3.8 % vs 2.2 % of routed activations) and each one 18 % bigger —
+plus IQ4_NL/IQ3_S dequant. Prefill is fine: 62,546 tokens in 50 s = **~1,250
+tok/s**, at or above IQ3_S. A short cold request is the worst case (60 tokens at
+41.6 tok/s, 86.2 % hit). No `verify: non-finite logits`, no degenerate reply, and
+the first sanity generation was coherent.
 
 **The pack** (`scripts/repack-strata-udiq4xs.sh`, 2026-10-09 19:03, 1.4 GB in
 `/home/cjdell/Strata/pack/ud-iq4-xs`): `index.txt` 1079 tensors / 303 served
@@ -223,10 +243,9 @@ engine's `serverPython` has numpy + psutil only, so `python3.withPackages
 [ numpy pyyaml regex ]` from the flake's nixpkgs pin is used instead — the iq3s
 script had the same latent break and is fixed the same way.
 
-**Before switching**, dry-run the VRAM plan: the engine prints `FITS` or
-`*** DOES NOT FIT ***` (`device_main.cpp:91`) for its expert-cache/arena plan,
-so a run that would spill is visible in the first seconds of
-`journalctl -u strata`.
+**Switching back** is one line (`ai.strataModel = "iq3s"`) + `nixos-rebuild
+switch`; both packs stay on disk, and the unit's `ConditionPathExists` still
+protects a pack that is not built.
 
 ## 0.1.41 (2026-10-09)
 
