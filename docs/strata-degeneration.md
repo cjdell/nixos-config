@@ -432,6 +432,37 @@ near-miss for us is #1357 (`mtp.cpp`: the native top-10 router is now gated on
 `g.n_expert == 512 && K == 10`) — our pack matches, so the MTP path is unchanged.
 Details in [`strata.md`](./strata.md).
 
+## Update 2026-10-09: 0.1.40.3 → 0.1.41, one clamp handed back, two still ours
+
+Re-checked against the `v0.1.41` tree (`fb58e0d0`, built
+`/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41`; live engine is still
+0.1.40.3 until the next switch). 105 files differ, and this time two of them are
+patched files — `verify.cpp` and `iq_kernels.cu` — but the guard diff still applies
+with `--fuzz=0` and **offsets only** (`verify.cpp` +35/+43, `iq_kernels.cu`
++72/+80; `sampler.cu` and all three headers byte-identical), landing in the same
+`Verifier::run`/`record_window` and `native_expert_grouped` bodies.
+
+- **Upstream #1448 clamped our clamp (1).** `iq_kernels.cu` `s26_swiglu_q8_1_kernel`
+  (2323-2330) now uses `q8_1_finite/q8_1_quant/q8_1_ds` exactly as our `postPatch`
+  block wrote it, so that block is deleted from `strata-package.nix` (its
+  `--replace-fail` targets no longer exist). #1448 also clamped
+  `verify_kernels.cu gdn_q8_1_store` and `fused_gr.cu gr_q8_tail` — the two
+  `STRATA_QFUSE` sites we deliberately left, which closes that "re-visit if
+  STRATA_QFUSE is turned on" note.
+- **The int8 KV sites are still unclamped upstream, still ours:** `kv_q8.cu:55`
+  (decode) and `kv_append_kernel`, `src/prefill/kernels.cu:1691` (prompt; moved from
+  1340). Both live because we run `--kv int8`.
+- **Nothing touched the #879 suspects.** `native_expert_grouped`'s `launch_gu` /
+  `launch_down` bodies changed only inside `#if STRATA_EXP_LAYOUTS`, which is 0 for a
+  gfx1201 HIP build, and `verify.cpp` changed only for the opt-in
+  `STRATA_ROUTE_RESIDENT`. #879 is still open (last update 2026-10-09). The guard and
+  the two remaining clamps stay.
+- **New watchdog layers, neither a fix for our fires:** the engine's #29 watchdog now
+  allows up to `STRATA_WATCHDOG_IO_S` (default 10× 60 s) while the file tier is still
+  being read (#1407), and the server ends/restarts an engine silent for
+  `STRATA_ENGINE_STALL_S` (90 s) with no CPU/disk/GPU activity (#1317; needs psutil,
+  which our derivation bundles). Full notes in [`strata.md`](./strata.md).
+
 ## Still open
 
 - **Retry #879 on 0.1.40.1 — in progress.** Switched 2026-10-06 14:39 BST: the live

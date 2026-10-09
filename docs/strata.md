@@ -37,12 +37,12 @@ When IQ3_S is trusted, reclaim the old files with
 shard 2 is a hardlink, so unlinking it frees nothing). It refuses unless the
 engine is live and serving IQ3_S, and defaults to a dry run.
 
-Upstream pinned: **v0.1.40.3**, rev `d5ea7133741e67743c0e886bb426c0ce8d69cf6c`
-(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-08 from v0.1.40.2
-(`e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a`). It builds its own ggml from a
+Upstream pinned: **v0.1.41**, rev `fb58e0dbc8399662c0e47c76578c6e878b14f6cf`
+(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-09 from v0.1.40.3
+(`d5ea7133741e67743c0e886bb426c0ce8d69cf6c`). It builds its own ggml from a
 pinned llama.cpp (`3cf03257f219afbe7334045ff7c6a06ac68c627d`) — **unchanged by
-0.1.40 and 0.1.40.2** (`setup.py:165 LLAMA_CPP_COMMIT`), so `strata-package.nix`'s
-`llama` fetch stays as it is.
+0.1.40, 0.1.40.2, 0.1.40.3 and 0.1.41** (`setup.py:166 LLAMA_CPP_COMMIT`), so
+`strata-package.nix`'s `llama` fetch stays as it is.
 
 ## 0.1.40 / 0.1.40.1 (updated 2026-10-06)
 
@@ -144,6 +144,66 @@ to us, read off the tree:
   cache 13,104 experts / 24.87 GiB, `ready` in 26 s, `/v1/models` 200, and a
   57-token prompt decoded at 47.9 tok/s with 6/6 drafts accepted. No
   `verify: non-finite logits` fire on the first requests.
+
+## 0.1.41 (2026-10-09)
+
+Pinned `fb58e0d0` (v0.1.41), built
+`/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41` (HIP/gfx1201,
+build phase 1 min 19 s). 105 files differ from 0.1.40.3. **Not switched on the
+live service yet** — see Deploy at the bottom.
+
+What changed for us (read off the two trees, not the changelog):
+
+- **#1448 takes over one of our clamps.** "q8_1 scale overflow at the three
+  remaining emit sites is clamped like the others": upstream now clamps the S26
+  fused swiglu+q8_1 store (`iq_kernels.cu:2323-2330`), `verify_kernels.cu`
+  `gdn_q8_1_store` and `fused_gr.cu gr_q8_tail` with
+  `q8_1_finite/q8_1_quant/q8_1_ds` — byte-for-byte what our `postPatch` clamp (1)
+  wrote, and the same fix for the two `STRATA_QFUSE` sites we had deliberately
+  left alone. **Clamp (1) is therefore deleted from `strata-package.nix`**: its
+  `--replace-fail` targets are gone from the file and it would break the build.
+  The only `q8_1` `ds` store in 0.1.41 not going through `q8_1_ds` is
+  `native_mmvq.cu:1985`, which writes a fixed synthetic scale
+  (`0.001 + r*1e-9`), not an `amax`-derived one — no overflow risk.
+- **The two int8 KV clamps are still ours.** #1448 did not touch them:
+  `kv_q8.cu:55` (decode append) and `kv_append_kernel` in
+  `src/prefill/kernels.cu:1691` (prompt append; it moved from 1340) still write
+  `amax / 127` to fp16 unclamped. We run `--kv int8`, so clamps (2) and (3) stay.
+- **`strata-nan-guard.diff` applies with `--fuzz=0` and offsets only** — verified
+  against the fetched source: `verify.cpp` hunks +35/+43 lines, `iq_kernels.cu`
+  +72/+80, and `sampler.cu` plus all three headers (`verify.hpp`,
+  `iq_kernels.hpp`, `sampler.hpp`) byte-identical to 0.1.40.3. The hunks still
+  land in `Verifier::run`/`record_window` and inside `native_expert_grouped`.
+  `verify.cpp`'s only real change is the opt-in `STRATA_ROUTE_RESIDENT` plumbing
+  (off by default, changes answers); the rest of `iq_kernels.cu` is the AMD
+  expert-layout rework behind `STRATA_EXP_LAYOUTS`, which is **0 for a gfx1201 HIP
+  build** (`#if defined(STRATA_HIP_GFX906) || !defined(__HIPCC__)`), so the expert
+  path we run is unchanged and `exp_mode()` does not even exist here.
+- **#879 is still open** (last update 2026-10-09, 6 comments) and no 0.1.41 change
+  references it or the routed-expert data path, so the guard stays needed.
+- **Hang/watchdog news** (relevant to `docs/strata-hang.md`, not a claimed fix):
+  the #29 engine watchdog now tolerates up to `STRATA_WATCHDOG_IO_S` (default 10×
+  the 60 s limit) of silence while the file tier is still being read (#1407), and
+  `serve/server.py` now ends and restarts an engine silent for
+  `STRATA_ENGINE_STALL_S` (90 s) that also uses no CPU, no disk and an idle GPU
+  (#1317) — that one needs `psutil`, which `serverPython` in this derivation
+  already bundles. Our hangs say "waiting for the GPU (attention, router)", so the
+  IO allowance only removes a false-positive class.
+- **Speed: nothing for this card.** Upstream's own table says "1x Radeon AI PRO
+  R9700, Linux, Q2_0: equal" for prompt and decode. The two changed defaults are
+  multi-GPU (`--batch-groups auto`) and NVIDIA-only (`STRATA_PREFILL_CPU_SHARE`,
+  scoped in the notes to "one NVIDIA GPU without `--batch` slots; layer splits,
+  batch and AMD are as before"), so there is nothing to pin back on a single
+  gfx1201 card and no reason to set `STRATA_PREFILL_CPU_SHARE=0`. `serve/server.py`
+  also raises the listen backlog to 256 (`STRATA_HTTP_BACKLOG`) and caps request
+  bodies at 256 MiB (`STRATA_MAX_BODY_MIB`) — our 450 KB agent prompts are far
+  under it.
+
+Verified in the built package: the binary prints `engine=0.1.41`, carries
+`verify: non-finite logits` and the audit lines (`strata verify: kernel-stage
+audit: first non-finite in %s of layer %d…`, the HIT/MISS row dumps), and the
+installed `serve/server.py` has both `server error: ` prefixes at 4991/4999 (the
+same two `installPhase` targets, both still verbatim in the upstream file).
 
 ## 0.1.40.3 (2026-10-08)
 

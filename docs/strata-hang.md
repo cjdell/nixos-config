@@ -170,6 +170,17 @@ So: a core dump here tells you *that* it aborted, which the journal line already
   because the output bits change (last-place rounding)". Since the stall is in **prompt
   attention**, this swaps in a different kernel — worth a try, with the bit-change caveat (and it
   interacts with the finiteness guard work in `strata-degeneration.md`).
+- **0.1.41 (pinned 2026-10-09, not yet live) adds two watchdog layers, neither a fix
+  for our shape.** The #29 engine watchdog now tolerates up to `STRATA_WATCHDOG_IO_S`
+  (default 10× the 60 s limit) of silence *while the file tier is still being read*
+  (#1407) — ours say `waiting for the GPU (attention, router)`, not `reading experts`,
+  so this only removes a slow-storage false-positive class. And `serve/server.py` now
+  ends + restarts an engine silent for `STRATA_ENGINE_STALL_S` (90 s) that also uses no
+  CPU time, no disk bytes and an idle GPU (#1317); it needs `psutil`, which
+  `serverPython` in `strata-package.nix` already bundles, so it is live the moment we
+  switch. `stall_report` also prints more (`batch_groups` counters, `#1341`
+  `CUDA_LAUNCH_BLOCKING` warning). No change to the abort itself, and `LimitCORE = 0`
+  still keeps the dumps off.
 
 ## 6. State of the config
 

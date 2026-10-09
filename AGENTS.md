@@ -837,9 +837,11 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.1.40.3** (`d5ea7133741e67743c0e886bb426c0ce8d69cf6c`, updated 2026-10-08 from
-0.1.40.2 `e8ca9afd`; **live since 2026-10-08 20:49:51** — `ExecStart` and the engine
-both run `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…`):
+**0.1.41** (`fb58e0dbc8399662c0e47c76578c6e878b14f6cf`, updated 2026-10-09 from
+0.1.40.3 `d5ea7133`; built as `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41`,
+**not yet switched** — the live engine is still 0.1.40.3, `ExecStart` and the engine
+both running `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…` since
+2026-10-08 20:49:51):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -853,9 +855,13 @@ both run `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…`):
   `inf * 0 = NaN` in the dot product (`ggml-org/llama.cpp#23606` is the same).
   The int8 KV cache has the same shape (a 64-value group's `amax/127` as fp16).
   **0.1.40 fixed upstream the two fused-SwiGLU sites our 0.1.39 build clamped
-  itself**, so those two `postPatch` clamps are gone; what is left is the int8 KV
-  scale (`kv_q8.cu:55`, `prefill/kernels.cu:1340` — still unclamped upstream, still
-  live here) plus the opt-in S26 swiglu kernel (`iq_kernels.cu`, latent on gfx1201).
+  itself**, and **0.1.41's #1448 clamped the remaining three emit sites** — incl. the
+  opt-in S26 swiglu kernel (`iq_kernels.cu` `s26_swiglu_q8_1_kernel`, our clamp (1),
+  now byte-identical upstream, so that `postPatch` block is gone) and the two
+  `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
+  `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
+  the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
+  `prefill/kernels.cu:1691` (was 1340) — both live here because we run `--kv int8`.
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
 - **The recurring strata "core dumps" are not crashes — they are the engine's hang
@@ -875,9 +881,12 @@ both run `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…`):
   `verify: non-finite logits` instead of emitting the degenerate token, and dumps
   per-stage layer/row/col/raw bits (`STRATA_KERNEL_AUDIT=1`). It was re-based onto
   0.1.40.2 on 2026-10-07 (3 hunks drifted: 2 in `verify.cpp`, 1 in `sampler.cu`) and is
-  regenerated to apply with `--fuzz=0`; it still applies to 0.1.40.3 with `--fuzz=0`
-  unchanged (`verify.cpp`, `sampler.cu`, `iq_kernels.cu` and `serve/server.py` are
-  byte-identical between those two tags). **Never re-apply it with fuzz** — `--fuzz=3`
+  regenerated to apply with `--fuzz=0`; it still applies to 0.1.41 with `--fuzz=0` and
+  **offsets only** (`verify.cpp` +35/+43, `iq_kernels.cu` +72/+80; `sampler.cu` and all
+  three headers byte-identical to 0.1.40.3), the hunks still landing in
+  `Verifier::run`/`record_window` and inside `native_expert_grouped`. **#879 is still
+  open upstream** and nothing in 0.1.41 touches that path, so the guard stays needed.
+  **Never re-apply it with fuzz** — `--fuzz=3`
   "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
   inside the PLE `try` block.
 - **Two incidents, two sites.** Incident 1 (`!` ×256, ~156K context) was fixed

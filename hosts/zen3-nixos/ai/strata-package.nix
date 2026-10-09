@@ -47,43 +47,56 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.1.40.3";
+  version = "0.1.41";
 
-  # v0.1.40.3 (2026-10-07).  NOTE: upstream rewrote this repo's history on
+  # v0.1.41 (2026-10-08).  NOTE: upstream rewrote this repo's history on
   # 2026-10-06 (the 0.1.40.1 release notes say so), so any pin older than that has
   # no common ancestor with main and GitHub's compare API cannot diff them - diff
   # two trees instead.  The old tag v0.1.39 is also not 6f32ec0 (it is a1641e9f).
   #
-  # 0.1.40.2 -> 0.1.40.3 touches nothing we patch (diff the two trees: 28 files,
-  # of which the ones that matter here are):
-  #   * src/core/mtp.cpp - #1357: native_router_top10 is now guarded by
-  #     `g.n_expert == 512 && K == 10` and falls back to the generic router_top10
-  #     otherwise (the native kernel reads 512 floats a row).  Our model IS
-  #     512-expert / top-10, so the native path stays and nothing changes for us;
-  #     it is a correctness fix for other packs.
-  #   * src/program/generate.cpp - a HIP/Linux diagnostic when no device is
-  #     visible and /dev/kfd is not openable (missing render/video group), and the
-  #     #1376 WDDM auto-reserve floor, which is `#if defined(_WIN32)` and so does
-  #     not apply to this Linux build.
-  #   * tools/strata_tokenizer.py - #1385: `_bpe` caches `self.ranks.get` in a
-  #     local after one interpreter saw `self` arrive as an int ('int' object has
-  #     no attribute 'ranks').  Worth having: we run this on CPython 3.14.7.
-  #   * serve/web/app.js - #1392: a turn with no answer text (reasoning only, or a
-  #     stop before the first content token) is sent back as an assistant turn with
-  #     reasoning_content, so the web UI's history keeps alternating.  Relevant to
-  #     the thinking-only turns seen in the #879 incidents.
-  #   * setup.py / tools/hip/* / sycl/* / docs - Windows packaging, Intel Arc and
-  #     setup menus; not on this build path.
-  # `serve/server.py`, `src/core/verify.cpp`, `src/kernels/cuda/sampler.cu`,
-  # `src/kernels/cuda/iq_kernels.cu`, `src/kernels/cuda/kv_q8.cu` and
-  # `src/prefill/kernels.cu` are byte-identical to 0.1.40.2, so `patches`, the
-  # postPatch clamps and the installPhase rewrites all still apply unchanged.
+  # 0.1.40.3 -> 0.1.41 (105 changed files; the ones that matter for this build):
+  #   * src/kernels/cuda/iq_kernels.cu - #1448 clamps the S26 fused swiglu+q8_1 store
+  #     (s26_swiglu_q8_1_kernel, ~line 2323) with q8_1_finite/q8_1_quant/q8_1_ds -
+  #     byte-for-byte what our postPatch clamp (1) did - so that clamp is GONE here:
+  #     its --replace-fail targets no longer exist and it would break the build.
+  #     #1448's other two sites are verify_kernels.cu gdn_q8_1_store and fused_gr.cu
+  #     gr_q8_tail, both behind STRATA_QFUSE (off on gfx1201) - the two we had
+  #     deliberately left unclamped, now upstream's problem, not ours.
+  #     The rest of that file is the AMD expert-layout rework behind
+  #     `STRATA_EXP_LAYOUTS`, which is 0 for a gfx1201 HIP build (the guard is
+  #     `#if defined(STRATA_HIP_GFX906) || !defined(__HIPCC__)`), so the expert path
+  #     we actually run is unchanged; exp_mode() only exists where that is 1.
+  #   * src/core/verify.cpp - only the opt-in STRATA_ROUTE_RESIDENT plumbing
+  #     (default off, and it changes answers).  `patches` still applies with
+  #     --fuzz=0: verify.cpp hunks at +35/+43 lines, iq_kernels.cu at +72/+80,
+  #     sampler.cu and all three headers byte-identical to 0.1.40.3.
+  #   * src/kernels/cuda/kv_q8.cu and src/prefill/kernels.cu are NOT touched by
+  #     #1448: kv_q8.cu:55 and kv_append_kernel (prefill/kernels.cu:1691, was 1340)
+  #     are still unclamped, so clamps (2) and (3) stay - the int8 KV sites #606
+  #     never covered and the ones our 132,947-token incident was fixed by.
+  #   * serve/server.py - both installPhase rewrite targets are still there verbatim
+  #     (lines 4991 and 4999).  New: #1317/#1407 end and restart an engine that is
+  #     silent for STRATA_ENGINE_STALL_S (default 90 s) while using no CPU, no disk
+  #     and an idle GPU - it needs psutil, which serverPython already bundles.
+  #   * src/program/generate.cpp - the #29 hang watchdog now tolerates up to
+  #     STRATA_WATCHDOG_IO_S (default 10x the 60 s limit) of silence while the file
+  #     tier is still being read (#1407).  Our hangs say "waiting for the GPU
+  #     (attention, router)", so this does not claim to fix docs/strata-hang.md, but
+  #     it removes one false-positive class.
+  #   * Speed: upstream's own table says "1x Radeon AI PRO R9700, Linux, Q2_0:
+  #     equal" for prompt and decode.  The two changed defaults are multi-GPU
+  #     (`--batch-groups auto`) and NVIDIA-only (`STRATA_PREFILL_CPU_SHARE`, which
+  #     the notes scope to "one NVIDIA GPU without --batch slots; layer splits,
+  #     batch and AMD are as before"), so nothing is to pin back on a single gfx1201
+  #     card and there is no reason to set STRATA_PREFILL_CPU_SHARE=0.
+  #   * #879 (the routed-expert garbage our guard exists for) is still OPEN upstream
+  #     and no 0.1.41 change references it, so `patches` stays relevant.
   # The ggml pin is unchanged too (setup.py:166 LLAMA_CPP_COMMIT = 3cf03257...).
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "d5ea7133741e67743c0e886bb426c0ce8d69cf6c";
-    hash = "sha256-DWjDxgvIkwNDGyl+bN/UOoAtPtKtveVQVTcNaOVvTOk=";
+    rev = "fb58e0dbc8399662c0e47c76578c6e878b14f6cf";
+    hash = "sha256-WhoIwg8GgeG3jAXYLSjNoZyN3RZ3T3JhgJX57fM80eE=";
   };
 
   nativeBuildInputs = [
@@ -124,9 +137,12 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Local HIP port of the upstream #879 finiteness instrumentation + guard
   # (gist 66419118nnn/7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact
-  # pin e8ca9afd (v0.1.40.2) on 2026-10-07; it still applies to d5ea7133
-  # (v0.1.40.3) with --fuzz=0 unchanged, because verify.cpp, sampler.cu and
-  # iq_kernels.cu did not move between them.  3 hunks had drifted back then: 2 in
+  # pin e8ca9afd (v0.1.40.2) on 2026-10-07; it still applies to fb58e0d0
+  # (v0.1.41) with --fuzz=0 and offsets only (checked against the fetched source:
+  # verify.cpp +35/+43, iq_kernels.cu +72/+80, sampler.cu and the three headers
+  # unchanged), and the hunks still land in Verifier::run/record_window and inside
+  # native_expert_grouped - the #879 suspect site is untouched upstream.  3 hunks
+  # had drifted back then: 2 in
   # verify.cpp (the window-inputs comment is now two lines, and a new
   # `if (inputs_pending)` join block sits between q8_attn and `stamp(l, 1, grp)`),
   # and the sampler.cu hunk, whose `coupled_check("coupled_draft merge")` anchor is
@@ -156,25 +172,26 @@ stdenv.mkDerivation (finalAttrs: {
   # degeneracy the guard in serve/server.py exists to end (upstream #606;
   # ggml-org/llama.cpp#23606 is the same defect).
   #
-  # STATUS ON 0.1.40.3 (checked against the tree, not the changelog; the three sites
-  # below are byte-identical to 0.1.40.2, where the same check was first done): the two
-  # sites our 0.1.39 build clamped itself are FIXED UPSTREAM in 0.1.40 ("the fused SwiGLU
-  # q8_1 quantizers keep their scale finite") - native_mmvq.cu
-  # native_swiglu_quantize_q8_1_kernel (line 172) and the iq_kernels.cu fused gate/up
-  # block store (line 3342) both use q8_1_finite/q8_1_quant/q8_1_ds now.  Those two
-  # clamps are therefore GONE here: their target strings no longer exist and
-  # --replace-fail would break the build.  What is still unclamped upstream:
+  # STATUS ON 0.1.41 (checked against the tree, not the changelog): upstream #1448
+  # ("q8_1 scale overflow at the three remaining emit sites is clamped like the
+  # others") landed in 0.1.41 and took over one of ours.  The three sites our 0.1.39
+  # build clamped itself are all fixed upstream now - native_mmvq.cu
+  # native_swiglu_quantize_q8_1_kernel (0.1.40), the iq_kernels.cu fused gate/up block
+  # store (0.1.40), and the S26 fused swiglu+q8_1 kernel (iq_kernels.cu
+  # s26_swiglu_q8_1_kernel, ~line 2323) which was ours until now and uses
+  # q8_1_finite/q8_1_quant/q8_1_ds exactly as we wrote it.  That clamp is therefore
+  # GONE here: its target strings no longer exist and --replace-fail would break the
+  # build.  What is still unclamped upstream, and still ours:
   #   * the int8 KV cache block scale, decode (kv_q8.cu:55) and prompt
-  #     (prefill/kernels.cu:1340) - never covered by #606, and the site our
-  #     incident-2 132,947-token prompt was fixed by.  Still ours, still live.
-  #   * the new S26 fused swiglu+q8_1 kernel (iq_kernels.cu s26_swiglu_q8_1_kernel,
-  #     ~line 2312) - latent for us: it is behind STRATA_EXPERT_V2, which 0.1.40
-  #     turns on by default ONLY on gfx1151 (src/core/arch_defaults.cpp), not on our
-  #     gfx1201.  Clamped for the same reason the old gfx906-only site was.
-  # Deliberately NOT clamped (same class, also opt-in and off on gfx1201, and the
-  # clamp family is not what closes #879): fused_gr.cu gr_q8_tail (~line 198) and
-  # verify_kernels.cu gdn_q8_1_store (~line 184), both behind STRATA_QFUSE (qcnt_ is
-  # only allocated under g_qfuse()).  Re-visit if STRATA_QFUSE is ever turned on.
+  #     (kv_append_kernel, prefill/kernels.cu:1691 - it moved from 1340) - never
+  #     covered by #606 nor by #1448, and the site our incident-2 132,947-token
+  #     prompt was fixed by.  Still live: we run --kv int8.
+  # #1448 also clamped the two sites we had deliberately left alone - fused_gr.cu
+  # gr_q8_tail and verify_kernels.cu gdn_q8_1_store, both behind STRATA_QFUSE (off on
+  # gfx1201) - so that "re-visit if STRATA_QFUSE is ever turned on" note is closed:
+  # upstream owns those clamps now.  The only q8_1 ds store left that does not go
+  # through q8_1_ds in 0.1.41 is native_mmvq.cu:1985, which writes a fixed synthetic
+  # scale (0.001 + r*1e-9), not an amax-derived one, so it cannot overflow.
   #
   # Clamp each to the largest finite half with the same q8_1_finite/q8_1_quant/
   # q8_1_ds helpers the fixed siblings use (or this file's hf_sat). A block that was
@@ -182,15 +199,9 @@ stdenv.mkDerivation (finalAttrs: {
   # to 65504 anyway, and a finite block's |x / d| is at most 127 -- and a NaN stays
   # NaN, so STRATA_DBG_NAN still finds it.
   postPatch = ''
-    # (1) the S26 fused swiglu + q8_1 kernel (opt-in STRATA_EXPERT_V2; latent on
-    # gfx1201).  The only q8_1 activation store left unclamped in this file.
-    substituteInPlace src/kernels/cuda/iq_kernels.cu \
-      --replace-fail 'const float d = amax / 127.0f;' \
-                     'const float d = q8_1_finite(amax / 127.0f);   // #606 (S26 swiglu): keep the block scale finite' \
-      --replace-fail 'const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);' \
-                     'const int8_t q = q8_1_quant(xi, d, amax);' \
-      --replace-fail 'if (iqs == 0) y[ib].ds = make_half2(d, sum);' \
-                     'if (iqs == 0) y[ib].ds = q8_1_ds(d, sum);'
+    # (1) was the S26 fused swiglu + q8_1 kernel clamp.  Upstream #1448 shipped the
+    # identical clamp in 0.1.41, so it is dropped here - do not add it back, the
+    # --replace-fail targets are gone from the file.
 
     # (2) the int8 KV cache block scale (--kv int8): a 64-value group's
     # amax / 127 is stored fp16, so it saturates to inf past amax = 8.3M and the
