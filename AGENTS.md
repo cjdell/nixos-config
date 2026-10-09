@@ -838,10 +838,9 @@ reads corresponds to something reviewable.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
 **0.1.41** (`fb58e0dbc8399662c0e47c76578c6e878b14f6cf`, updated 2026-10-09 from
-0.1.40.3 `d5ea7133`; built as `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41`,
-**not yet switched** — the live engine is still 0.1.40.3, `ExecStart` and the engine
-both running `/nix/store/mcvch76h0ab3icsxxvrns58cz76qc21x-strata-0.1.40.3/…` since
-2026-10-08 20:49:51):
+0.1.40.3 `d5ea7133`; **live since 2026-10-09 17:23:48** — `ExecStart` and the engine
+both run `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41/…`, the previous
+0.1.40.3 build having run since 2026-10-08 20:49:51):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model

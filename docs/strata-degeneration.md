@@ -435,8 +435,8 @@ Details in [`strata.md`](./strata.md).
 ## Update 2026-10-09: 0.1.40.3 → 0.1.41, one clamp handed back, two still ours
 
 Re-checked against the `v0.1.41` tree (`fb58e0d0`, built
-`/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41`; live engine is still
-0.1.40.3 until the next switch). 105 files differ, and this time two of them are
+`/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41`; **live since 2026-10-09
+17:23:48**, no guard fire on the first turns). 105 files differ, and this time two of them are
 patched files — `verify.cpp` and `iq_kernels.cu` — but the guard diff still applies
 with `--fuzz=0` and **offsets only** (`verify.cpp` +35/+43, `iq_kernels.cu`
 +72/+80; `sampler.cu` and all three headers byte-identical), landing in the same

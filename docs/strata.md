@@ -149,8 +149,13 @@ to us, read off the tree:
 
 Pinned `fb58e0d0` (v0.1.41), built
 `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41` (HIP/gfx1201,
-build phase 1 min 19 s). 105 files differ from 0.1.40.3. **Not switched on the
-live service yet** — see Deploy at the bottom.
+build phase 1 min 19 s). 105 files differ from 0.1.40.3. **Live since 2026-10-09
+17:23:48** — `ExecStart` is `…-strata-0.1.41/bin/strata-server` and the engine child
+(`pid 239959`) reads back to the same store path; experts loaded 46.84 GiB at
+4.40 GiB/s (16 s), GPU expert cache 13,104 experts / 24.87 GiB, `ready` in 15 s, and
+the first turns decoded at 66-68 tok/s with 92-97 % expert-cache hits (0.1.40.3 was
+65 tok/s, so "equal" as upstream's table claims). No `verify: non-finite logits` and
+no `no progress for` line since the switch.
 
 What changed for us (read off the two trees, not the changelog):
 
