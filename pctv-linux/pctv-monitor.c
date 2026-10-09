@@ -817,11 +817,13 @@ static snd_pcm_t *mon_open(char *err, size_t n)
 {
     char hwdev[64];
     snprintf(hwdev, sizeof hwdev, "%s", srcs[cur_src].dev);
-    /* Prefer the capture card's own playback stream: a direct monitor path that
-     * works whatever the desktop audio daemon is doing (this box's PipeWire card
-     * profile was "Off", which silently routes "default" to a Dummy Output).
-     * If something else holds the output, fall back to the default route. */
-    const char *cands[3] = { hwdev, "default", NULL };
+    /* Sound server first: it follows whatever the desktop is routed to
+     * (speakers, headphones, Bluetooth) and coexists with everything else.  The
+     * card profile that makes "default" a real sink is pinned declaratively by
+     * live-module.nix; with it off, "default" is a Dummy Output, which is why
+     * this order used to be hw-first.  Raw hardware stays as the fallback for a
+     * machine with no sound server at all. */
+    const char *cands[3] = { "default", hwdev, NULL };
     snd_pcm_t *m = NULL;
     err[0] = 0;
     for (int q = 0; q < 2 && !m; q++) {
@@ -844,35 +846,68 @@ static snd_pcm_t *mon_open(char *err, size_t n)
 }
 
 /* Open the PCM for the current source; returns 0 on success. */
+/* Which PCM route the capture stream actually got ("default" = the desktop
+ * sound server's ALSA plugin, "hw:x,y" = raw).  Shown in the panel and logged,
+ * because "which audio path am I on" must never be a guess. */
+static char audio_route[64] = "";
+
+/* Streams go through the desktop sound server when there is one: on this system
+ * ALSA's "default" is PipeWire's plugin, so capture and monitoring coexist with
+ * everything else instead of taking the hardware exclusively - which is what
+ * made the raw-hw path unreliable in both directions (EBUSY when the daemon had
+ * a duplex profile, a Dummy sink when it had none).  The codec *controls* stay
+ * on the card's control device (controlC0): it is multi-client, and it is the
+ * only way to reach `Input Source` and the `* Boost` elements, which the AGC
+ * needs and the sound server does not expose. */
 static int audio_open_pcm(snd_pcm_t **pcm, char *err, size_t n)
 {
     const struct asrc *s = &srcs[cur_src];
     *pcm = NULL;
+    audio_route[0] = 0;
     if (cur_src == 0) { snprintf(err, n, "no input selected"); return -1; }
-    int e = snd_pcm_open(pcm, s->dev, SND_PCM_STREAM_CAPTURE, 0);
+
+    const char *forced = getenv("PCTV_ALSA_DEV");
+    const char *cands[3]; int nc = 0;
+    if (forced && *forced) cands[nc++] = forced;
+    else { cands[nc++] = "default"; cands[nc++] = s->dev; }   /* server, then raw */
+
+    /* Every candidate is tried completely - open AND hw params.  The sound
+     * server's ALSA plugin opens happily even when the card profile has no
+     * input and only fails at set_params ("Unable to install hw params"), so
+     * stopping at the first open failure is what made audio disappear with no
+     * way back.  Raw hw is the fallback for exactly that case: when the daemon
+     * has no source it is also not holding the stream. */
+    int rates[] = { 48000, 44100, 32000 };
+    int e = -1, ep = -1;
+    char last[128] = "";
+    for (int q = 0; q < nc; q++) {
+        e = snd_pcm_open(pcm, cands[q], SND_PCM_STREAM_CAPTURE, 0);
+        if (e < 0) {
+            snprintf(last, sizeof last, "%s: %s", cands[q], snd_strerror(e));
+            continue;
+        }
+        for (unsigned r = 0; r < sizeof rates / sizeof rates[0]; r++) {
+            ep = snd_pcm_set_params(*pcm, SND_PCM_FORMAT_S16_LE,
+                                    SND_PCM_ACCESS_RW_INTERLEAVED, 2, rates[r],
+                                    1 /* allow format/rate change */, 20000);
+            if (ep >= 0) { audio_rate = rates[r]; break; }
+        }
+        if (ep >= 0) {
+            snprintf(audio_route, sizeof audio_route, "%s", cands[q]);
+            e = 0;
+            break;
+        }
+        snprintf(last, sizeof last, "%s: params: %s", cands[q], snd_strerror(ep));
+        snd_pcm_close(*pcm);
+        *pcm = NULL;
+    }
     if (e < 0) {
         if (e == -EBUSY)
-            /* The usual cause on a desktop box: PipeWire/WirePlumber picked a
-             * duplex profile and holds the capture stream itself.  Say what to
-             * do instead of showing "Device or resource busy" (full command in
-             * the README). */
             snprintf(err, n, "%s busy - the audio daemon holds it; use an "
                              "output-only profile (wpctl set-profile)", s->dev);
         else
-            snprintf(err, n, "%s: %s", s->dev, snd_strerror(e));
-        return e;
-    }
-    int rates[] = { 48000, 44100, 32000 };
-    for (unsigned r = 0; r < sizeof rates / sizeof rates[0]; r++) {
-        e = snd_pcm_set_params(*pcm, SND_PCM_FORMAT_S16_LE,
-                               SND_PCM_ACCESS_RW_INTERLEAVED, 2, rates[r],
-                               1 /* soft resample */, 20000);
-        if (e >= 0) { audio_rate = rates[r]; break; }
-    }
-    if (e < 0) {
-        snprintf(err, n, "params: %s", snd_strerror(e));
-        snd_pcm_close(*pcm);
-        *pcm = NULL;
+            snprintf(err, n, "%s", last);
+        audio_route[0] = 0;
         return e;
     }
     return 0;
@@ -923,8 +958,11 @@ static snd_pcm_t *pcm = NULL;
             }
             pthread_mutex_lock(&amtx);
             snprintf(audio_err, sizeof audio_err, "%s", err);
-            if (ok) audio_ok = 1;
-            else fprintf(stderr, "pctv-monitor: audio: %s\n", err);   /* once per retry */
+            if (ok) {
+                audio_ok = 1;
+                fprintf(stderr, "pctv-monitor: audio %s via %s (%d Hz)\n",
+                        srcs[cur_src].label, audio_route[0] ? audio_route : "?", audio_rate);
+            } else fprintf(stderr, "pctv-monitor: audio: %s\n", err);   /* once per retry */
             pthread_mutex_unlock(&amtx);
             if (!ok) { usleep(500000); continue; }
         }
@@ -1482,9 +1520,13 @@ static void draw_audio_panel(SDL_Renderer *ren)
     SDL_Rect bg = { x - 6, y - 16, w + 110, 104 };
     SDL_RenderFillRect(ren, &bg);
 
-    char t[200];
-    snprintf(t, sizeof t, "AUDIO: %s%s", srcs[cur_src].label,
-             cur_src == 0 ? "   (press a to select)" : "");
+    char t[240];
+    /* Name the route too: "default" means the stream is going through the
+     * desktop sound server, "hw:x,y" means raw - the difference explains most
+     * "there is no audio" reports. */
+    snprintf(t, sizeof t, "AUDIO: %s%s%s", srcs[cur_src].label,
+             audio_route[0] ? " via " : "",
+             audio_route[0] ? audio_route : (cur_src == 0 ? "   (press a to select)" : ""));
     SDL_SetRenderDrawColor(ren, 235, 235, 235, 255);
     draw_text(ren, x, y - 12, 1, t);
 

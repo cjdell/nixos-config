@@ -411,6 +411,28 @@ On a warm reboot the bridge is already booted; the handoff then finds no
    `* Boost` only at its limits (it is the noisier stage), with the staging
    walked back towards `Capture` whenever the fine control drops below 20 % of
    its range.
+9.9 **Audio streams go through the sound server; the card profile is declared
+   in NixOS (2026-10-09).**  Opening the raw `hw:x,y` capture exclusively fought
+   PipeWire in both directions: `EBUSY` when the daemon had a profile with an
+   input, and a silent Dummy-Output sink when it had none.  Capture and
+   monitoring now open ALSA `default` (PipeWire's plugin, confirmed as
+   `alsa_capture.pctv-monitor` / `alsa_playback.pctv-monitor` in `pw-dump`) with
+   raw hw as an automatic fallback, and every candidate is tried through
+   **open and set_params** - the plugin opens happily with no input available
+   and only fails at `set_params`, which is what made audio vanish with no way
+   back.  The codec **controls** stay on the card's control device (`controlC0`,
+   multi-client): `Input Source` and `* Boost` are not exposed by the sound
+   server at all and the AGC needs them.  WirePlumber 0.5 chooses a profile in
+   the order client-requested → **stored** in `~/.local/state/wireplumber/
+   default-profile` → `device.profile.priority.rules` → its own guess, and this
+   box had stored `off` (seen in a debug run: `Found stored profile 'off'`), so
+   a priority rule alone does nothing; `live-module.nix` pins
+   `output:analog-stereo+input:analog-stereo` **and** sets
+   `device.restore-profile = false` - the audio profile is declared, not chosen
+   at runtime.  Verified after a wireplumber restart with only the generated
+   fragment present: real sink + real source, capture and monitor both through
+   PipeWire, desktop playback working at the same time, AGC still moving the
+   codec (26 gain changes in 16 s), 403 frames / 0 drops.
 
 ## 10. Tools in this directory
 

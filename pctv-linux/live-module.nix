@@ -14,7 +14,12 @@
 # bridge is warm and the frontend has registered, leaving interface 0 free for
 # libusb.  Set `noSudo = true` to let a normal user (group `video`) open the
 # card; otherwise the GUI invokes the probe through `sudo -n`.
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.hardware.pctv320cxLive;
@@ -25,7 +30,10 @@ let
     desktopName = "PCTV 320cx Live";
     exec = "pctv-monitor";
     comment = "Live view of the Pinnacle PCTV 320cx composite / S-Video inputs";
-    categories = [ "AudioVideo" "Video" ];
+    categories = [
+      "AudioVideo"
+      "Video"
+    ];
     terminal = false;
   };
 
@@ -83,6 +91,22 @@ in
         to the device.
       '';
     };
+
+    audioProfile = lib.mkOption {
+      type = lib.types.str;
+      default = "output:analog-stereo+input:analog-stereo";
+      example = "output:analog-stereo";
+      description = ''
+        WirePlumber profile to prefer on every ALSA sound card, so the audio
+        path `pctv-monitor` needs exists without anyone touching the desktop
+        audio menu.  The monitor captures and plays back through the sound
+        server (ALSA `default` is PipeWire's plugin), which needs a profile
+        with **both** a sink and a source: with the profile off the sink is a
+        Dummy Output (no monitoring, no desktop sound), and with an output-only
+        profile there is no source (no capture).  Set to `""` to leave
+        WirePlumber's own choice alone.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -96,7 +120,39 @@ in
     # The audio is metered live (pctv-linux/README.md); the card's own
     # audio-over-USB path is still undecoded, so the L/R RCAs have to land on a
     # host input (line-in on this box).
-    environment.systemPackages = [ pctvLive desktopItem pkgs.alsa-utils ];
+    environment.systemPackages = [
+      pctvLive
+      desktopItem
+      pkgs.alsa-utils
+    ];
+
+    # Make the audio path survive reboots and desktop fiddling.  WirePlumber
+    # 0.5 picks a profile in this order: one a client is asking for, then the
+    # one *stored* in ~/.local/state/wireplumber/default-profile (whatever the
+    # desktop audio menu last chose), then the preference from
+    # device.profile.priority.rules, then its own best guess.  `priorities` is a
+    # JSON *string* - find-preferred-profile.lua parses it with Json.Raw.
+    #
+    # The stored profile outranks the preference, and on this box it had stored
+    # `off` (left by a `wpctl set-profile` experiment), which is how the machine
+    # ended up with a Dummy Output, no source and no desktop sound at all.  So
+    # the state is not restored either: on this host the audio profile is
+    # declared in NixOS, not chosen at runtime.  (Verified from a debug run:
+    # `Found stored profile 'off'` beat the priority rule until
+    # `device.restore-profile = false` was set.)
+    services.pipewire.wireplumber.extraConfig.pctv320cx-audio = lib.mkIf (cfg.audioProfile != "") {
+      "wireplumber.settings" = { "device.restore-profile" = false; };
+      "device.profile.priority.rules" = [
+        {
+          matches = [ { "device.name" = "alsa_card.*"; } ];
+          actions.update-props.priorities = builtins.toJSON [
+            cfg.audioProfile
+            "input:analog-stereo+output:analog-stereo"
+            "output:analog-stereo"
+          ];
+        }
+      ];
+    };
 
     # `dvb_usb_dib0700` must be the FIRST downloader after a cold power-up
     # (TRUTH.md §2.1); the handoff unit loads it once the firmware path is

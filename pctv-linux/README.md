@@ -137,8 +137,9 @@ invisible on a picture.
   `Capture` control (-16..+30 dB, 0.75 dB/step on the ALC889A), `b` cycles the
   per-input `* Boost` (0/12/18/24 dB), `--gain <0-100>` sets a percentage of
   the hardware range at startup.
-* ALSA is opened exclusively; if something else holds the device the panel
-  shows the ALSA error instead of pretending there is silence.
+* The stream goes through the sound server (see "Audio path" below), so it
+  coexists with the desktop's own audio; if no route can be opened at all the
+  panel shows the reason rather than pretending there is silence.
 
 ### Automatic gain control (`A`, on by default)
 
@@ -171,6 +172,34 @@ describe the same signal.
   input, line 2 = `<gain%> <boost step> <agc>`), so the next launch comes back
   where you left it - including AGC off, if that is where you left it.
 
+### Audio path: the sound server, not raw hardware
+
+Capture and monitoring both go through the **desktop sound server** (ALSA
+`default`, which on this system is PipeWire's plugin), with raw `hw:x,y` as an
+automatic fallback.  That is what makes it reliable: an exclusive raw capture
+fought the daemon in both directions - `EBUSY` when PipeWire had a profile with
+an input, silence when it had none - and the panel could not tell you which.
+The panel and the log now name the route (`AUDIO: Line via default`), and every
+candidate is tried completely (open **and** hw params), because the plugin opens
+happily even with no input available and only fails at `set_params`.
+
+The card profile that makes this work is **pinned in NixOS** by this module
+(`hardware.pctv320cxLive.audioProfile`, default
+`output:analog-stereo+input:analog-stereo`): a profile with both a sink and a
+source.  WirePlumber 0.5 would otherwise restore whatever the desktop menu last
+chose - this box had stored `off`, which produced a Dummy Output, no source and
+no desktop sound, and outranked every preference rule (seen in a debug run as
+`Found stored profile 'off'`).  So the module also sets
+`device.restore-profile = false`: on this host the audio profile is declared,
+not chosen at runtime.  Set `audioProfile = ""` to leave WirePlumber alone.
+
+The **codec controls** are still driven directly through the card's control
+device (`controlC0`): it is multi-client, and `Input Source` and the `* Boost`
+elements are not exposed by the sound server at all - the AGC needs them.
+
+Override the route for experiments with `PCTV_ALSA_DEV=hw:1,0` (or
+`--alsa-dev`).
+
 ### Input monitoring (`o`) - hear the gain before you record
 
 `o` plays back, on the host's output, **exactly the samples the capture would
@@ -180,17 +209,11 @@ meter and your ears judge the same signal, before committing to a recording.
 * Toggled with `o` (or `--monitor` at launch).  The output stream is opened only
   while monitoring is on and closed again, so the desktop's audio is not held
   the rest of the time.
-* It prefers the capture card's own playback stream (`hw:<card>,<device>`) and
-  falls back to the default route.  Direct hardware on purpose: this box's
-  PipeWire card profile was `Off`, which silently routes `default` to a **Dummy
-  Output** - the monitor would have looked broken.  Diagnose with `wpctl status`
-  (sink list) and `pw-dump <card-id>` (profile list), then select one, e.g.
-  `wpctl set-profile 48 3` for *Analog Stereo Output*.  Pick an **output-only**
-  profile, not Duplex: Duplex makes PipeWire grab the capture device that
-  `pctv-monitor` needs exclusively - if that has happened, the panel and the log
-  say `hw:0,0 busy - the audio daemon holds it; use an output-only profile
-  (wpctl set-profile)`.  This profile choice is **not persisted** in the NixOS
-  config yet, so it may need re-selecting after a reboot.
+* It goes through the sound server (`default`) and falls back to the card's own
+  playback stream.  With the profile pinned by the module, `default` is always a
+  real sink, so monitoring follows whatever the desktop is routed to - speakers,
+  headphones, Bluetooth.  (It used to be hw-first precisely because an unpinned
+  profile made `default` a Dummy Output; that is now fixed declaratively.)
 * If the codec's `Master` is muted or near silent (PipeWire leaves it wherever
   the desktop put it), monitoring raises it to a moderate level and says so, so
   a silent output is never mistaken for a dead input.
