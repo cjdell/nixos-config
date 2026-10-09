@@ -223,6 +223,42 @@ static int cfg_read(const char *leaf, char *buf, size_t n)
     return 1;
 }
 
+/* The "audio" config file: line 1 = input label, line 2 = "<gain%> <boost step>".
+ * The staging is remembered because the right capture gain for a given wiring is
+ * a property of the wiring, not of the session - on this box the line-in needs
+ * the codec's whole +30 dB to land a normal program in the metered range, and
+ * without this every launch starts 46 dB too quiet. */
+static void cfg_write_audio(const char *label, int gain_pct, int boost_step, int agc)
+{
+    const char *d = cfg_dir();
+    if (!*d) return;
+    mkdir(d, 0700);
+    char p[4096];
+    snprintf(p, sizeof p, "%s/%s", d, "audio");
+    FILE *f = fopen(p, "w");
+    if (f) { fprintf(f, "%s\n%d %d %d\n", label, gain_pct, boost_step, agc); fclose(f); }
+}
+
+static int cfg_read_audio(char *buf, size_t n, int *gain_pct, int *boost_step,
+                          int *agc)
+{
+    const char *d = cfg_dir();
+    *gain_pct = *boost_step = *agc = -1;
+    if (!*d) return 0;
+    char p[4096];
+    snprintf(p, sizeof p, "%s/%s", d, "audio");
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    int ok = fgets(buf, (int)n, f) != NULL;
+    char second[64] = "";
+    if (ok) fgets(second, sizeof second, f);
+    fclose(f);
+    if (!ok) return 0;
+    char *nl = strchr(buf, '\n'); if (nl) *nl = 0;
+    if (second[0]) sscanf(second, "%d %d %d", gain_pct, boost_step, agc);
+    return 1;
+}
+
 static void pick_out_dir(void)
 {
     const char *e = getenv("PCTV_OUT_DIR");
@@ -248,15 +284,17 @@ static void usage(const char *p)
         "  --alsa-dev <dev>    force an ALSA capture device, e.g. hw:0,0\n"
         "  --gain <0-100>      capture gain as %% of the hardware range\n"
         "  --boost <0-3>       input boost step (Line/Mic/Internal Mic Boost)\n"
+        "  --agc/--no-agc      automatic gain control (default on): keeps the\n"
+        "                      peaks near -18 dBFS by driving the codec\n"
         "  --out-dir <dir>     where captures go (default ~/Videos, else /tmp)\n"
         "  --bitrate <kbps>    MPEG-2 video bitrate (default 6000)\n"
         "  --ffmpeg <path>     ffmpeg binary (default PCTV_FFMPEG or 'ffmpeg')\n"
         "  --capture           start an MPEG-2 capture immediately\n"
         "  --capture-seconds N stop after N seconds and exit (headless test)\n"
         "\n"
-        "  keys: 1/2 or Tab video input | a audio input | -/+ gain | b boost |\n"
-        "        m mute | c MPEG-2 capture | r raw BT.656 | s snapshot |\n"
-        "        g grey | space pause display | q/ESC quit\n", p);
+        "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
+        "        -/+ gain | b boost | m mute | c MPEG-2 capture | r raw BT.656 |\n"
+        "        s snapshot | g grey | space pause display | q/ESC quit\n", p);
 }
 
 /* ------------------------------------------------------------------ child */
@@ -439,9 +477,20 @@ static pthread_mutex_t amtx = PTHREAD_MUTEX_INITIALIZER;
 static snd_mixer_t *mixer;
 static snd_mixer_elem_t *el_cap, *el_boost;
 static long cap_lo = 0, cap_hi = 0, cap_val = 0, boost_val = 0;
+static long cap_db_lo = 0, cap_db_hi = 0;      /* Capture range in 0.01 dB units */
+/* What the codec is actually at, as a percentage of each control's range
+ * (boost as a 0..3 step).  Read back from the hardware by
+ * audio_apply_controls() and remembered in the config file, so a relaunch
+ * comes up at the staging that works on this wiring. */
+static int cur_gain_pct = -1, cur_boost_step = -1;
 static int cap_muted = 0;
 static int pend_gain_pct = -1, pend_gain_step = 0, pend_boost_cycle = 0,
-           pend_boost_step = -1, pend_mute_toggle = 0;
+           pend_boost_step = -1, pend_mute_toggle = 0, pend_agc_toggle = 0,
+           pend_manual = 0;
+/* Automatic gain control: on by default, toggled with `A' (shift+a) or
+ * --agc/--no-agc, and remembered in the config file.  Any manual gain key
+ * turns it off - the user's hand wins. */
+static int agc_on = 1;
 
 static pthread_t athr;
 static int athr_started = 0;
@@ -601,11 +650,19 @@ static void audio_apply_controls(void)
             snd_mixer_selem_get_capture_switch(el_cap, SND_MIXER_SCHN_FRONT_LEFT, &sw);
         cap_muted = !sw;
         long lo, hi, d;
-        if (snd_mixer_selem_get_capture_dB_range(el_cap, &lo, &hi) >= 0 &&
-            snd_mixer_selem_get_capture_dB(el_cap, SND_MIXER_SCHN_FRONT_LEFT, &d) >= 0)
-            gain_db = d / 100.0;
-        else if (cap_hi > cap_lo)
+        cap_db_lo = cap_db_hi = 0;
+        int have_db = 0;
+        if (snd_mixer_selem_get_capture_dB_range(el_cap, &lo, &hi) >= 0) {
+            cap_db_lo = lo; cap_db_hi = hi;
+            if (snd_mixer_selem_get_capture_dB(el_cap, SND_MIXER_SCHN_FRONT_LEFT, &d) >= 0) {
+                gain_db = d / 100.0;
+                have_db = 1;
+            }
+        }
+        if (!have_db && cap_hi > cap_lo)
             gain_db = (cap_val - cap_lo) * 0.75;   /* ALC889: 0.75 dB per step */
+        cur_gain_pct = cap_hi > cap_lo
+                     ? (int)((cap_val - cap_lo) * 100 / (cap_hi - cap_lo)) : -1;
     }
     char bn[64];
     snprintf(bn, sizeof bn, "%s Boost", s->item);
@@ -613,10 +670,136 @@ static void audio_apply_controls(void)
     if (el_boost) {
         snd_mixer_selem_get_capture_volume(el_boost, SND_MIXER_SCHN_FRONT_LEFT, &boost_val);
         long lo, hi, d;
+        if (snd_mixer_selem_get_capture_volume_range(el_boost, &lo, &hi) >= 0 && hi > lo)
+            cur_boost_step = (int)(((boost_val - lo) * 3 + (hi - lo) / 2) / (hi - lo));
         if (snd_mixer_selem_get_capture_dB_range(el_boost, &lo, &hi) >= 0 &&
             snd_mixer_selem_get_capture_dB(el_boost, SND_MIXER_SCHN_FRONT_LEFT, &d) >= 0)
             boost_db = d / 100.0;
     }
+}
+
+/* Automatic gain control.  Drives the codec's Capture volume - and, when that
+ * runs out of headroom or bottoms out, the coarser input boost - so the
+ * program's peaks sit in the metered -12..-3 dBFS zone.  The gain is applied
+ * in the hardware, never as a software multiply, so the meter and the recorded
+ * file always agree.  Called from the audio thread with amtx held; it consumes
+ * the peak of the window it is handed.  The source level on this wiring moved
+ * by ~20 dB between two captures an hour apart, which is the whole argument
+ * for having this. */
+static double agc_win_pk = -99.0;
+
+/* Where the AGC tries to keep the peaks.  -18 dBFS, not the top of the meter's
+ * -12..-3 zone: this source has been measured swinging ~20 dB by itself inside
+ * a second, and a feedback loop (no lookahead) can only follow, not predict -
+ * the headroom is what keeps those steps out of the ADC.  A capture at -18 dBFS
+ * peaks still has 6 dB of clean room for ffmpeg/volume normalisation later. */
+#define AGC_TARGET_DBFS (-18.0)
+
+static void agc_tick(double win_pk, unsigned long long clips_now)
+{
+    static unsigned long long last_clips;
+    static unsigned long last_move, last_eval;
+    unsigned long t = SDL_GetTicks();
+    double pk = agc_win_pk > win_pk ? agc_win_pk : win_pk;
+    agc_win_pk = -99.0;
+
+    if (!el_cap || cap_hi <= cap_lo) { last_clips = clips_now; return; }
+    double spdb = (cap_db_hi > cap_db_lo)
+        ? (double)(cap_hi - cap_lo) / ((double)(cap_db_hi - cap_db_lo) / 100.0)
+        : 1.0;
+
+    long clip_delta = (long)(clips_now - last_clips);
+    last_clips = clips_now;
+
+    /* Two loops: a violent attack (8 dB, up to ~16 times a second) for anything
+     * near or over full scale, and a gentle proportional steady state.  The
+     * source has been measured moving 30 dB by itself inside a minute, so the
+     * target sits well under the meter's -12..-3 manual zone - headroom is what
+     * keeps its steps out of the ADC. */
+    double want;
+    if (clip_delta > 0 || pk > -3.0) {
+        /* Attack: either the ADC is already over, or this block came in within
+         * 3 dB of it.  Waiting for actual clipping is 3 dB too late - the
+         * source has been measured stepping up ~20 dB in a second, and at
+         * 8 dB per 60 ms the loop needs ~150 ms to catch a step, which is
+         * exactly the window in which it clips. */
+        if (t - last_move < 60) return;
+        want = -8.0;
+    } else {
+        if (t - last_eval < 250) return;
+        static double prev_pk = -99.0;
+        double rise = pk - prev_pk;
+        prev_pk = pk;
+        if (pk <= -75.0) want = 0.0;             /* at/below the codec's own noise:
+                                                 * do not hunt a dead input */
+        else if (rise > 10.0 && pk > -25.0) {
+            want = -6.0;                         /* the source just stepped up by
+                                                  * more than the loop could have
+                                                  * caused: get under it before it
+                                                  * reaches the ADC ceiling */
+        } else {
+            /* Proportional to the distance from the target, so a source that
+             * arrives 35 dB down converges in a couple of seconds instead of a
+             * minute.  The big steps are only taken while there is real room to
+             * spare: within 30 dB of the target the approach is gentle, because
+             * raising gain fast is how you clip the next transient. */
+            double deficit = AGC_TARGET_DBFS - pk;  /* +ve = need more gain */
+            if (deficit > 5.0)      want = (pk < -30.0) ? +6.0 : +2.0;
+            else if (deficit > 1.0) want = +2.0;
+            else if (deficit > -3.0) want = 0.0;  /* dead band: no pumping */
+            else if (deficit > -8.0) want = -2.0;
+            else                    want = -6.0;
+        }
+    }
+    last_eval = t;
+
+    /* Staging: the Capture volume is a much quieter gain stage than the input
+     * boost, so once the fine control has drifted to the bottom of its range,
+     * trade a boost step for headroom in it.  The two limits are far apart
+     * (this fires below 20 % of the range, boost-up only when the fine control
+     * wants to exceed its top), so it cannot oscillate. */
+    if (want >= 0.0 && el_boost && cap_val < cap_lo + (cap_hi - cap_lo) / 5) {
+        long blo, bhi;
+        snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
+        if (boost_val > blo) {
+            snd_mixer_selem_set_capture_volume_all(el_boost, boost_val - 1);
+            snd_mixer_selem_set_capture_volume_all(el_cap,
+                                                   cap_lo + (cap_hi - cap_lo) * 60 / 100);
+            audio_apply_controls();
+            last_move = t;
+            fprintf(stderr, "pctv-monitor: AGC: staging, boost down -> capture %+.1f dB\n",
+                    gain_db);
+            return;
+        }
+    }
+    if (want == 0.0) return;
+    last_move = t;
+
+    long v = cap_val + lround(want * spdb);
+
+    if (v > cap_hi && el_boost) {                 /* out of headroom: boost up */
+        long blo, bhi;
+        snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
+        if (boost_val < bhi) {
+            snd_mixer_selem_set_capture_volume_all(el_boost, boost_val + 1);
+            v = cap_lo + (cap_hi - cap_lo) * 40 / 100;
+            fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, boost step up\n", pk);
+        } else v = cap_hi;
+    } else if (v < cap_lo && el_boost) {          /* bottomed out: boost down */
+        long blo, bhi;
+        snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
+        if (boost_val > blo) {
+            snd_mixer_selem_set_capture_volume_all(el_boost, boost_val - 1);
+            v = cap_lo + (cap_hi - cap_lo) * 60 / 100;
+            fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, boost step down\n", pk);
+        } else v = cap_lo;
+    }
+    if (v == cap_val) return;
+    snd_mixer_selem_set_capture_volume_all(el_cap, v);
+    snd_mixer_selem_set_capture_switch_all(el_cap, 1);
+    audio_apply_controls();
+    fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS -> capture %+.1f dB\n",
+            pk, gain_db);
 }
 
 /* Open the PCM for the current source; returns 0 on success. */
@@ -687,6 +870,18 @@ static void *audio_thread(void *arg)
 
         /* apply gain / boost / mute requests posted by the UI thread */
         pthread_mutex_lock(&amtx);
+        if (pend_agc_toggle) {
+            agc_on = !agc_on;
+            agc_win_pk = -99.0;
+            fprintf(stderr, "pctv-monitor: automatic gain control %s\n",
+                    agc_on ? "on" : "off");
+            pend_agc_toggle = 0;
+        }
+        if (pend_manual && agc_on) {
+            agc_on = 0;
+            fprintf(stderr, "pctv-monitor: AGC off (manual gain)\n");
+        }
+        pend_manual = 0;
         if (pend_gain_pct >= 0 && el_cap) {
             long v = cap_lo + (cap_hi - cap_lo) * pend_gain_pct / 100;
             snd_mixer_selem_set_capture_volume_all(el_cap, v);
@@ -768,6 +963,12 @@ static void *audio_thread(void *arg)
         pk_db[0] = dbfs(p0); pk_db[1] = dbfs(p1);
         rms_db[0] = dbfs(sqrt(s0 / r)); rms_db[1] = dbfs(sqrt(s1 / r));
         if (cl) clips += cl;
+        /* AGC: accumulate the peak of the current window and let the controller
+         * act twice a second; it consumes the window when it does. */
+        double wpk = pk_db[0] > pk_db[1] ? pk_db[0] : pk_db[1];
+        if (wpk > agc_win_pk) agc_win_pk = wpk;
+        if (agc_on && !cap_muted) agc_tick(agc_win_pk, clips);
+        else agc_win_pk = -99.0;
         pthread_mutex_unlock(&amtx);
 
         cap_feed_audio(buf, (size_t)r * 2 * sizeof(short));
@@ -1073,7 +1274,7 @@ static void draw_audio_panel(SDL_Renderer *ren)
     int y = H - 96;
 
     pthread_mutex_lock(&amtx);
-    int ok = audio_ok, rate = audio_rate, muted = cap_muted;
+    int ok = audio_ok, rate = audio_rate, muted = cap_muted, agc = agc_on;
     double p0 = pk_db[0], p1 = pk_db[1], r0 = rms_db[0], r1 = rms_db[1];
     double h0 = hold_db[0], h1 = hold_db[1], g = gain_db, bo = boost_db;
     unsigned cl = clips, xr = xruns;
@@ -1108,18 +1309,26 @@ static void draw_audio_panel(SDL_Renderer *ren)
     draw_text(ren, x + w + 6, y + 1, 1, "L");
     draw_text(ren, x + w + 6, y + bh + 4, 1, "R");
 
-    snprintf(t, sizeof t, "L %6.1f  R %6.1f  pk %6.1f  gain %+.1f dB  boost %+.1f dB",
-             p0, p1, h0 > h1 ? h0 : h1, g, bo);
+    snprintf(t, sizeof t, "L %6.1f  R %6.1f  pk %6.1f  gain %+.1f dB  boost %+.1f dB%s",
+             p0, p1, h0 > h1 ? h0 : h1, g, bo, agc ? "  [AGC]" : "");
     draw_text(ren, x, y + 2 * bh + 9, 1, t);
 
     const char *verdict;
     unsigned char col[3] = { 235, 235, 235 };
     double pk = h0 > h1 ? h0 : h1;
     if (muted) { verdict = "MUTED (m)"; col[0] = 200; col[1] = 200; col[2] = 60; }
-    else if (cl) { verdict = "TOO HOT - lower gain (-)"; col[0] = 230; col[1] = 60; col[2] = 60; }
+    else if (cl) { verdict = agc ? "TOO HOT - AGC reducing" : "TOO HOT - lower gain (-)"; col[0] = 230; col[1] = 60; col[2] = 60; }
     else if (pk < -50) { verdict = "NO SIGNAL - check cable / source"; col[0] = 230; col[1] = 160; col[2] = 60; }
-    else if (pk < -18) { verdict = "LOW - raise gain (+)"; col[0] = 230; col[1] = 200; col[2] = 60; }
-    else if (pk > -3) { verdict = "HOT - lower gain (-)"; col[0] = 230; col[1] = 120; col[2] = 60; }
+    else if (agc) {
+        /* With the AGC in charge the judgement is against its own target, not
+         * the manual zone - otherwise the panel calls the level it is holding
+         * "LOW". */
+        if (pk < AGC_TARGET_DBFS - 8) { verdict = "LOW - AGC raising gain"; col[0] = 230; col[1] = 200; col[2] = 60; }
+        else if (pk > AGC_TARGET_DBFS + 10) { verdict = "HOT - AGC lowering gain"; col[0] = 230; col[1] = 120; col[2] = 60; }
+        else { verdict = "OK - AGC holding level"; col[0] = 90; col[1] = 220; col[2] = 110; }
+    }
+    else if (pk < -18) { verdict = agc ? "LOW - AGC raising gain" : "LOW - raise gain (+)"; col[0] = 230; col[1] = 200; col[2] = 60; }
+    else if (pk > -3) { verdict = agc ? "HOT - AGC lowering gain" : "HOT - lower gain (-)"; col[0] = 230; col[1] = 120; col[2] = 60; }
     else { verdict = "OK - level in range"; col[0] = 90; col[1] = 220; col[2] = 110; }
     SDL_SetRenderDrawColor(ren, col[0], col[1], col[2], 255);
     draw_text(ren, x, y + 2 * bh + 20, 1, verdict);
@@ -1137,7 +1346,7 @@ int main(int argc, char **argv)
     char saved[200];
     int want_capture = 0;
     long capture_secs = 0;
-    int gain_pct = -1, boost_step = -1;
+    int gain_pct = -1, boost_step = -1, agc_cli = -1;
     const char *audio_arg = NULL;
 
     /* input: saved choice, then PCTV_INPUT, then -i/--input (highest priority) */
@@ -1155,7 +1364,8 @@ int main(int argc, char **argv)
     }
     pick_out_dir();
     nsrc = discover_audio();                 /* srcs[0] == "none" */
-    if (cfg_read("audio", saved, sizeof saved)) {
+    int saved_gain = -1, saved_boost = -1, saved_agc = -1;
+    if (cfg_read_audio(saved, sizeof saved, &saved_gain, &saved_boost, &saved_agc)) {
         int s = src_from_name(saved);
         if (s >= 0) cur_src = s;
     } else {
@@ -1221,6 +1431,10 @@ int main(int argc, char **argv)
             want_capture = 1;
         } else if (!strcmp(argv[i], "--capture-seconds") && i + 1 < argc) {
             capture_secs = strtol(argv[++i], NULL, 0); want_capture = 1;
+        } else if (!strcmp(argv[i], "--agc")) {
+            agc_cli = 1;
+        } else if (!strcmp(argv[i], "--no-agc")) {
+            agc_cli = 0;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(argv[0]);
             return 0;
@@ -1257,7 +1471,10 @@ int main(int argc, char **argv)
         snprintf(probe_path, sizeof probe_path, "pctv_probe");
 
     cfg_write("input", INPUTS[cur_input]);
-    cfg_write("audio", srcs[cur_src].label);
+    /* AGC: command line, then the saved choice, else on */
+    if (agc_cli >= 0) agc_on = agc_cli;
+    else if (saved_agc >= 0) agc_on = saved_agc;
+    cfg_write_audio(srcs[cur_src].label, gain_pct, boost_step, agc_on);
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         signal(SIGINT, SIG_DFL);
@@ -1285,8 +1502,12 @@ int main(int argc, char **argv)
     audio_start_thread();
     if (gain_pct >= 0) { pthread_mutex_lock(&amtx); pend_gain_pct = gain_pct;
                          pthread_mutex_unlock(&amtx); }
+    else if (saved_gain >= 0) { pthread_mutex_lock(&amtx); pend_gain_pct = saved_gain;
+                                pthread_mutex_unlock(&amtx); }
     if (boost_step >= 0) { pthread_mutex_lock(&amtx); pend_boost_step = boost_step;
                            pthread_mutex_unlock(&amtx); }
+    else if (saved_boost >= 0) { pthread_mutex_lock(&amtx); pend_boost_step = saved_boost;
+                                 pthread_mutex_unlock(&amtx); }
     show_overlay(8000);
 
     unsigned char *rbuf = malloc(RBUF);
@@ -1325,15 +1546,23 @@ int main(int argc, char **argv)
                     else cap_pending = 1;      /* no video yet: start on frame 1 */
                     show_overlay(4000);
                     break;
-                case SDLK_a: want_src = nsrc > 1 ? (cur_src + 1) % nsrc : 0; break;
+                case SDLK_a:
+                    if (e.key.keysym.mod & KMOD_SHIFT) {
+                        pthread_mutex_lock(&amtx); pend_agc_toggle = 1;
+                        pthread_mutex_unlock(&amtx);
+                        show_overlay(4000);
+                    } else {
+                        want_src = nsrc > 1 ? (cur_src + 1) % nsrc : 0;
+                    }
+                    break;
                 case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS:
-                    pthread_mutex_lock(&amtx); pend_gain_step = +1;
+                    pthread_mutex_lock(&amtx); pend_gain_step = +1; pend_manual = 1;
                     pthread_mutex_unlock(&amtx); break;
                 case SDLK_MINUS: case SDLK_UNDERSCORE: case SDLK_KP_MINUS:
-                    pthread_mutex_lock(&amtx); pend_gain_step = -1;
+                    pthread_mutex_lock(&amtx); pend_gain_step = -1; pend_manual = 1;
                     pthread_mutex_unlock(&amtx); break;
                 case SDLK_b:
-                    pthread_mutex_lock(&amtx); pend_boost_cycle = 1;
+                    pthread_mutex_lock(&amtx); pend_boost_cycle = 1; pend_manual = 1;
                     pthread_mutex_unlock(&amtx); break;
                 case SDLK_m:
                     pthread_mutex_lock(&amtx); pend_mute_toggle = 1;
@@ -1358,10 +1587,28 @@ int main(int argc, char **argv)
         }
         if (want_src != cur_src) {
             cur_src = want_src;
-            cfg_write("audio", srcs[cur_src].label);
+            cfg_write_audio(srcs[cur_src].label, -1, -1, agc_on);
             athr_reopen = 1;
             show_overlay(4000);
             fprintf(stderr, "pctv-monitor: audio input -> %s\n", srcs[cur_src].label);
+        }
+
+        /* The codec state is authoritative for the staging: remember it (at most
+         * once every 2 s) so the next run comes back at the same level. */
+        {
+            static unsigned long stage_t = 0;
+            static int stage_gp = -999, stage_bs = -999;
+            unsigned long t = SDL_GetTicks();
+            if (t - stage_t > 2000) {
+                stage_t = t;
+                pthread_mutex_lock(&amtx);
+                int gp = cur_gain_pct, bs = cur_boost_step, ag = agc_on;
+                pthread_mutex_unlock(&amtx);
+                if ((gp >= 0 || bs >= 0) && (gp != stage_gp || bs != stage_bs)) {
+                    stage_gp = gp; stage_bs = bs;
+                    cfg_write_audio(srcs[cur_src].label, gp, bs, ag);
+                }
+            }
         }
 
         /* drain the child's stdout; stop when the parse buffer is nearly full
@@ -1426,7 +1673,7 @@ int main(int argc, char **argv)
             if (SDL_GetTicks() < overlay_until) {
                 char hint[200];
                 snprintf(hint, sizeof hint,
-                         "1/2/Tab video   a audio   -/+ gain   b boost   m mute");
+                         "1/2/Tab video   a audio   A agc   -/+ gain   b boost   m mute");
                 draw_panel(ren, 10, 8 + 7 * 2 + 12, hint, 1);
                 snprintf(hint, sizeof hint,
                          "c MPEG-2 capture   r raw   s snap   g grey   space pause   q quit");

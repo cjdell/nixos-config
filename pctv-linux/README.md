@@ -91,9 +91,10 @@ nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix {}'
 ```
 
 Monitor keys: `1`/`2` switch video input (Composite, S-Video), `Tab` cycles,
-`a` cycles the **audio input**, `-`/`+` capture gain, `b` input boost, `m`
-mute, `c` **MPEG-2 capture**, `r` raw BT.656 dump, `s` snapshot, `g`
-colour/grey, space pause the display, `q`/ESC quit (Ctrl-C works too and still
+`a` cycles the **audio input**, `A` toggles **automatic gain control**,
+`-`/`+` capture gain, `b` input boost, `m` mute, `c` **MPEG-2 capture**, `r`
+raw BT.656 dump, `s` snapshot, `g` colour/grey, space pause the display,
+`q`/ESC quit (Ctrl-C works too and still
 finalises the `.mpg`).  The active input is named in an on-screen banner (and
 in the window title, with the live field rate: ~50 fields/s = 25 interlaced fps
 for PAL); the controls hint is shown for a few seconds after start and after
@@ -128,13 +129,46 @@ invisible on a picture.
 * The panel shows two stereo meters (-60..0 dBFS) with a shaded **-12..-3 dBFS
   target zone**, a moving RMS marker, a decaying peak-hold, the codec gain and
   boost in dB, a clip counter, and a verdict: `NO SIGNAL` / `LOW - raise gain
-  (+)` / `OK - level in range` / `HOT` / `TOO HOT`.
+  (+)` / `OK - level in range` / `HOT` / `TOO HOT`.  With the AGC on, the
+  verdict and its thresholds follow the AGC's target instead (`OK - AGC holding
+  level`), so the panel never calls the level it is holding "LOW".
 * Gain staging happens in the codec, not in software: `-`/`+` drive its
   `Capture` control (-16..+30 dB, 0.75 dB/step on the ALC889A), `b` cycles the
   per-input `* Boost` (0/12/18/24 dB), `--gain <0-100>` sets a percentage of
   the hardware range at startup.
 * ALSA is opened exclusively; if something else holds the device the panel
   shows the ALSA error instead of pretending there is silence.
+
+### Automatic gain control (`A`, on by default)
+
+The source level on this wiring is not stable: measured on the same input, the
+minimum codec gain (-16 dB) put the peaks at -40 dBFS and the maximum (+30 dB
+capture, +30 dB boost) drove it to full scale, and the level has been seen to
+move ~20 dB inside a single second by itself.  So the AGC drives the **codec**,
+never a software multiply: the meter, the verdict and the recorded file always
+describe the same signal.
+
+* Target: peaks near **-18 dBFS** (`AGC_TARGET_DBFS`), deliberately below the
+  meter's -12..-3 manual zone.  A feedback loop has no lookahead on a live ADC,
+  so the headroom is what keeps the source's step-ups out of the converter.
+* Two loops.  **Attack**: a block arriving above -3 dBFS, or any clipped sample,
+  drops 8 dB at once (up to ~16 times a second).  **Steady state**: every
+  250 ms, move proportionally to the distance from the target (+6 dB only while
+  more than 30 dB away, +2 dB nearer, dead band +-3 dB so it does not pump).
+  It will not hunt a dead input (nothing above -75 dBFS).
+* Two gain stages.  The fine `Capture` control is used first; when it runs out
+  of headroom the AGC takes a `* Boost` step and re-centres the fine control,
+  and when the fine control has drifted below 20 % of its range it trades a
+  boost step back for headroom, because the boost stage is the noisier one.
+* Measured on the live source (20 s, source swinging on its own): peaks held in
+  -5..-18 dBFS with **12 clipped samples** in the file.  Triggering the attack
+  on "approaching full scale" rather than "already clipped" is what took that
+  from 4897 samples to 12 - waiting for the clip flag is 3 dB too late.
+* `A` toggles it; `-`, `+` or `b` turn it off (the user's hand wins).  `--agc`
+  / `--no-agc` set it from the command line.  Input, gain, boost **and** the
+  AGC flag are all remembered in `~/.config/pctv-monitor/audio` (line 1 =
+  input, line 2 = `<gain%> <boost step> <agc>`), so the next launch comes back
+  where you left it - including AGC off, if that is where you left it.
 
 ### MPEG-2 capture (`c`)
 
@@ -169,6 +203,8 @@ SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor          # prints fps to std
 PCTV_SNAP_AFTER=120 SDL_VIDEODRIVER=dummy ./pctv-monitor     # saves one frame, exits
 # 6 s MPEG-2 capture, then exit (the audio meter still updates in the log):
 SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor --audio line --capture --capture-seconds 6
+# watch the AGC work (one log line per gain move, including boost staging):
+SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor --agc --gain 0 --capture --capture-seconds 10
 # or drive the stream directly:
 sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 ```

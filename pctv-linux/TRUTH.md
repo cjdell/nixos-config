@@ -395,6 +395,22 @@ On a warm reboot the bridge is already booted; the handoff then finds no
    (`hw:0`), not to `hw:0,0`.  A quiet line source sat at -70 dBFS at +11 dB,
    so the boost stage is what makes the meter move; nothing clipped at 60 % of
    the capture range.
+9.8 **The host line-in level is not repeatable - the capture stack needs AGC
+   (2026-10-09, live source).**  Same input, same cable, minutes apart: peaks
+   measured -45 dBFS, then -9 dBFS, then full scale.  At the codec's minimum
+   (-16 dB capture, boost 0) the same program peaks at -40 dBFS; at its maximum
+   (+30 dB capture, +30 dB boost) it hits 0 dBFS - a 60 dB control span over a
+   source that moves ~20 dB within a second of its own accord.  Consequences
+   for the design, all measured here: gain must be applied in the **codec** (the
+   meter, the verdict and the recorded file then describe one signal); the target
+   must sit at **-18 dBFS**, not at the top of the meter's -12..-3 zone, because
+   a feedback loop has no lookahead on a live ADC; and the attack must trigger on
+   a block arriving above **-3 dBFS**, not on the clip flag - waiting for the
+   flag is 3 dB too late and cost 4897 clipped samples in 20 s where the early
+   trigger costs 12.  The fine `Capture` control is used first and the coarse
+   `* Boost` only at its limits (it is the noisier stage), with the staging
+   walked back towards `Capture` whenever the fine control drops below 20 % of
+   its range.
 
 ## 10. Tools in this directory
 
@@ -403,7 +419,7 @@ On a warm reboot the bridge is already booted; the handoff then finds no
 | `pctv_probe` (`./pctv_probe` for usage) | userspace libusb tool. Key sub-commands: `ver`, `clock`, `i2cparam`, `gpio`, `scan`, `identify`, `cxr`/`cxw`, `rd2`, `nrd16`/`nwr16`, `grd1`/`gwr1`, `video`, `cap`, `analog2`, `regseq`, `fw`, `eepromdump` (fixed index), `romwin`, `eepromwin`, **`stream`** (bring-up + continuous raw BT.656 to stdout — the userspace driver behind `pctv-monitor`) |
 | `rom-window.sh` | wrapper for `romwin` / `--eeprom` for `eepromwin`; preflight, artifacts, dmesg capture. Read-only to persistent storage |
 | `build.sh` / `build-module.sh` | build the probe / build `pctv320cx.ko` against the running kernel |
-| `pctv-monitor.c` / `build-monitor.sh` | **userspace live monitor GUI (SDL2 + ALSA)** — spawns `pctv_probe stream`, deframes BT.656, displays/snapshots, captures **MPEG-2** (720×576 interlaced mpeg2video + MP2 via ffmpeg) with a selectable ALSA audio input and a live dBFS meter (§9.7). No kernel module |
+| `pctv-monitor.c` / `build-monitor.sh` | **userspace live monitor GUI (SDL2 + ALSA)** — spawns `pctv_probe stream`, deframes BT.656, displays/snapshots, captures **MPEG-2** (720×576 interlaced mpeg2video + MP2 via ffmpeg) with a selectable ALSA audio input, a live dBFS meter (§9.7) and automatic gain control that drives the codec (§9.8). No kernel module |
 | `analog-try.sh`, `capture-analog.sh`, `clock-tune.sh` | analog bring-up + capture experiments |
 | `driver/` | the Rust out-of-tree kernel driver (`package.nix` builds it) |
 | `ROM-WINDOW.md` | how to catch ROM/EEPROM windows and interpret them |
