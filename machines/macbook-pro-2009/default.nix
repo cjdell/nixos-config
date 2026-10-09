@@ -39,32 +39,29 @@
 
   # --- watching / recording the analog inputs -------------------------------
   #
-  # What the driver exposes (verified with v4l2-ctl --all on this host):
-  #   inputs   0 Composite 1, 1 Composite 2, 2 Composite 3, 3 S-Video
-  #   stds     PAL-B / NTSC-M, format YUYV 720x576 (or 720x480) interlaced,
-  #            25 fps, controls brightness/contrast/saturation/hue
+  # The card is NOT a V4L2 device any more.  With the pctv320cx module retired
+  # there is no /dev/video node for it (the only ones on this box, /dev/video0
+  # and /dev/video1, are the built-in iSight on uvcvideo), so nothing that
+  # opens a capture device - OBS, qv4l2, mpv's av://v4l2:, ffmpeg -f v4l2 -
+  # can see the composite/S-Video inputs.  The way in is the userspace stack:
   #
-  # obs-studio  - the one app here that covers the whole wish list: live
-  #               preview, a "Video Capture Device" source with its own
-  #               device/input/resolution/fps/format picker, and
-  #               Settings -> Output -> Recording with an encoder choice
-  #               (x264, x265, SVT-AV1, VP9 - whatever nixpkgs' ffmpeg has)
-  #               into mkv/mp4/mov, plus per-source deinterlace + filters.
-  #               Needs OpenGL 3.3 core: the 9400M IGP (NVAC, renderD128)
-  #               reports exactly "3.3 (Core Profile)", the 9600M GT is nv50
-  #               (2.1) - so keep OBS on card0, which is what kwin uses.
-  #   v4l-utils - qv4l2: live view (Capture tab) + the Input tab for the four
-  #               inputs and PAL/NTSC + the picture controls, which the driver
-  #               writes straight into the CX25843.  v4l2-ctl for scripting.
-  #               NB qvidcap is broken on this box (it exits straight away
-  #               with "OpenGL Error ... InitializeGL Part 2") - use qv4l2.
-  #   mpv       - zero-setup live view:  mpv av://v4l2:/dev/video0
-  #               (--profile=low-latency --untimed makes it pace the frames)
+  #   pctv-monitor                 SDL2 live view + `c` MPEG-2 capture (720x576
+  #                                interlaced mpeg2video + MP2), `1`/`Tab` switch
+  #                                inputs, `a` audio input, `A` AGC, `o` monitor
+  #   pctv_probe stream <input>    raw mode-2 BT.656 on stdout (diagnostics on
+  #                                stderr) - what pctv-monitor consumes and
+  #                                deframes to UYVY; decode-bt656.py parses it
   #
-  # Input switching + live view in one go: pctv-linux/pctv-view.sh
-  # GUI-free recording in any codec ffmpeg speaks:
-  #   ffmpeg -f v4l2 -input_format yuyv422 -video_size 720x576 -framerate 25 \
-  #          -i /dev/video0 -c:v libx264 -preset ultrafast -crf 23 out.mkv
+  # pctv-linux/pctv-view.sh is from the V4L2 era and only works if the module is
+  # re-enabled (pctv-linux/README.md "The driver").
+  #
+  # mpv / obs-studio / v4l-utils stay installed for the iSight and general use:
+  #   mpv av://v4l2:/dev/video0    zero-setup webcam preview
+  #   qv4l2                        capture panel + controls (qvidcap is broken
+  #                                here: "OpenGL Error ... InitializeGL Part 2")
+  #   obs-studio                   needs OpenGL 3.3 core: the 9400M IGP (NVAC,
+  #                                renderD128) reports exactly that, the 9600M GT
+  #                                is nv50 (2.1) - keep OBS on card0.
   #
   # These packages are all substitutes, but mpv/obs-studio end in a wrapper
   # derivation (buildEnv) that Nix insists on building *locally*, and this

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # pctv-view.sh - watch or record the Pinnacle PCTV 320cx analog inputs.
 #
+# ⚠️ V4L2-ERA, needs the RETIRED kernel module. This script drives a
+# /dev/video node (v4l2-ctl + ffmpeg -f v4l2), which only exists while the
+# out-of-tree pctv320cx driver is enabled. That driver is no longer built or
+# loaded on macbook-pro-2009-nixos - the card is userspace/libusb now - so on
+# the current config this script finds no device and dies. Use `pctv-monitor`
+# (live view + MPEG-2 capture) instead; see pctv-linux/README.md.
+#
 #   ./pctv-view.sh                     live view, Composite 1, PAL
 #   ./pctv-view.sh svideo              live view, S-Video
 #   ./pctv-view.sh 2 --ntsc            Composite 3, NTSC

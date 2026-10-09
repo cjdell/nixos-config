@@ -3,6 +3,18 @@
 #   imports = [ ./pctv-linux/nixos-module.nix ];
 #   hardware.pctv320cx.enable = true;
 #
+# RETIRED 2026-10-08 and imported by nothing: the card is driven from
+# userspace now (`live-module.nix` / `hardware.pctv320cxLive`, enabled in
+# machines/macbook-pro-2009/default.nix).  Kept as the documented last resort
+# (pctv-linux/COLD-BOOT-NOTES.md §5.5).
+#
+# ⚠️ Mutually exclusive with hardware.pctv320cxLive: the blacklist below is
+# exactly what the userspace path must NOT have — TRUTH.md §2.1 says the
+# in-tree dvb_usb_dib0700 has to be the first firmware downloader after a cold
+# plug, so live-module.nix loads it deliberately and unbinds it again once
+# /dev/dvb/adapter0 shows up.  Enabling both leaves the card neither booted nor
+# streamable.
+#
 # The driver core is Rust, so the kernel it is built against must have
 # CONFIG_RUST=y (nixpkgs' regular kernel configs do).  Both firmware blobs the
 # driver asks for - dvb-usb-dib0700-1.20.fw (the DiB0700 bridge's

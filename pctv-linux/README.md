@@ -3,7 +3,13 @@
 Reverse-engineering notes and tooling for capturing **analog video** (composite
 / S-video) from a Pinnacle PCTV 320cx ExpressCard on Linux. The mainline
 `dvb-usb-dib0700` driver is DVB-only and never enables the analog path, so the
-hardware is driven directly over libusb. Full journey: **`FINDINGS.md`**.
+hardware is driven directly over libusb — with one exception: that in-tree
+driver still does the cold-start firmware download, because nothing else boots
+the bridge ROM reliably from a true cold plug (TRUTH §2.1), and is then unbound.
+Full journey: **`FINDINGS.md`**; ground truth: **`TRUTH.md`**.
+
+> Want the short version — how analog capture works on a DVB-only bridge with a
+> stock kernel and no kernel code at all? **`../docs/pctv-analog-capture.md`**.
 
 ## TL;DR — capturing a frame
 
@@ -59,7 +65,9 @@ consumer can parse (the GUI, `mpv`, `ffmpeg`, a file).
 ### Through Nix (normal way)
 
 The `hardware.pctv320cxLive` module installs both binaries and a `.desktop`
-entry, keeps the in-tree DVB driver off the card, and adds a udev rule:
+entry, boots the cold card with the **in-tree** `dvb_usb_dib0700` and then hands
+the interface over to libusb (`pctv-bridge-handoff.service`, TRUTH §2.1), pins
+the WirePlumber audio profile, and adds a udev rule:
 
 ```nix
 # machines/macbook-pro-2009/default.nix
@@ -74,7 +82,8 @@ just rebuild          # then: pctv-monitor   (or launch it from the app menu)
 By default the GUI invokes the probe through `sudo -n`.  For a no-sudo launcher
 set `hardware.pctv320cxLive.noSudo = true;` (installs `PCTV_NO_SUDO=1` into the
 wrapper; relies on the module's `GROUP="video", MODE="0660"` udev rule and on
-the kernel module not being bound).
+nothing holding the card — i.e. `pctv-bridge-handoff` having already unbound
+`dvb_usb_dib0700`, and no other `pctv_probe` running).
 
 Standalone (without the module):
 
@@ -303,13 +312,20 @@ Notes / current limits:
   muxes.
 * PAL only for now; the parser keys off the BT.656 F/V bits but the output
   geometry is hard-wired to 720×576.
-* The child needs raw USB.  It is launched via `sudo -n`; a udev rule (below)
-  would remove that requirement.
+* The child needs raw USB.  By default it is launched via `sudo -n`;
+  `hardware.pctv320cxLive.noSudo = true;` (the udev rule it installs) removes
+  that requirement.
 
-## The driver — `driver/`
+## The driver — `driver/` (retired: not built, not enabled)
 
-The reverse-engineered bring-up is now a real kernel module: **`pctv320cx.ko`**,
-Rust core + C V4L2 glue, in `driver/`.
+The same reverse-engineered bring-up also exists as a kernel module:
+**`pctv320cx.ko`**, Rust core + C V4L2 glue, in `driver/`.  **Nothing builds or
+loads it any more** — no `.nix` in the repo imports `nixos-module.nix`, and
+`machines/macbook-pro-2009/default.nix` enables only
+`hardware.pctv320cxLive` (the userspace path above).  It stays here because it
+was the route that first proved the analog bring-up end-to-end inside the
+kernel, and because `COLD-BOOT-NOTES.md` §5.5 documents how to go back to it.
+Everything below describes how to rebuild it, not what this host runs.
 
 | file | role |
 | --- | --- |
@@ -336,12 +352,18 @@ nix build --impure --expr 'let f = builtins.getFlake "/home/cjdell/nixos-config"
                                              lib = import <nixpkgs/lib>; }'
 ```
 
-Deploy on the MacBook (the host with the ExpressCard slot) — `nixos-module.nix`
-adds the module to `boot.extraModulePackages` / `boot.kernelModules`, pulls in
-linux-firmware (`dvb-usb-dib0700-1.20.fw`, `v4l-cx25840.fw`) and keeps
-`dvb_usb_dib0700` off the device. It is enabled in
-`machines/macbook-pro-2009/default.nix`; the Win7-VM passthrough that used to
-own the card is retired.
+Re-enable on the MacBook (the host with the ExpressCard slot) by importing
+`nixos-module.nix` and setting `hardware.pctv320cx.enable = true;` — it adds the
+module to `boot.extraModulePackages` / `boot.kernelModules`, pulls in
+linux-firmware (`dvb-usb-dib0700-1.20.fw`, `v4l-cx25840.fw`) and **blacklists
+`dvb_usb` / `dvb_usb_dib0700`** so the module can claim the card.
+
+> ⚠️ **Do not enable it next to `hardware.pctv320cxLive`.** That blacklist is
+> precisely what the userspace path must *not* have: TRUTH §2.1 says the in-tree
+> driver has to be the first downloader after a cold plug, which is why
+> `live-module.nix` loads `dvb_usb_dib0700` on purpose and unbinds it again once
+> `/dev/dvb/adapter0` appears.  Both options grab the same USB interface, and
+> the combination leaves the card neither booted nor streamable.
 
 Module metadata after a successful build:
 
@@ -350,11 +372,18 @@ alias:   usb:v2304p022Ed*…      depends: videodev,videobuf2-v4l2,videobuf2-com
 firmware: dvb-usb-dib0700-1.20.fw, v4l-cx25840.fw      parm: debug (u32)
 ```
 
-**Status: builds clean against 7.2.3 (the MacBook's kernel); not yet run against
-hardware.** The bring-up sequence, the mode-2 arm and the deframer are direct
-transcriptions of what `capture-live.sh` proved on the real card; the first
-on-hardware run is the next step (`dmesg`, `v4l2-ctl --all`, then
-`ffmpeg -i /dev/video0 …`).
+**Status: built, ran on hardware, then superseded by the userspace path.** It
+built clean against the MacBook's kernel and worked: it bound the card, exposed
+`/dev/videoN` ("Pinnacle PCTV 320cx"), and captured stable 25-fps frames from
+both S-Video and Composite 1 (TRUTH §1, 2026-10-08 ~19:03).  It was dropped 20
+minutes later (`f70a608`, 19:22), not for failing but because the userspace
+stack covers live view *and* MPEG-2 + audio capture in one program, while the
+V4L2 face still showed the unfixed chroma — the colour killer *is* cleared there
+(`0x401 = 0xc0`), but the §14 chroma/resampling work never was, so composite
+came out near-greyscale and S-Video rainbow-fringed (TRUTH §1).  The one thing
+the kernel still has to do — boot the bridge ROM from a true cold plug — is done
+better by the in-tree `dvb_usb_dib0700`, which `live-module.nix` loads for
+exactly that and then unbinds.
 
 ## State
 
@@ -373,8 +402,9 @@ on-hardware run is the next step (`dmesg`, `v4l2-ctl --all`, then
 | path | what |
 | --- | --- |
 | `FINDINGS.md` | the whole investigation — read this first |
-| `driver/` | the kernel module (Rust core + C V4L2 glue), see above |
-| `nixos-module.nix` | `hardware.pctv320cx.enable` — deploy the module |
+| `driver/` | the retired kernel module (Rust core + C V4L2 glue), see above |
+| `nixos-module.nix` | `hardware.pctv320cx.enable` — deploy that module (imported by nothing; conflicts with `live-module.nix`) |
+| `live-module.nix` | `hardware.pctv320cxLive.enable` — **what the host actually runs**: userspace stack + cold-boot handoff |
 | `capture-live.sh` | one-shot: bring-up → arm → capture → decode → PNG |
 | `decode-bt656.py` | current decoder (mode 2 / true BT.656) |
 | `probe.c`, `build.sh` | the libusb tool: firmware load, i2c, registers, capture |
