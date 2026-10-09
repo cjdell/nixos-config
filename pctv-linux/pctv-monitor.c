@@ -115,6 +115,7 @@ static int  field_F = -1, field_lines = 0;
 static int  parity_mask = 0;         /* which field parities are in fuv */
 static int  field_repeat = 0;        /* same parity twice: feed anyway */
 static int  frame_ready = 0;
+static int  frame_new = 0;             /* a frame arrived since the last feed */
 /* ---- good-frame gate -----------------------------------------------------
  * A frame whose two fields do not belong together is far more visible than the
  * same picture shown twice: a field spliced across a stream hole sits ~19 rows
@@ -1444,6 +1445,20 @@ static int   cap_vfd = -1, cap_afd = -1;
 static int   cap_on = 0, cap_has_audio = 0;
 static char  cap_path[512];
 static unsigned long long cap_vframes = 0, cap_vdrops = 0, cap_adrops = 0;
+/* Capture pacing.  ffmpeg is told the video is exactly 25 fps (-f rawvideo
+ * -r 25), so its video timeline advances 40 ms per frame regardless of how many
+ * frames the source actually delivered.  This source does not deliver a steady
+ * 50 fields/s: one capture measured 48.5 fields/s (1213 fields in 25 s) and
+ * another 50.3 - fed as they arrive, the first came out with a video stream
+ * 0.77 s shorter than its audio stream, so the picture led the sound by that
+ * much and the error grew through the clip.  The capture is therefore fed on a
+ * clock, not on arrivals: every 40 ms the newest complete frame is handed over,
+ * repeated if the source has not produced a new one (the same thing the frame
+ * gate already does for bad frames, and equally invisible); if the source ever
+ * runs faster than the clock, the newest frame simply replaces the one before
+ * it.  The display is untouched: it still shows every frame as it arrives. */
+static unsigned long long cap_vrepeats = 0;
+static unsigned long cap_feed_next;
 static unsigned long long cap_abytes = 0;
 static time_t cap_t0 = 0;
 static unsigned long cap_t0_tick = 0;   /* SDL ticks, for a smooth REC counter */
@@ -1710,6 +1725,8 @@ static int cap_start(void)
     pthread_mutex_lock(&cap_mtx);
     cap_pid = pid; cap_vfd = vp[1]; cap_afd = ap[1]; cap_on = 1;
     cap_vframes = cap_vdrops = cap_adrops = cap_abytes = 0;
+    cap_vrepeats = 0;
+    cap_feed_next = SDL_GetTicks();   /* feed the first frame immediately */
     cap_t0 = time(NULL);
     cap_t0_tick = SDL_GetTicks();
     pthread_mutex_unlock(&cap_mtx);
@@ -1728,7 +1745,8 @@ static void cap_stop(void)
     int vfd = cap_vfd, afd = cap_afd;
     pid_t pid = cap_pid;
     cap_on = 0; cap_vfd = cap_afd = -1; cap_pid = -1;
-    unsigned long long vf = cap_vframes, vd = cap_vdrops, ad = cap_adrops;
+    unsigned long long vf = cap_vframes, vd = cap_vdrops, ad = cap_adrops,
+                       rp = cap_vrepeats;
     unsigned long long ab = cap_abytes;
     cap_closing = 0;
     pthread_cond_broadcast(&cap_cv);
@@ -1750,9 +1768,10 @@ static void cap_stop(void)
     off_t sz = -1;
     struct stat sb;
     if (stat(cap_path, &sb) == 0) sz = sb.st_size;
-    fprintf(stderr, "pctv-monitor: capture stopped: %s (%lld B, %llu frames, "
-                    "%llu B audio, %llu video drops, %llu audio drops)\n",
-            cap_path, (long long)sz, vf, ab, vd, ad);
+    fprintf(stderr, "pctv-monitor: capture stopped: %s (%lld B, %llu frames "
+                    "(%llu repeated), %llu B audio, %llu video drops, "
+                    "%llu audio drops)\n",
+            cap_path, (long long)sz, vf, rp, ab, vd, ad);
 }
 
 /* ------------------------------------------------------------- audio meter */
@@ -2208,14 +2227,25 @@ int main(int argc, char **argv)
         }
         if (parity_mask == 3 || field_repeat) {
             parity_mask = 0; field_repeat = 0;
+            frame_new = 1;
             /* Start the encoder on the first frame, not on the key press: both
              * streams then get PTS 0 at the same instant, and the audio cannot
              * run ahead by the decoder's lock time (8 s with no source). */
             if (cap_pending && !cap_on) { cap_pending = 0; cap_start(); }
+        }
+        /* Feed the encoder on the clock, not on arrivals (see cap_feed_next). */
+        if (cap_on && (long)(SDL_GetTicks() - cap_feed_next) >= 0) {
             unsigned long t_feed = SDL_GetTicks();
             cap_feed_video();
             unsigned long d = SDL_GetTicks() - t_feed;
             if (d > stage_max[1]) stage_max[1] = d;
+            if (!frame_new) cap_vrepeats++;
+            frame_new = 0;
+            cap_feed_next += 40;                       /* 25 fps exactly */
+            /* If the loop stalled (or the source stopped), do not try to catch
+             * up frame by frame: re-anchor the clock instead. */
+            if ((long)(SDL_GetTicks() - cap_feed_next) > 2000)
+                cap_feed_next = SDL_GetTicks();
         }
 
         if (frame_ready) {
