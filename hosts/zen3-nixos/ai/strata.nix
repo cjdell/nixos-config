@@ -42,18 +42,77 @@
 #
 # nginx: owns the "/" location on the IP vhost (llama-swap's old root) and a
 # public strata.ai.chrisdell.info vhost.
+#
+# Two packs, one switch. `config.ai.strataModel` (default "iq3s", defined in
+# ./default.nix) picks which GGUF/pack pair and which per-model engine args this
+# unit uses; everything else (MTP runtime, expert profile, context, KV policy,
+# nginx, the config JSON) is shared. The second pack is Unsloth's UD-IQ4_XS -
+# 93.7 GB in three shards instead of 78 GB in two:
+#
+#   scripts/fetch-strata-udiq4xs.sh    # 3 shards, size + sha256 verified
+#   scripts/repack-strata-udiq4xs.sh   # iq_pack.py --compat-bf16 (REQUIRED here)
+#
+# Its experts are 59.5 GB (55.4 GiB) against IQ3_S's 51.05 GB, so it needs
+# --resident-budget-gib (see models.ud-iq4-xs below) and it costs GPU expert
+# cache: the same 24.87 GiB holds ~11,000 of its experts instead of 13,104, so
+# long-context decode drops (measured reasoning for docs/strata.md: ~33-37 tok/s
+# at 255K vs 41). 262144 ctx itself is unaffected - the int8 KV is 13.7 KB/token
+# and quant-independent. Switch only when that trade is wanted; the unit will not
+# start a pack that has not been prepared (ConditionPathExists).
 
 let
   strata = pkgs.callPackage ./strata-package.nix { };
 
   # Model layout. The GGUFs stay where they were downloaded (~/Models); only
   # the hand-prepared pack and MTP runtime live under modelDir.
-  ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF";
   modelDir = "/home/cjdell/Strata";
-  packDir = "${modelDir}/pack/iq3s";
-  nativeGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf";
-  pleGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf";
   mtpDir = "${modelDir}/mtp/rt";
+
+  # One entry per prepared pack; config.ai.strataModel (./default.nix) picks one.
+  #   pleGguf    the shard holding the 26.82 GiB per_layer_token_embd table,
+  #              passed as --ple-gguf; null = let the engine find it itself
+  #              (generate.cpp:2209-2212 scans --native's shard set), which is
+  #              what setup.py:5351 does for anything with more than 2 shards.
+  #   extraArgs  per-model engine args on top of the shared set below.
+  models = {
+    # GSQ-RCO IQ3_S (3.50 bpw), two shards: shard 1 experts/dense, shard 2 the
+    # PLE table (byte-identical across every GSQ-RCO quant, hardlinked).
+    iq3s = {
+      ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF";
+      packDir = "${modelDir}/pack/iq3s";
+      nativeGguf = "/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf";
+      pleGguf = "/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf";
+      modelName = "qwen3.8-flash-next-iq3s";
+      extraArgs = [ ];
+    };
+
+    # Unsloth UD-IQ4_XS (~4-bit Unsloth Dynamic), three shards. Each shard is
+    # its own GGUF container: shard 1 is metadata only (0 tensors), shard 2
+    # carries 373 tensors incl. the PLE table (IQ4_XS, same 26.82 GiB as GSQ's
+    # shard 2), shard 3 the rest. --native is shard 1, like setup.py's shards[0].
+    #
+    # --resident-budget-gib 55 = setup.py's own recommendation for this box
+    # (resident_budget_gib, setup.py:1515-1521: RAM 94 GiB - UNSLOTH_RAM_LEFT_GB
+    # 24 - ceil(KV streamed to RAM ~3), capped at int(arena_gb 59.5 / 1.0737) =
+    # 55): every expert in RAM, no SSD expert tier. That is +8.6 GiB over the
+    # IQ3_S engine's 46.84 GiB of resident experts, leaving ~24 GiB free.
+    # Without the flag the engine would try to hold all 55.4 GiB in its own
+    # arena and the box OOMs; the flag is what makes the pack runnable here.
+    ud-iq4-xs = {
+      ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-GGUF";
+      packDir = "${modelDir}/pack/ud-iq4-xs";
+      nativeGguf = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-GGUF/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf";
+      pleGguf = null;
+      modelName = "qwen3.8-flash-next-ud-iq4-xs";
+      extraArgs = [
+        "--resident-budget-gib"
+        "55"
+      ];
+    };
+  };
+
+  model = config.ai.strataModel;
+  m = models.${model};
 
   # The profile ships in the repo; the copy in the store is fine (the engine
   # only reads it).
@@ -74,11 +133,15 @@ let
   # --ple-gguf is the shard holding the per_layer_token_embd table (shard 2).
   engineArgs = [
     "--pack"
-    packDir
+    m.packDir
     "--native"
-    nativeGguf
+    m.nativeGguf
+  ]
+  ++ lib.optionals (m.pleGguf != null) [
     "--ple-gguf"
-    pleGguf
+    m.pleGguf
+  ]
+  ++ [
     "--expert-profile"
     expertProfile
     "--expert-cache"
@@ -97,19 +160,20 @@ let
     "int8"
     "--kv-resident"
     "32768"
-  ];
+  ]
+  ++ m.extraArgs;
 
   # The run config serve/server.py reads: the engine binary (the Nix build),
   # its args, and the tokenizer. Kept read-only in the store for now; edit
   # this file and rebuild to change engine args (the web Settings view would
   # need a writable copy in /var/lib/strata instead).
-  configFile = pkgs.writeText "strata-iq3s.json" (
+  configFile = pkgs.writeText "strata-${model}.json" (
     builtins.toJSON {
       exe = "${strata}/bin/strata";
       args = engineArgs;
       cwd = "/var/lib/strata";
-      tokenizer = "${packDir}/tokenizer";
-      model_name = "qwen3.8-flash-next-iq3s";
+      tokenizer = "${m.packDir}/tokenizer";
+      model_name = m.modelName;
       log = "/var/lib/strata/strata.log";
       # nginx proxies with the client's original Host header, and the serve
       # layer refuses any name it was not told about (DNS-rebinding guard) -
@@ -170,7 +234,7 @@ in
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
     # Don't crash-loop before the hand-run model prep has produced a pack.
-    unitConfig.ConditionPathExists = "${packDir}/index.txt";
+    unitConfig.ConditionPathExists = "${m.packDir}/index.txt";
 
     serviceConfig = {
       ExecStart = "${strata}/bin/strata-server --engine strata --config ${configFile} --host 127.0.0.1 --port 8080";
