@@ -1594,7 +1594,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "pctv-monitor: capture queued, starting with the first frame\n");
     }
 
-    int help_on = 0;          /* `H' toggles the key reference overlay */
+    int help_on = getenv("PCTV_HELP") != 0;   /* `H' toggles it; env for headless checks */
     unsigned long gap_max = 0;
     /* Per-stage worst time in the last second.  A freeze is only fixable if we
      * know which stage ate the time: reading/decoding the stream, handing the

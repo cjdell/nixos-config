@@ -183,6 +183,16 @@ interlaced (top field first) at 25 fps, `-b:v`/`-maxrate` 6000k, `-bufsize`
 * The encoder starts on the **first decoded frame**, not on the key press, so
   both streams share PTS 0 - otherwise a capture started while the decoder is
   still hunting carries up to 8 s of extra audio (the lock poll, see below).
+* **Recording is obvious on screen**: a 4 px red border around the frame, a
+  large `REC mm:ss.t` badge with a dot blinking once a second, and a line with
+  frames, bytes, the drop counters and the encoder queue occupancy.
+* The encoder is fed from a **4-frame ring owned by a writer thread**, never
+  from the main loop.  Writing an 829 KB UYVY frame inline meant the display
+  waited on the encoder - and while the main loop waits, nothing drains the
+  probe either, so the whole pipeline hiccups.  If the ring fills, the newest
+  frame is dropped whole and counted: an encoder that cannot keep up shows up
+  as counted frame drops (with the video track ending up shorter than the
+  audio) instead of a stalling picture.
 * Both pipes are `poll()`ed and the audio pipe is non-blocking: a slow encoder
   costs counted frame drops, never a wedged GUI or a stalled USB drain.
 * `ffprobe` reports `field_order=bb` for these files even though the sequence
@@ -208,6 +218,14 @@ SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1 ./pctv-monitor --agc --gain 0 --capture --c
 # or drive the stream directly:
 sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 ```
+
+`PCTV_VERBOSE=1` prints one line per second: the codec's gain, the meter peaks,
+the clip count, the byte counters, the encoder queue occupancy, and the **worst
+main-loop gap of that second broken down into `parse` / `feed` / `render`**.
+That breakdown is the instrument for "the picture froze": a large `render` gap
+is the display path, a large `parse` gap is the incoming stream, and a `feed`
+gap or a full queue means the encoder is not keeping up.  `PCTV_HELP=1` starts
+with the help overlay up (it is normally toggled with `H`).
 
 With **no source playing** the decoder's lock poll (`poll for a real lock`,
 16 × 500 ms in `analog2_bringup`) delays the first data by ~8 s; the monitor
