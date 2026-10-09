@@ -108,7 +108,12 @@ Applied 2026-10-09 to bring N100-NAS / GEN8-NAS / N40L-NAS from `26.05.20260910`
 / `26.05.20260829` onto the flake pin `26.11.20261006.151fa4e`:
 
 - **SSH to the NAS hosts:** `cjdell` with key `~/.ssh/id_ed25519_ps` (passwordless
-  sudo). The default `id_ed25519` is *not* authorized there.
+  sudo). The default `id_ed25519` is *not* authorized there. None of the three has
+  GitHub credentials of its own (`git pull` on GEN8-NAS fails with "Please make
+  sure you have the correct access rights"), so update their checkouts with **agent
+  forwarding**: `ssh -A -i ~/.ssh/id_ed25519_ps cjdell@<nas> "cd nixos-config && git
+  pull --ff-only"` — zen3's agent holds the GitHub key and GitHub authenticates as
+  `cjdell` through it.
 - **`nix copy --to ssh://cjdell@nas` fails** — `cjdell` is not a trusted user on
   any NAS (`trusted-users = root backup`). Instead build the toplevel on zen3 and
   stream the closure *delta* into the NAS store as root:
