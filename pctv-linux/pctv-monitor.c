@@ -1266,15 +1266,23 @@ static pthread_cond_t  vq_cv = PTHREAD_COND_INITIALIZER;
 
 static void cap_feed_video(void)
 {
+    /* The ring only exists while a capture owns it: vq[] is allocated by
+     * vq_start(), which cap_start() calls.  The main loop feeds every frame it
+     * assembles, capture or no capture, so without this guard the first locked
+     * frame after launch memcpy()s 829 KB into a NULL slot - SIGSEGV seconds
+     * after opening the monitor with no `c' pressed.  vq_started is only
+     * mutated by the main thread (vq_start/cap_stop), which is also the only
+     * caller here, so reading it unlocked is safe. */
+    if (!vq_started) return;
     pthread_mutex_lock(&vq_mtx);
-    if (vq_count >= VQ_SLOTS) {
+    int tail = (vq_head + vq_count) % VQ_SLOTS;
+    if (vq_count >= VQ_SLOTS || !vq[tail]) {
         pthread_mutex_unlock(&vq_mtx);
         pthread_mutex_lock(&cap_mtx);
         cap_vdrops++;
         pthread_mutex_unlock(&cap_mtx);
         return;
     }
-    int tail = (vq_head + vq_count) % VQ_SLOTS;
     memcpy(vq[tail], fuv, UV_SIZE);
     vq_count++;
     pthread_cond_signal(&vq_cv);
@@ -1307,14 +1315,21 @@ static void *vq_thread(void *unused)
     return NULL;
 }
 
-static void vq_start(void)
+/* Returns 0 when the ring is live (slots allocated, writer thread running),
+ * -1 if it could not be - capture must then not start, because every feed
+ * would have nowhere to put a frame. */
+static int vq_start(void)
 {
     for (int i = 0; i < VQ_SLOTS; i++)
         if (!vq[i]) vq[i] = malloc(UV_SIZE);
+    for (int i = 0; i < VQ_SLOTS; i++)
+        if (!vq[i]) return -1;
     vq_head = vq_count = vq_stop = 0;
     if (!vq_started) {
-        if (pthread_create(&vq_thr, NULL, vq_thread, NULL) == 0) vq_started = 1;
+        if (pthread_create(&vq_thr, NULL, vq_thread, NULL) != 0) return -1;
+        vq_started = 1;
     }
+    return 0;
 }
 
 static void vq_stop_and_drain(void)
@@ -1331,6 +1346,11 @@ static void vq_stop_and_drain(void)
 
 static int cap_start(void)
 {
+    if (vq_start() < 0) {          /* the writer thread that owns the video pipe */
+        fprintf(stderr, "pctv-monitor: cannot start the frame ring "
+                        "(out of memory?) - not capturing\n");
+        return -1;
+    }
     int vp[2], ap[2];
     if (pipe(vp) < 0) return -1;
     if (pipe(ap) < 0) { close(vp[0]); close(vp[1]); return -1; }
@@ -1340,8 +1360,6 @@ static int cap_start(void)
         int fl = fcntl(ap[1], F_GETFL, 0);
         fcntl(ap[1], F_SETFL, fl | O_NONBLOCK);
     }
-    vq_start();                    /* the writer thread that owns the video pipe */
-
     /* Only mux audio if the capture stream is actually up.  The audio thread
      * opens the PCM asynchronously, so give it a moment rather than silently
      * producing a video-only file. */
