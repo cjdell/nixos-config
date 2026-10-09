@@ -715,6 +715,10 @@ static int   audio_rate = 48000;
 static char  audio_err[160];
 static double pk_db[2], rms_db[2], hold_db[2];
 static unsigned clips = 0, xruns = 0;
+/* When the most recent clip happened (SDL ticks).  `clips` is a cumulative
+ * counter - correct for the readout, wrong for a verdict: one clip at the start
+ * of a session would shout TOO HOT for the rest of the run. */
+static unsigned long clip_last_t;
 static double gain_db = 0, boost_db = 0;
 
 static double dbfs(double v) { return v <= 0.0 ? -99.0 : 20.0 * log10(v / 32768.0); }
@@ -1080,8 +1084,8 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
     snd_mixer_selem_set_capture_switch_all(el_cap, 1);
     audio_apply_controls();
     fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, %d s max %.1f dBFS source"
-                    " -> capture %+.1f dB\n",
-            pk, AGC_WINDOW_S, agc_slow_src, gain_db);
+                    " -> total %+.1f dB (capture %+.1f, boost %+.1f)\n",
+            pk, AGC_WINDOW_S, agc_slow_src, gain_db + boost_db, gain_db, boost_db);
 }
 
 /* Open the host's playback stream for input monitoring.  Tries the desktop's
@@ -1387,7 +1391,7 @@ static snd_pcm_t *pcm = NULL;
         pthread_mutex_lock(&amtx);
         pk_db[0] = dbfs(p0); pk_db[1] = dbfs(p1);
         rms_db[0] = dbfs(sqrt(s0 / r)); rms_db[1] = dbfs(sqrt(s1 / r));
-        if (cl) clips += cl;
+        if (cl) { clips += cl; clip_last_t = SDL_GetTicks(); }
         /* AGC: accumulate the peak of the current window and let the controller
          * act twice a second; it consumes the window when it does. */
         double wpk = pk_db[0] > pk_db[1] ? pk_db[0] : pk_db[1];
@@ -1810,6 +1814,7 @@ static void draw_audio_panel(SDL_Renderer *ren)
     double p0 = pk_db[0], p1 = pk_db[1], r0 = rms_db[0], r1 = rms_db[1];
     double h0 = hold_db[0], h1 = hold_db[1], g = gain_db, bo = boost_db;
     unsigned cl = clips, xr = xruns;
+    unsigned long cl_t = clip_last_t;
     char err[160]; snprintf(err, sizeof err, "%s", audio_err);
     pthread_mutex_unlock(&amtx);
 
@@ -1845,15 +1850,19 @@ static void draw_audio_panel(SDL_Renderer *ren)
     draw_text(ren, x + w + 6, y + 1, 1, "L");
     draw_text(ren, x + w + 6, y + bh + 4, 1, "R");
 
-    snprintf(t, sizeof t, "L %6.1f  R %6.1f  pk %6.1f  gain %+.1f dB  boost %+.1f dB%s",
-             p0, p1, h0 > h1 ? h0 : h1, g, bo, agc ? "  [AGC]" : "");
+    snprintf(t, sizeof t, "L %6.1f  R %6.1f  pk %6.1f  gain %+.1f dB%s", p0, p1,
+             h0 > h1 ? h0 : h1, g + bo,
+             agc ? "  [AGC]" : (bo != 0.0 ? "  (cap + boost)" : ""));
     draw_text(ren, x, y + 2 * bh + 9, 1, t);
 
     const char *verdict;
     unsigned char col[3] = { 235, 235, 235 };
     double pk = h0 > h1 ? h0 : h1;
+    /* TOO HOT is about clipping now, not about a clip that happened once: the
+     * counter is cumulative and would keep the warning up forever. */
+    int hot = (SDL_GetTicks() - cl_t) < 2000;
     if (muted) { verdict = "MUTED (m)"; col[0] = 200; col[1] = 200; col[2] = 60; }
-    else if (cl) { verdict = agc ? "TOO HOT - AGC reducing" : "TOO HOT - lower gain (-)"; col[0] = 230; col[1] = 60; col[2] = 60; }
+    else if (hot) { verdict = agc ? "TOO HOT - AGC reducing" : "TOO HOT - lower gain (-)"; col[0] = 230; col[1] = 60; col[2] = 60; }
     else if (pk < -50) { verdict = "NO SIGNAL - check cable / source"; col[0] = 230; col[1] = 160; col[2] = 60; }
     else if (agc) {
         /* With the AGC in charge the judgement is against its own target, not
@@ -2249,9 +2258,9 @@ int main(int argc, char **argv)
             snprintf(h6, sizeof h6, " s             snapshot frame (PPM)     space  freeze display");
             snprintf(h7, sizeof h7, " o             monitor input on speakers (hear the gain first)");
             pthread_mutex_lock(&amtx);
-            snprintf(h8, sizeof h8, " audio: %s  gain %+.1f dB  boost %+.1f dB  AGC %s (ref %.1f dBFS)",
-                     srcs[cur_src].label, gain_db, boost_db, agc_on ? "on" : "off",
-                     agc_slow_src);
+            snprintf(h8, sizeof h8, " audio: %s  gain %+.1f dB (cap %+.1f + boost %+.1f)  AGC %s (ref %.1f dBFS)",
+                     srcs[cur_src].label, gain_db + boost_db, gain_db, boost_db,
+                     agc_on ? "on" : "off", agc_slow_src);
             pthread_mutex_unlock(&amtx);
             snprintf(h9, sizeof h9, " video: %s  720x576 interlaced 25 fps  %d kbps", INPUT_LABEL[cur_input], mpeg2_kbps);
             snprintf(h10, sizeof h10, " out: %.180s", out_dir);
@@ -2346,7 +2355,8 @@ int main(int argc, char **argv)
                         stage_name[2], stage_max[2], vq_count, VQ_SLOTS,
                         frames_held, frames,
                         srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
-                        hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips, gain_db);
+                        hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips,
+                        gain_db + boost_db);
                 pthread_mutex_unlock(&amtx);
                 gap_max = 0;
                 for (int q = 0; q < 3; q++) stage_max[q] = 0;
