@@ -102,6 +102,47 @@ you see it at `.191` the lease change has not been deployed / renewed yet.)
 Clients, not servers: `alderlake-thinkpad`, `rocketlakelatitude`, and the legacy
 `machines/*` configs.
 
+## Deploying an update to a host that cannot build it (NAS boxes, router)
+
+Applied 2026-10-09 to bring N100-NAS / GEN8-NAS / N40L-NAS from `26.05.20260910`
+/ `26.05.20260829` onto the flake pin `26.11.20261006.151fa4e`:
+
+- **SSH to the NAS hosts:** `cjdell` with key `~/.ssh/id_ed25519_ps` (passwordless
+  sudo). The default `id_ed25519` is *not* authorized there.
+- **`nix copy --to ssh://cjdell@nas` fails** — `cjdell` is not a trusted user on
+  any NAS (`trusted-users = root backup`). Instead build the toplevel on zen3 and
+  stream the closure *delta* into the NAS store as root:
+  `nix-store -qR <toplevel>` (zen3) vs `nix-store -qR /run/current-system` (NAS),
+  `comm -23` the two lists, then
+  `nix-store --export $(cat delta) | zstd -T2 -3 | ssh cjdell@nas 'zstd -d -q | sudo -n nix-store --import'`
+  (~6 GB per host, a few minutes on the LAN), then on the NAS
+  `sudo nix-env -p /nix/var/nix/profiles/system --set <toplevel>` and
+  `sudo <toplevel>/bin/switch-to-configuration switch`. This skips flake
+  evaluation on the target entirely and guarantees the toplevel you built is the
+  one that runs. `nixos-confirm` afterwards on **N100-NAS** only.
+- **A kernel bump means the ZFS module only loads on the next boot** (pools keep
+  running on the loaded module; ZFS userland was unchanged at 2.4.4, so nothing
+  complains). Reboot each ZFS host to actually move onto the new kernel.
+- **grafton-router cannot be built on zen3 at all**: `frigate-monitor` is a
+  `path:/home/cjdell/Projects/frigate-monitor` flake input (flake.nix:37) that
+  exists only on the router, so evaluating `.#grafton-router` elsewhere dies with
+  `path "…/frigate-monitor" does not exist`. Rebuild it on the router — nixpkgs
+  paths (incl. kanidm) substitute from cache.nixos.org, so a switch there takes
+  minutes even with 15 GiB RAM.
+- **kanidm is now `pkgs.kanidm_1_11.withSecretProvisioning` (1.11.2, domain level
+  15)** — `hosts/grafton-router/services/kanidm.nix:9`; the 1.10.5 EOL permit is
+  gone from `flake.nix`. Kanidm only migrates **one minor version at a time**, so
+  the next bump must be 1.11 → 1.12. Procedure that worked: tar `/var/lib/kanidm`
+  with the service stopped (344 KB — copy it off-host), then run
+  `kanidmd domain upgrade-check -c <server.toml>` **while the old server is
+  running** (it talks to the live `/run/kanidmd/sock`; with the server stopped it
+  just errors `Unable to connect to socket path`), then `nixos-rebuild switch` —
+  the new server logs `migrate_domain_1_10_to_1_11` + `Domain level has been
+  raised to 15` by itself. Verify with the OIDC discovery endpoint
+  (`/oauth2/openid/grafana/.well-known/openid-configuration`) and
+  `ldapwhoami -H ldaps://kanidm.home.chrisdell.info:8998 -x` (must use the real
+  hostname — the cert will not match `127.0.0.1`).
+
 ## Critical: auto-rollback + `nixos-confirm` (READ THIS FIRST)
 
 `system.autoRollback.enable = true` is set on **N100-NAS**
