@@ -1004,6 +1004,7 @@ static char  cap_path[512];
 static unsigned long long cap_vframes = 0, cap_vdrops = 0, cap_adrops = 0;
 static unsigned long long cap_abytes = 0;
 static time_t cap_t0 = 0;
+static unsigned long cap_t0_tick = 0;   /* SDL ticks, for a smooth REC counter */
 static int cap_pending = 0;      /* `c' pressed, waiting for the first frame */
 static pthread_mutex_t cap_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cap_cv = PTHREAD_COND_INITIALIZER;
@@ -1083,20 +1084,87 @@ static void cap_feed_audio(const void *p, size_t n)
     cap_put();
 }
 
+/* ---- video feed: queue + writer thread ---------------------------------
+ * A 720x576 UYVY frame is 829 KB and ffmpeg's stdin is a pipe.  Feeding it
+ * inline meant the main loop blocked in write() whenever the encoder (or the
+ * disk under it) stalled - and while the main loop is blocked it is not
+ * draining the probe either, so the whole pipeline hiccups: that is the
+ * "picture freezes for up to a second every 10-20 s while recording" bug.
+ * Frames now go into a small ring and a dedicated thread does the blocking
+ * writes.  The display never waits for the encoder.  If the ring is full the
+ * newest frame is dropped whole and counted, which keeps rawvideo framing
+ * intact (a partial frame would desynchronise the decoder). */
+#define VQ_SLOTS 4
+static unsigned char *vq[VQ_SLOTS];
+static int vq_head, vq_count, vq_stop, vq_started;
+static pthread_t vq_thr;
+static pthread_mutex_t vq_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  vq_cv = PTHREAD_COND_INITIALIZER;
+
 static void cap_feed_video(void)
 {
-    int vfd, afd;
-    if (cap_get(&vfd, &afd) < 0) return;
-    if (vfd >= 0) {
-        if (pipe_write(vfd, fuv, UV_SIZE, 400) == 0) {
-            pthread_mutex_lock(&cap_mtx); cap_vframes++; pthread_mutex_unlock(&cap_mtx);
+    pthread_mutex_lock(&vq_mtx);
+    if (vq_count >= VQ_SLOTS) {
+        pthread_mutex_unlock(&vq_mtx);
+        pthread_mutex_lock(&cap_mtx);
+        cap_vdrops++;
+        pthread_mutex_unlock(&cap_mtx);
+        return;
+    }
+    int tail = (vq_head + vq_count) % VQ_SLOTS;
+    memcpy(vq[tail], fuv, UV_SIZE);
+    vq_count++;
+    pthread_cond_signal(&vq_cv);
+    pthread_mutex_unlock(&vq_mtx);
+}
+
+static void *vq_thread(void *unused)
+{
+    for (;;) {
+        pthread_mutex_lock(&vq_mtx);
+        while (!vq_count && !vq_stop) pthread_cond_wait(&vq_cv, &vq_mtx);
+        if (vq_stop && !vq_count) { pthread_mutex_unlock(&vq_mtx); break; }
+        int slot = vq_head;
+        vq_head = (vq_head + 1) % VQ_SLOTS;
+        vq_count--;
+        pthread_mutex_unlock(&vq_mtx);
+
+        int vfd, afd;
+        if (cap_get(&vfd, &afd) < 0 || vfd < 0) continue;    /* capture ended */
+        if (pipe_write(vfd, vq[slot], UV_SIZE, 3000) == 0) {
+            pthread_mutex_lock(&cap_mtx); cap_vframes++;
+            pthread_mutex_unlock(&cap_mtx);
         } else {
-            pthread_mutex_lock(&cap_mtx); cap_vdrops++; pthread_mutex_unlock(&cap_mtx);
+            pthread_mutex_lock(&cap_mtx); cap_vdrops++;
+            pthread_mutex_unlock(&cap_mtx);
             cap_died();
         }
+        cap_put();
     }
-    cap_put();
+    return NULL;
 }
+
+static void vq_start(void)
+{
+    for (int i = 0; i < VQ_SLOTS; i++)
+        if (!vq[i]) vq[i] = malloc(UV_SIZE);
+    vq_head = vq_count = vq_stop = 0;
+    if (!vq_started) {
+        if (pthread_create(&vq_thr, NULL, vq_thread, NULL) == 0) vq_started = 1;
+    }
+}
+
+static void vq_stop_and_drain(void)
+{
+    if (!vq_started) return;
+    pthread_mutex_lock(&vq_mtx);
+    vq_stop = 1;
+    pthread_cond_broadcast(&vq_cv);
+    pthread_mutex_unlock(&vq_mtx);
+    pthread_join(vq_thr, NULL);
+    vq_started = 0;
+}
+
 
 static int cap_start(void)
 {
@@ -1109,6 +1177,7 @@ static int cap_start(void)
         int fl = fcntl(ap[1], F_GETFL, 0);
         fcntl(ap[1], F_SETFL, fl | O_NONBLOCK);
     }
+    vq_start();                    /* the writer thread that owns the video pipe */
 
     /* Only mux audio if the capture stream is actually up.  The audio thread
      * opens the PCM asynchronously, so give it a moment rather than silently
@@ -1178,6 +1247,7 @@ static int cap_start(void)
     cap_pid = pid; cap_vfd = vp[1]; cap_afd = ap[1]; cap_on = 1;
     cap_vframes = cap_vdrops = cap_adrops = cap_abytes = 0;
     cap_t0 = time(NULL);
+    cap_t0_tick = SDL_GetTicks();
     pthread_mutex_unlock(&cap_mtx);
     fprintf(stderr, "pctv-monitor: MPEG-2 capture -> %s (audio %s, %d kbps, pid %d)\n",
             cap_path, cap_has_audio ? srcs[cur_src].label : "OFF", mpeg2_kbps, pid);
@@ -1186,6 +1256,7 @@ static int cap_start(void)
 
 static void cap_stop(void)
 {
+    vq_stop_and_drain();          /* flush the frame ring to ffmpeg, then reap it */
     pthread_mutex_lock(&cap_mtx);
     if (!cap_on && cap_pid < 0) { pthread_mutex_unlock(&cap_mtx); return; }
     cap_closing = 1;
@@ -1523,8 +1594,23 @@ int main(int argc, char **argv)
         fprintf(stderr, "pctv-monitor: capture queued, starting with the first frame\n");
     }
 
+    int help_on = 0;          /* `H' toggles the key reference overlay */
+    unsigned long gap_max = 0;
+    /* Per-stage worst time in the last second.  A freeze is only fixable if we
+     * know which stage ate the time: reading/decoding the stream, handing the
+     * frame to the encoder, or drawing/presenting it. */
+    unsigned long stage_max[3] = { 0, 0, 0 };
+    const char *stage_name[3] = { "parse", "feed", "render" };
+
     while (running) {
         if (g_quit) { running = 0; break; }
+        {   /* the honest measure of "did the picture stall": the longest gap
+             * between two passes of this loop, reported and reset each second */
+            static unsigned long iter_prev = 0;
+            unsigned long it = SDL_GetTicks();
+            if (iter_prev && it - iter_prev > gap_max) gap_max = it - iter_prev;
+            iter_prev = it;
+        }
         int want_input = cur_input, want_src = cur_src;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -1546,6 +1632,7 @@ int main(int argc, char **argv)
                     else cap_pending = 1;      /* no video yet: start on frame 1 */
                     show_overlay(4000);
                     break;
+                case SDLK_h: help_on = !help_on; show_overlay(4000); break;
                 case SDLK_a:
                     if (e.key.keysym.mod & KMOD_SHIFT) {
                         pthread_mutex_lock(&amtx); pend_agc_toggle = 1;
@@ -1613,6 +1700,7 @@ int main(int argc, char **argv)
 
         /* drain the child's stdout; stop when the parse buffer is nearly full
          * so parse() can make room - discarding here would lose stream data */
+        unsigned long t_stage = SDL_GetTicks();
         for (;;) {
             size_t space = RBUF - rlen;
             if (space < 4 + W * 2) break;
@@ -1647,13 +1735,20 @@ int main(int argc, char **argv)
         }
 
         /* a complete interlaced frame is ready for the encoder */
+        {   /* parse stage: stream read + BT.656 decode, top of loop to here */
+            unsigned long d = SDL_GetTicks() - t_stage;
+            if (d > stage_max[0]) stage_max[0] = d;
+        }
         if (parity_mask == 3 || field_repeat) {
             parity_mask = 0; field_repeat = 0;
             /* Start the encoder on the first frame, not on the key press: both
              * streams then get PTS 0 at the same instant, and the audio cannot
              * run ahead by the decoder's lock time (8 s with no source). */
             if (cap_pending && !cap_on) { cap_pending = 0; cap_start(); }
+            unsigned long t_feed = SDL_GetTicks();
             cap_feed_video();
+            unsigned long d = SDL_GetTicks() - t_feed;
+            if (d > stage_max[1]) stage_max[1] = d;
         }
 
         if (frame_ready) {
@@ -1661,8 +1756,8 @@ int main(int argc, char **argv)
             frame_ready = 0;
             if (snap_after && frames >= snap_after) { snapshot_ppm(); running = 0; }
         }
-        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-        SDL_RenderClear(ren);
+        t_stage = SDL_GetTicks();
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);        SDL_RenderClear(ren);
         if (!paused) SDL_RenderCopy(ren, tex, NULL, NULL);
 
         /* input banner: always name the active input, plus transient hints */
@@ -1682,30 +1777,81 @@ int main(int argc, char **argv)
         }
         draw_audio_panel(ren);
 
-        /* capture status, top right */
+        /* `H' - the key reference, left up until H is pressed again */
+        if (help_on) {
+            const char *hl[12];
+            char h0[200], h1[200], h2[200], h3[200], h4[200], h5[200], h6[200],
+                 h7[200], h8[200], h9[200], h10[200], h11[200];
+            snprintf(h0, sizeof h0, "HELP (press H to close)");
+            snprintf(h1, sizeof h1, " 1 / 2 / Tab   video input: Composite, S-Video");
+            snprintf(h2, sizeof h2, " a             audio input (cycle)      A  automatic gain");
+            snprintf(h3, sizeof h3, " - / +         capture gain             b  input boost");
+            snprintf(h4, sizeof h4, " m             mute capture             g  colour / grey");
+            snprintf(h5, sizeof h5, " c             MPEG-2 capture on/off    r  raw BT.656 dump");
+            snprintf(h6, sizeof h6, " s             snapshot frame (PPM)     space  freeze display");
+            snprintf(h7, sizeof h7, " q / ESC       quit (Ctrl-C also finalises a capture)");
+            pthread_mutex_lock(&amtx);
+            snprintf(h8, sizeof h8, " audio: %s  gain %+.1f dB  boost %+.1f dB  AGC %s",
+                     srcs[cur_src].label, gain_db, boost_db, agc_on ? "on" : "off");
+            pthread_mutex_unlock(&amtx);
+            snprintf(h9, sizeof h9, " video: %s  720x576 interlaced 25 fps  %d kbps", INPUT_LABEL[cur_input], mpeg2_kbps);
+            snprintf(h10, sizeof h10, " out: %.180s", out_dir);
+            snprintf(h11, sizeof h11, " recording: red border + REC badge; drops counted there");
+            hl[0] = h0; hl[1] = h1; hl[2] = h2; hl[3] = h3; hl[4] = h4; hl[5] = h5;
+            hl[6] = h6; hl[7] = h7; hl[8] = h8; hl[9] = h9; hl[10] = h10; hl[11] = h11;
+            draw_panel_lines(ren, 10, 70, hl, 12, 1);
+        }
+
+        /* capture status, top right: recording has to be unmistakable - a red
+         * frame border, a big blinking REC badge and a running counter */
         if (cap_pending && !cap_on) {
             const char *lines[1];
             char l0[200];
-            snprintf(l0, sizeof l0, "REC MPEG-2 queued - waiting for video lock");
+            snprintf(l0, sizeof l0, "REC queued - waiting for video lock");
             lines[0] = l0;
-            draw_panel_lines(ren, W - text_w(l0, 1) - 22, 8, lines, 1, 1);
+            draw_panel_lines(ren, W - text_w(l0, 2) - 30, 8, lines, 1, 2);
         }
         if (cap_on) {
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            for (int t = 0; t < 4; t++) {          /* red border, 4 px in */
+                SDL_Rect r[4] = { { t, t, W - 2 * t, 2 }, { t, H - t - 2, W - 2 * t, 2 },
+                                  { t, t, 2, H - 2 * t }, { W - t - 2, t, 2, H - 2 * t } };
+                SDL_SetRenderDrawColor(ren, 225, 45, 45, 255);
+                SDL_RenderFillRect(ren, &r[t]);
+            }
+
+            unsigned long ms = SDL_GetTicks() - cap_t0_tick;
+            char big[64];
+            snprintf(big, sizeof big, "REC %02lu:%02d.%lu",
+                     ms / 60000, (int)((ms / 1000) % 60), (ms / 100) % 10);
+            const char *bl[1]; bl[0] = big;
+            int bw = text_w(big, 2) + 26;
+            draw_panel_lines(ren, W - bw - 24, 8, bl, 1, 2);
+            /* the dot blinks once a second so it reads as "live" */
+            int on = (ms / 1000) % 2 == 0;
+            SDL_SetRenderDrawColor(ren, on ? 255 : 150, on ? 40 : 30, on ? 40 : 30, 255);
+            SDL_Rect dot = { W - bw - 14, 14, 14, 14 };
+            SDL_RenderFillRect(ren, &dot);
+
             const char *lines[2];
-            char l0[200], l1[200];
+            char l1[200], l2[200];
             pthread_mutex_lock(&cap_mtx);
-            snprintf(l0, sizeof l0, "REC MPEG-2 %lus  audio %s",
-                     (unsigned long)(time(NULL) - cap_t0),
-                     cap_has_audio ? srcs[cur_src].label : "OFF");
-            snprintf(l1, sizeof l1, "%llu frames  %lld audio B  drops %llu/%llu",
-                     cap_vframes, (long long)cap_abytes, cap_vdrops, cap_adrops);
+            snprintf(l1, sizeof l1, "%llu frames  %llu B  drops %llu/%llu",
+                     cap_vframes, (unsigned long long)cap_abytes,
+                     cap_vdrops, cap_adrops);
             pthread_mutex_unlock(&cap_mtx);
-            lines[0] = l0; lines[1] = l1;
-            int wpx = text_w(l0, 1) > text_w(l1, 1) ? text_w(l0, 1) : text_w(l1, 1);
-            draw_panel_lines(ren, W - wpx - 22, 8, lines, 2, 1);
+            snprintf(l2, sizeof l2, "audio %s  queue %d/%d",
+                     cap_has_audio ? srcs[cur_src].label : "OFF", vq_count, VQ_SLOTS);
+            lines[0] = l1; lines[1] = l2;
+            int wpx = text_w(l1, 1) > text_w(l2, 1) ? text_w(l1, 1) : text_w(l2, 1);
+            draw_panel_lines(ren, W - wpx - 24, 8 + 16 * 2 + 10, lines, 2, 1);
         }
 
         SDL_RenderPresent(ren);
+        {   /* render stage: from the texture update to the present returning */
+            unsigned long d = SDL_GetTicks() - t_stage;
+            if (d > stage_max[2]) stage_max[2] = d;
+        }
 
         double now = (double)SDL_GetTicks() / 1000.0;
         if (now - last_t >= 1.0) {
@@ -1727,11 +1873,17 @@ int main(int argc, char **argv)
             SDL_SetWindowTitle(win, title);
             if (getenv("PCTV_VERBOSE")) {
                 pthread_mutex_lock(&amtx);
-                fprintf(stderr, "monitor: %s | in %llu B rlen %zu | audio %s ok=%d L %.1f R %.1f pk %.1f "
-                                "clips %u gain %+.1f dB\n",
-                        title, bytes_in, rlen, srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
+                fprintf(stderr, "monitor: %s | in %llu B rlen %zu | maxgap %lums "
+                                "(%s %lums %s %lums %s %lums) vq %d/%d | "
+                                "audio %s ok=%d L %.1f R %.1f pk %.1f clips %u gain %+.1f dB\n",
+                        title, bytes_in, rlen, gap_max,
+                        stage_name[0], stage_max[0], stage_name[1], stage_max[1],
+                        stage_name[2], stage_max[2], vq_count, VQ_SLOTS,
+                        srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
                         hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips, gain_db);
                 pthread_mutex_unlock(&amtx);
+                gap_max = 0;
+                for (int q = 0; q < 3; q++) stage_max[q] = 0;
             }
             if (capture_secs && cap_on && time(NULL) - cap_t0 >= (time_t)capture_secs)
                 running = 0;

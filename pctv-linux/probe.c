@@ -2455,7 +2455,16 @@ static void stream_cb(struct libusb_transfer *t)
             ssize_t w = write(STDOUT_FILENO, t->buffer + off, len - off);
             if (w < 0) {
                 if (errno == EINTR) continue;
-                break;   /* EAGAIN/EPIPE: drop the rest of this chunk */
+                if (errno == EPIPE || errno == EBADF) {
+                    /* The reader is gone (the monitor died or closed the pipe).
+                     * Keep streaming forever in that case would leave this
+                     * process holding the USB interface, which makes every
+                     * later run fail with "claim if0: Resource busy" and no
+                     * data - and that looks like a dead card. */
+                    stream_stop = 1;
+                    break;
+                }
+                break;   /* EAGAIN: drop the rest of this chunk */
             }
             off += w;
         }
