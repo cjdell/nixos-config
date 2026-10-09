@@ -41,7 +41,13 @@ LLAMA_HASH=sha256-SRGoXa+4ACBCB3eaG9XFYhMN1i0FyPEy9Rrer+dFGYI=
 if [ "${1:-}" = "--check" ]; then echo "UD-IQ4_XS shards OK"; exit 0; fi
 
 STRATA=$(nix build --no-link --print-out-paths "$FLAKE#strata")
-PY=$(grep -o '/nix/store/[^ ]*-python3[^ ]*/bin/python3' "$STRATA/bin/strata-server" | head -1)
+# The engine's own python has numpy but NOT pyyaml, and 0.1.41's iq_pack.py
+# imports `from gguf import ...`, whose package __init__ pulls gguf/metadata.py
+# -> `import yaml` (ModuleNotFoundError).  Use a python from the flake's nixpkgs
+# pin with both.
+PY=$(nix build --no-link --print-out-paths --impure --expr \
+  "let f = builtins.getFlake \"$FLAKE\"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in \
+   p.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.regex ])")/bin/python3
 GGUF_PY=$(nix build --no-link --print-out-paths --impure --expr \
   "let f = builtins.getFlake \"$FLAKE\"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in \
    p.fetchFromGitHub { owner=\"ggml-org\"; repo=\"llama.cpp\"; \

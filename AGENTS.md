@@ -847,6 +847,17 @@ both run `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41/…`, the pr
 `Qwen3.8-Flash-Next-IQ3_S` (GSQ-RCO GGUF, no MTP head). Docs:
 [`docs/strata.md`](docs/strata.md).
 
+- **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`,
+  default `"iq3s"` = live). `hosts/zen3-nixos/ai/strata.nix` carries
+  `models.iq3s` / `models.ud-iq4-xs` (GGUF + pack paths, `--ple-gguf` only for the
+  2-shard pack, and `--resident-budget-gib 55` for the UD one). The second pack is
+  Unsloth **UD-IQ4_XS** (93.7 GB / 3 shards, fetched by
+  `scripts/fetch-strata-udiq4xs.sh`, packed by `scripts/repack-strata-udiq4xs.sh`
+  with **`--compat-bf16` required** — its 195 `hc_*` projections are Q8_0, which the
+  AMD build cannot read natively in 0.1.41). Prepared 2026-10-09, **not switched**:
+  it costs +8.6 GiB of resident experts and ~2,000 GPU expert-cache slots (est.
+  33-37 tok/s at 255 K vs 41), while 262144 ctx itself is unaffected. Analysis and
+  the measured quant mix: [`docs/strata.md`](docs/strata.md) "UD-IQ4_XS".
 - **A long-context reply can collapse to one repeated token (or a thinking-only
   turn with no answer).** This is the **fp16-overflow #606 class**, not a model
   quality issue: a `q8_1` activation block stores its scale and 32-value sum as

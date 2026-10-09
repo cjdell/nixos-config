@@ -35,7 +35,12 @@ s1=$(stat -c %s "$SHARD1"); s2=$(stat -c %s "$SHARD2")
 if [ "${1:-}" = "--check" ]; then echo "IQ3_S shards OK"; exit 0; fi
 
 STRATA=$(nix build --no-link --print-out-paths "$FLAKE#strata")
-PY=$(grep -o '/nix/store/[^ ]*-python3[^ ]*/bin/python3' "$STRATA/bin/strata-server" | head -1)
+# Not the engine's python: 0.1.41's iq_pack.py imports `from gguf import ...`,
+# whose package __init__ needs pyyaml, which serverPython does not carry.  Same
+# python scripts/repack-strata-udiq4xs.sh uses.
+PY=$(nix build --no-link --print-out-paths --impure --expr \
+  "let f = builtins.getFlake \"$FLAKE\"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in \
+   p.python3.withPackages (ps: [ ps.numpy ps.pyyaml ps.regex ])")/bin/python3
 GGUF_PY=$(nix build --no-link --print-out-paths --impure --expr \
   "let f = builtins.getFlake \"$FLAKE\"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in \
    p.fetchFromGitHub { owner=\"ggml-org\"; repo=\"llama.cpp\"; \

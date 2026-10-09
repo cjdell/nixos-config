@@ -29,8 +29,11 @@ the engine python from `.#strata`, materialises the pinned llama.cpp `gguf-py`,
 runs `tools/iq_pack.py` -> `/home/cjdell/Strata/pack/iq3s`). `conversions.json`
 reports `tensors: []` - the GSQ-RCO file is already in the engine's read form,
 no `--compat-bf16` needed. The next rungs up are Unsloth's UD-* family
-(UD-Q3_K_XL 90 GB, UD-IQ4_XS 94 GB, UD-Q4_K_XL 111 GB); the last does not fit
-93 GiB of RAM, and the middle two squeeze the PLE page cache.
+(UD-Q3_K_XL 90 GB, UD-IQ4_XS 94 GB, UD-Q4_K_XL 111 GB). UD-Q4_K_XL is
+`"nvidia_only": True` in `setup.py:220`, so it is not an option on this box at
+all; UD-IQ4_XS is analysed under "UD-IQ4_XS" below. (Nothing "squeezes the PLE
+page cache": the PLE table is read with `--ple-io direct` — the default,
+`generate.cpp:374` — unbuffered from NVMe, so it never competes for RAM.)
 
 When IQ3_S is trusted, reclaim the old files with
 `scripts/cleanup-strata-iq3xxs.sh --yes` (~46 GB: shard 1 and the iq3xxs pack;
@@ -144,6 +147,86 @@ to us, read off the tree:
   cache 13,104 experts / 24.87 GiB, `ready` in 26 s, `/v1/models` 200, and a
   57-token prompt decoded at 47.9 tok/s with 6/6 drafts accepted. No
   `verify: non-finite logits` fire on the first requests.
+
+## UD-IQ4_XS (prepared 2026-10-09, NOT switched)
+
+Unsloth's ~4-bit **UD-IQ4_XS** is the one rung above IQ3_S this box can run.
+Everything is in place — shards fetched and hash-verified, pack built, config
+switch added — and `config.ai.strataModel` stays `"iq3s"`, so the live service
+is untouched until someone flips it.
+
+**Files**: `scripts/fetch-strata-udiq4xs.sh` (three shards at the revision
+`setup.py` pins, sizes + SHA-256 from `UNSLOTH_IQ4_XS_SHARDS`),
+`scripts/repack-strata-udiq4xs.sh` (`iq_pack.py --gguf <shard1> --compat-bf16`,
+no `--experts-bin`), and the switch itself: `ai.strataModel` in
+`hosts/zen3-nixos/ai/default.nix` with the per-model paths/args in
+`hosts/zen3-nixos/ai/strata.nix` (`models.iq3s` / `models.ud-iq4-xs`). The unit's
+`ConditionPathExists = <pack>/index.txt` means a half-prepared pack never starts.
+
+**What the file actually is** (read from the GGUF metadata, not the docs — and
+note the GGUF tensor-type enum is `F32=0, F16=1, Q4_0=2, Q4_1=3, Q5_0=6, Q5_1=7,
+Q8_0=8, Q8_1=9, Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13, Q6_K=14, IQ2_XXS=16,
+IQ2_XS=17, IQ3_XXS=18, IQ1_S=19, IQ4_NL=20, IQ3_S=21, IQ2_S=22, IQ4_XS=23,
+IQ1_M=29, BF16=30` — the same numbering strata's `name_of()` uses, *not* ggml's C
+enum). Each shard is its own GGUF container: shard 1 is metadata only (0 tensors,
+10.9 MB), shard 2 has 373 tensors incl. the PLE table, shard 3 the rest
+(`split.count=3`, 1224 tensors in total). Per layer, all 48:
+
+| tensor | quant |
+| --- | --- |
+| `ffn_gate_exps` / `ffn_up_exps` | IQ3_S in 47 layers, **IQ4_XS in blk.2** |
+| `ffn_down_exps` | IQ4_NL in 43 layers, **Q8_0 in blk.2, 4, 30, 46, 47** |
+| `ffn_*_shexp` (shared expert) + the 195 `hc_*` projections | Q8_0 |
+| `token_embd` / `output` | Q8_0 / Q6_K |
+| `per_layer_token_embd` (PLE) | IQ4_NL, 28.8 GB — the same table as GSQ's shard 2 |
+
+Bytes by type across all three shards: IQ4_NL 49.09 GB (28.8 of it the PLE
+table), IQ3_S 33.88, Q8_0 8.93, IQ4_XS 0.94, Q6_K 0.52 — **93.72 GB total**,
+matching `setup.py`'s `download_gb: 93.7`.
+
+**Why the pack needs `--compat-bf16`**: those Q8_0 `hc_*` projections are not a
+form the AMD build can read yet (the native Q8_0 read path is "measured on AMD
+only and not in this release", i.e. not in 0.1.41), so `iq_pack.py` rounds them
+to BF16. Upstream measures that rounding as PPL 6-9 % *above* llama.cpp's on the
+same file — so part of any UD-IQ4_XS quality gain can be eaten by the pack, and
+that is the first thing to check if it ever goes live.
+
+**The budget** (`--resident-budget-gib 55`, `setup.py:1515-1521` for this box:
+RAM 94 GiB − `UNSLOTH_RAM_LEFT_GB` 24 − ceil(KV streamed to RAM ≈ 3), capped at
+`int(arena_gb 59.5 / 1.0737)` = 55): every expert in RAM, no SSD expert tier.
+That is **+8.6 GiB** over the IQ3_S engine's 46.84 GiB of resident experts
+(~24 GiB of `available` left). Without the flag the engine sizes its own arena
+for all 55.4 GiB and the box OOMs.
+
+**What it costs**: the 24.87 GiB GPU expert cache holds ~11,000 of its experts
+instead of 13,104 (avg blob 2.421 MB vs 2.046 MB), so 44.9 % of the 24,576 slots
+instead of 53.1 %. Estimated from the live hit rates (91.0 % at 113 K depth,
+97 % short) and upstream's cold arm at 255 K: **~33-37 tok/s at 255 K** (vs 41),
+55-70 short-context, prefill −5-10 %. `--max-context 262144` itself is
+unaffected — the int8 KV is 13,728 B/token (13 cells × 1056 B) and
+quant-independent, so `--kv-resident 32768` still costs 0.42 GiB of VRAM.
+
+**The pack** (`scripts/repack-strata-udiq4xs.sh`, 2026-10-09 19:03, 1.4 GB in
+`/home/cjdell/Strata/pack/ud-iq4-xs`): `index.txt` 1079 tensors / 303 served
+natively / 0 in extra.bin / arena 1.38 GiB; `conversions.json` **460 tensors
+converted to the engine's form (264 exact, 196 rounded, max |err| 0.0144)** —
+against IQ3_S's `tensors: []`, this pack really does lose information to the
+BF16 rounding; `compat-bf16.json` 195 tensors, 1.20 GiB, expert and PLE bytes
+unchanged; `native_experts.txt` **v4** because blk.14's gate/up/down straddle the
+shard 2/3 boundary (per-role shard column); tokenizer vocab 248320, merges
+247587, pre qwen35.
+
+**Tooling gotcha** (why both repack scripts now build their own python): 0.1.41's
+`iq_pack.py` does `from gguf import ...`, whose package `__init__` imports
+`gguf/metadata.py` → `yaml`, and `strata_tokenizer.py` imports `regex`. The
+engine's `serverPython` has numpy + psutil only, so `python3.withPackages
+[ numpy pyyaml regex ]` from the flake's nixpkgs pin is used instead — the iq3s
+script had the same latent break and is fixed the same way.
+
+**Before switching**, dry-run the VRAM plan: the engine prints `FITS` or
+`*** DOES NOT FIT ***` (`device_main.cpp:91`) for its expert-cache/arena plan,
+so a run that would spill is visible in the first seconds of
+`journalctl -u strata`.
 
 ## 0.1.41 (2026-10-09)
 
