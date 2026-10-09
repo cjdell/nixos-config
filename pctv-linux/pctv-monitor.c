@@ -357,7 +357,11 @@ static void usage(const char *p)
         "  --gain <0-100>      capture gain as %% of the hardware range\n"
         "  --boost <0-3>       input boost step (Line/Mic/Internal Mic Boost)\n"
         "  --agc/--no-agc      automatic gain control (default on): keeps the\n"
-        "                      peaks near -18 dBFS by driving the codec\n"
+        "                      peaks near -18 dBFS.  Slow by design - it trims\n"
+        "                      the codec toward the loudest peak of the last 30\n"
+        "                      s at 0.5 dB/s, to calibrate the input, not to\n"
+        "                      compress the programme (emergency pull-down only\n"
+        "                      when the ADC is at full scale)\n"
         "  --monitor           start with input monitoring on: play the captured\n"
         "                      samples out of the host's speakers (key: o)\n"
         "  --out-dir <dir>     where captures go (default ~/Videos, else /tmp)\n"
@@ -889,85 +893,130 @@ static void audio_apply_controls(void)
 
 /* Automatic gain control.  Drives the codec's Capture volume - and, when that
  * runs out of headroom or bottoms out, the coarser input boost - so the
- * program's peaks sit in the metered -12..-3 dBFS zone.  The gain is applied
- * in the hardware, never as a software multiply, so the meter and the recorded
- * file always agree.  Called from the audio thread with amtx held; it consumes
- * the peak of the window it is handed.  The source level on this wiring moved
- * by ~20 dB between two captures an hour apart, which is the whole argument
- * for having this. */
-static double agc_win_pk = -99.0;
+ * programme's peaks sit at AGC_TARGET_DBFS.  The gain is applied in the
+ * hardware, never as a software multiply, so the meter and the recorded file
+ * always agree.  Called from the audio thread with amtx held.
+ *
+ * This is a CALIBRATION loop, not a dynamics processor.  The source level on
+ * this wiring moved ~20 dB between two captures an hour apart and drifts slowly
+ * within one; that drift is what the loop exists for.  A fast loop would be a
+ * compressor: it pulls quiet passages up and ducks loud ones, which is exactly
+ * the dynamic range the capture is meant to keep.  So
+ *
+ *   - the reference is the loudest peak of the last AGC_WINDOW_S seconds, kept
+ *     in a ring of per-second maxima and stored in SOURCE units (peak minus the
+ *     gain applied when it was measured), so moving the gain never moves the
+ *     estimate;
+ *   - the target is that peak at AGC_TARGET_DBFS;
+ *   - the gain only ever slews at AGC_RATE_DBPS - 0.5 dB/s, so a 20 dB
+ *     recalibration takes 40 s and nothing is ever stepped - and inside
+ *     AGC_DEADBAND_DB of the target it does not move at all, so a settled
+ *     source is left completely alone.
+ *
+ * One fast path exists and it only ever pulls DOWN: if the ADC clipped in this
+ * interval, or a block arrived within AGC_CLIP_GUARD_DB of full scale, the gain
+ * slews at AGC_EMERG_DBPS toward where THIS peak would sit at the target.  That
+ * is damage control for a source measured stepping ~20 dB inside a second, not
+ * a way of squeezing the programme; reaching back up is slow again. */
+#define AGC_TARGET_DBFS   (-18.0)
+#define AGC_WINDOW_S        30     /* peak window: "average over ~30 s" */
+#define AGC_RATE_DBPS       0.5    /* how fast the calibration may move */
+#define AGC_EMERG_DBPS      4.0    /* only while the ADC is at/over full scale */
+#define AGC_DEADBAND_DB     0.4
+#define AGC_CLIP_GUARD_DB   3.0
 
-/* Where the AGC tries to keep the peaks.  -18 dBFS, not the top of the meter's
- * -12..-3 zone: this source has been measured swinging ~20 dB by itself inside
- * a second, and a feedback loop (no lookahead) can only follow, not predict -
- * the headroom is what keeps those steps out of the ADC.  A capture at -18 dBFS
- * peaks still has 6 dB of clean room for ffmpeg/volume normalisation later. */
-#define AGC_TARGET_DBFS (-18.0)
+static double agc_win_pk = -99.0;      /* peak since the last tick */
+static double agc_slot_pk = -99.0;     /* peak of the current 1 s slot */
+static double agc_ring[AGC_WINDOW_S];  /* per-second peaks, source dBFS */
+static int    agc_slot, agc_ring_ready;
+static unsigned long agc_slot_t, agc_last_t;
+static double agc_slow_src = -99.0;    /* the ring's max: the reference peak */
+static double agc_acc;                 /* dB not yet a whole mixer step */
+
+/* Forget the calibration: a different input, or the loop switched back on. */
+static void agc_reset(void)
+{
+    agc_win_pk = agc_slot_pk = agc_slow_src = -99.0;
+    agc_slot = 0; agc_ring_ready = 0; agc_slot_t = agc_last_t = 0;
+    agc_acc = 0.0;
+}
 
 static void agc_tick(double win_pk, unsigned long long clips_now)
 {
     static unsigned long long last_clips;
-    static unsigned long last_move, last_eval;
     unsigned long t = SDL_GetTicks();
-    double pk = agc_win_pk > win_pk ? agc_win_pk : win_pk;
+    double pk = agc_win_pk;
     agc_win_pk = -99.0;
 
-    if (!el_cap || cap_hi <= cap_lo) { last_clips = clips_now; return; }
+    if (!el_cap || cap_hi <= cap_lo) {
+        if (getenv("PCTV_AGC_DEBUG"))
+            fprintf(stderr, "agc: no capture element (el_cap=%p range %ld..%ld)\n",
+                    (void *)el_cap, cap_lo, cap_hi);
+        last_clips = clips_now; agc_last_t = t; return;
+    }
+    double dt = agc_last_t ? (double)(t - agc_last_t) / 1000.0 : 0.05;
+    agc_last_t = t;
+    if (dt <= 0.0 || dt > 5.0) dt = 0.05;
     double spdb = (cap_db_hi > cap_db_lo)
         ? (double)(cap_hi - cap_lo) / ((double)(cap_db_hi - cap_db_lo) / 100.0)
         : 1.0;
 
+    if (!agc_ring_ready) {
+        for (int i = 0; i < AGC_WINDOW_S; i++) agc_ring[i] = -99.0;
+        agc_slot = 0; agc_slot_t = t; agc_ring_ready = 1;
+    }
+
+    /* Close a second of measurement, in source units, and re-read the window. */
+    if (pk > agc_slot_pk) agc_slot_pk = pk;
+    if (t - agc_slot_t >= 1000) {
+        double total = gain_db + boost_db;
+        agc_ring[agc_slot] = (agc_slot_pk > -90.0) ? agc_slot_pk - total : -99.0;
+        agc_slot = (agc_slot + 1) % AGC_WINDOW_S;
+        agc_slot_pk = -99.0;
+        agc_slot_t = t;
+        double m = -99.0;
+        for (int i = 0; i < AGC_WINDOW_S; i++)
+            if (agc_ring[i] > m) m = agc_ring[i];
+        agc_slow_src = m;
+    }
+
     long clip_delta = (long)(clips_now - last_clips);
     last_clips = clips_now;
+    double total = gain_db + boost_db;
 
-    /* Two loops: a violent attack (8 dB, up to ~16 times a second) for anything
-     * near or over full scale, and a gentle proportional steady state.  The
-     * source has been measured moving 30 dB by itself inside a minute, so the
-     * target sits well under the meter's -12..-3 manual zone - headroom is what
-     * keeps its steps out of the ADC. */
     double want;
-    if (clip_delta > 0 || pk > -3.0) {
-        /* Attack: either the ADC is already over, or this block came in within
-         * 3 dB of it.  Waiting for actual clipping is 3 dB too late - the
-         * source has been measured stepping up ~20 dB in a second, and at
-         * 8 dB per 60 ms the loop needs ~150 ms to catch a step, which is
-         * exactly the window in which it clips. */
-        if (t - last_move < 60) return;
-        want = -8.0;
-    } else {
-        if (t - last_eval < 250) return;
-        static double prev_pk = -99.0;
-        double rise = pk - prev_pk;
-        prev_pk = pk;
-        if (pk <= -75.0) want = 0.0;             /* at/below the codec's own noise:
-                                                 * do not hunt a dead input */
-        else if (rise > 10.0 && pk > -25.0) {
-            want = -6.0;                         /* the source just stepped up by
-                                                  * more than the loop could have
-                                                  * caused: get under it before it
-                                                  * reaches the ADC ceiling */
-        } else {
-            /* Proportional to the distance from the target, so a source that
-             * arrives 35 dB down converges in a couple of seconds instead of a
-             * minute.  The big steps are only taken while there is real room to
-             * spare: within 30 dB of the target the approach is gentle, because
-             * raising gain fast is how you clip the next transient. */
-            double deficit = AGC_TARGET_DBFS - pk;  /* +ve = need more gain */
-            if (deficit > 5.0)      want = (pk < -30.0) ? +6.0 : +2.0;
-            else if (deficit > 1.0) want = +2.0;
-            else if (deficit > -3.0) want = 0.0;  /* dead band: no pumping */
-            else if (deficit > -8.0) want = -2.0;
-            else                    want = -6.0;
-        }
+    if (agc_slow_src <= -75.0) want = total;   /* at/below the codec's own noise:
+                                                * do not hunt a dead input */
+    else want = AGC_TARGET_DBFS - agc_slow_src;
+
+    int emerg = clip_delta > 0 || pk > -AGC_CLIP_GUARD_DB;
+    if (emerg) {
+        double want_now = AGC_TARGET_DBFS - (pk - total);
+        if (want_now < want) want = want_now;  /* the fast path only pulls down */
     }
-    last_eval = t;
+
+    double err = want - total;
+    static unsigned long dbg_t;
+    if (getenv("PCTV_AGC_DEBUG") && t - dbg_t > 5000) {
+        dbg_t = t;
+        fprintf(stderr, "agc: pk %.1f slow %.1f total %+.1f want %+.1f err %+.3f "
+                        "acc %+.3f cap %ld/%ld..%ld spdb %.2f emerg %d muted %d "
+                        "clips %ld\n",
+                pk, agc_slow_src, total, want, err, agc_acc, cap_val, cap_lo, cap_hi,
+                spdb, emerg, cap_muted, clip_delta);
+    }
+    if (!emerg && fabs(err) < AGC_DEADBAND_DB) err = 0.0;
+    double lim = (emerg ? AGC_EMERG_DBPS : AGC_RATE_DBPS) * dt;
+    if (err >  lim) err =  lim;
+    if (err < -lim) err = -lim;
+    if (err == 0.0) return;
 
     /* Staging: the Capture volume is a much quieter gain stage than the input
      * boost, so once the fine control has drifted to the bottom of its range,
      * trade a boost step for headroom in it.  The two limits are far apart
      * (this fires below 20 % of the range, boost-up only when the fine control
      * wants to exceed its top), so it cannot oscillate. */
-    if (want >= 0.0 && el_boost && cap_val < cap_lo + (cap_hi - cap_lo) / 5) {
+    if (err > 0.0 && el_boost && cap_val < cap_lo + (cap_hi - cap_lo) / 5) {
         long blo, bhi;
         snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
         if (boost_val > blo) {
@@ -975,17 +1024,21 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
             snd_mixer_selem_set_capture_volume_all(el_cap,
                                                    cap_lo + (cap_hi - cap_lo) * 60 / 100);
             audio_apply_controls();
-            last_move = t;
+            agc_acc = 0.0;
             fprintf(stderr, "pctv-monitor: AGC: staging, boost down -> capture %+.1f dB\n",
                     gain_db);
             return;
         }
     }
-    if (want == 0.0) return;
-    last_move = t;
 
-    long v = cap_val + lround(want * spdb);
+    /* Slew, never step: accumulate the dB and apply whole mixer steps only when
+     * they add up, so 0.5 dB/s on a 0.75 dB/step codec moves once every 1.5 s. */
+    agc_acc += err;
+    long dsteps = lround(agc_acc * spdb);
+    if (dsteps == 0) return;
+    agc_acc -= (double)dsteps / spdb;
 
+    long v = cap_val + dsteps;
     if (v > cap_hi && el_boost) {                 /* out of headroom: boost up */
         long blo, bhi;
         snd_mixer_selem_get_capture_volume_range(el_boost, &blo, &bhi);
@@ -1003,12 +1056,15 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
             fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, boost step down\n", pk);
         } else v = cap_lo;
     }
-    if (v == cap_val) return;
+    if (v > cap_hi) v = cap_hi;
+    if (v < cap_lo) v = cap_lo;
+    if (v == cap_val) { agc_acc = 0.0; return; }
     snd_mixer_selem_set_capture_volume_all(el_cap, v);
     snd_mixer_selem_set_capture_switch_all(el_cap, 1);
     audio_apply_controls();
-    fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS -> capture %+.1f dB\n",
-            pk, gain_db);
+    fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, %d s max %.1f dBFS source"
+                    " -> capture %+.1f dB\n",
+            pk, AGC_WINDOW_S, agc_slow_src, gain_db);
 }
 
 /* Open the host's playback stream for input monitoring.  Tries the desktop's
@@ -1134,6 +1190,7 @@ static snd_pcm_t *pcm = NULL;
             pk_db[0] = pk_db[1] = rms_db[0] = rms_db[1] = -99.0;
             hold_db[0] = hold_db[1] = -99.0;
             clips = 0; xruns = 0;
+            agc_reset();          /* a new device is a new calibration */
             pthread_mutex_unlock(&amtx);
             if (cur_src == 0) { usleep(200000); continue; }
 
@@ -1172,7 +1229,7 @@ static snd_pcm_t *pcm = NULL;
         pthread_mutex_lock(&amtx);
         if (pend_agc_toggle) {
             agc_on = !agc_on;
-            agc_win_pk = -99.0;
+            agc_reset();
             fprintf(stderr, "pctv-monitor: automatic gain control %s\n",
                     agc_on ? "on" : "off");
             pend_agc_toggle = 0;
@@ -2175,8 +2232,9 @@ int main(int argc, char **argv)
             snprintf(h6, sizeof h6, " s             snapshot frame (PPM)     space  freeze display");
             snprintf(h7, sizeof h7, " o             monitor input on speakers (hear the gain first)");
             pthread_mutex_lock(&amtx);
-            snprintf(h8, sizeof h8, " audio: %s  gain %+.1f dB  boost %+.1f dB  AGC %s",
-                     srcs[cur_src].label, gain_db, boost_db, agc_on ? "on" : "off");
+            snprintf(h8, sizeof h8, " audio: %s  gain %+.1f dB  boost %+.1f dB  AGC %s (ref %.1f dBFS)",
+                     srcs[cur_src].label, gain_db, boost_db, agc_on ? "on" : "off",
+                     agc_slow_src);
             pthread_mutex_unlock(&amtx);
             snprintf(h9, sizeof h9, " video: %s  720x576 interlaced 25 fps  %d kbps", INPUT_LABEL[cur_input], mpeg2_kbps);
             snprintf(h10, sizeof h10, " out: %.180s", out_dir);
