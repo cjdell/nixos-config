@@ -42,11 +42,11 @@ When IQ3_S is trusted, reclaim the old files with
 shard 2 is a hardlink, so unlinking it frees nothing). It refuses unless the
 engine is live and serving IQ3_S, and defaults to a dry run.
 
-Upstream pinned: **v0.1.41**, rev `fb58e0dbc8399662c0e47c76578c6e878b14f6cf`
-(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-09 from v0.1.40.3
-(`d5ea7133741e67743c0e886bb426c0ce8d69cf6c`). It builds its own ggml from a
+Upstream pinned: **v0.1.42**, rev `61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406`
+(`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-10 from v0.1.41
+(`fb58e0dbc8399662c0e47c76578c6e878b14f6cf`). It builds its own ggml from a
 pinned llama.cpp (`3cf03257f219afbe7334045ff7c6a06ac68c627d`) — **unchanged by
-0.1.40, 0.1.40.2, 0.1.40.3 and 0.1.41** (`setup.py:166 LLAMA_CPP_COMMIT`), so
+0.1.40 through 0.1.42** (`setup.py:166 LLAMA_CPP_COMMIT`), so
 `strata-package.nix`'s `llama` fetch stays as it is.
 
 ## 0.1.40 / 0.1.40.1 (updated 2026-10-06)
@@ -246,6 +246,60 @@ script had the same latent break and is fixed the same way.
 **Switching back** is one line (`ai.strataModel = "iq3s"`) + `nixos-rebuild
 switch`; both packs stay on disk, and the unit's `ConditionPathExists` still
 protects a pack that is not built.
+
+## 0.1.42 (2026-10-10)
+
+Pinned `61b3fb5d` (v0.1.42), built
+`/nix/store/m2nlr8xyhwvxm27b5n9g62qj3k9q033w-strata-0.1.42` (HIP/gfx1201; the
+build succeeded with every `--replace-fail` clamp and `installPhase` rewrite still
+matching, so our patch and both int8-KV clamps are intact). Not yet switched on the
+live service — the box is still serving UD-IQ4_XS on 0.1.41 (see "Deploy" at the
+bottom).
+
+What changed for us (read off the two trees, not the changelog):
+
+- **`gfx1201` gets a HIP-compiler workaround (#1474).** `iq_kernels.cu:1708`'s
+  "half path's negative scale times +0 folds to +0" fix (previously gfx1151 only)
+  now also covers RDNA4 gfx1200/gfx1201 (ROCm 7.10) — the card we run. Nothing to
+  configure; the q8_1 sites #1448 clamped stay clamped.
+- **The gfx12 prompt switches are on by default (#1478)**: `STRATA_GDN_HEAD`,
+  `GDN_PP=2`, `GDN_CONVL2`, `GDN_NOY`, `CVEC_FUSE`. Residual and logits are
+  byte-identical at 4K/20K, prompt +0.8%/+1.6%/+1.8% at 4K/16K/32K (upstream; the
+  reporter saw +8%/+4% on another config). `STRATA_GFX12_DEFAULTS=0` turns them
+  off. This is the one AMD-relevant speedup.
+- **The two new answer-changing defaults are CUDA-only, so nothing for us.**
+  `STRATA_ROUTE_TAIL_SKIP=7` (skip an un-resident expert the whole window ranks
+  ≤7th) and the measured PCIe share are both off on AMD/Intel and layer splits;
+  upstream's table scores the R9700 at +0.03%/+0.1% decode, +0.9%/+0.3% prompt
+  versus 0.1.41, and includes it in the identity checks (one card, 2-card split,
+  gfx12 switches on and off).
+- **The two int8 KV clamps are still ours.** `kv_q8.cu` and
+  `src/prefill/kernels.cu` are byte-identical to 0.1.41, so `kv_q8.cu:55` and
+  `kv_append_kernel` (`src/prefill/kernels.cu:1691`) still write `amax / 127` to
+  fp16 unclamped. Clamps (2) and (3) stay.
+- **`strata-nan-guard.diff` needed exactly one re-base.** 0.1.42 inserted a new
+  A770 XMX block (`kXmxGroupMax`, `iq_xmx_grouped`) in `iq_kernels.hpp` between
+  `native_expert_scratch_bytes` and the `native_expert_grouped` doc comment,
+  moving that hunk's trailing context; the other 18 hunks applied with pure
+  offsets. The patch was regenerated from the patched 0.1.42 tree and now applies
+  with `--fuzz=0` and **no offsets** (19 hunks), and the added lines are
+  byte-identical to the previous diff (277 additions, 0 deletions — verified by
+  diffing the `+` lines of the two patch files). `verify.cpp`'s 161 changed lines
+  (per-GPU `STRATA_ROUTE_RESIDENT` counters #1578, `logit_bias` plumbing, the
+  `always_publish_` fence) are unrelated; the hunks still land in
+  `Verifier::init`/`run`/`record_window` and inside `native_expert_grouped`.
+- **#879 is still open** (updated 2026-10-10), no 0.1.42 change references the
+  routed-expert data path, so the guard stays needed.
+- **Serve-layer fixes worth noting:** a reordered tool set keeps its first-seen
+  order so the prompt cache survives (#1624); llama.cpp's `repeat_penalty` /
+  `repeat_last_n` are accepted in configs and requests; `reasoning_loop_recovery`
+  now catches a loop written as one long word (#1753). Both `installPhase`
+  rewrite targets moved to lines 5269 and 5277, still verbatim.
+
+Verified in the built package: the binary prints `strata 0.1.42`, carries
+`verify: non-finite logits` and the audit line (`strata verify:   kernel-stage
+  audit: first non-finite in %s of layer %d, flat %lld, bits 0x%08x`), and the
+installed `serve/server.py` has both `server error: ` prefixes at 5269/5277.
 
 ## 0.1.41 (2026-10-09)
 

@@ -180,6 +180,12 @@ So: a core dump here tells you *that* it aborted, which the journal line already
   `serverPython` in `strata-package.nix` already bundles, so it is live on this build. `stall_report` also prints more (`batch_groups` counters, `#1341`
   `CUDA_LAUNCH_BLOCKING` warning). No change to the abort itself, and `LimitCORE = 0`
   still keeps the dumps off.
+- **0.1.42 (built 2026-10-10, not yet live) leaves this shape alone too.** Its release
+  notes list no #29 fix; the one hang it does fix is a *queued* request that could wait
+  forever (#1603 — slot bookkeeping owns/reaps orphans), which our single-slot
+  (`--parallel 1`) setup never hits. `STRATA_WATCHDOG_IO_S` (#1407) and
+  `STRATA_ENGINE_STALL_S` (#1317) carry over unchanged; the one gfx1201 change
+  (`iq_kernels.cu`'s `-0 × +0` i-quant decode fix, #1474) is not on this path.
 
 ## 6. State of the config
 

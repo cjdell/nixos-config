@@ -463,6 +463,28 @@ with `--fuzz=0` and **offsets only** (`verify.cpp` +35/+43, `iq_kernels.cu`
   `STRATA_ENGINE_STALL_S` (90 s) with no CPU/disk/GPU activity (#1317; needs psutil,
   which our derivation bundles). Full notes in [`strata.md`](./strata.md).
 
+## Update 2026-10-10: 0.1.41 → 0.1.42, patch re-based, clamps unchanged
+
+Re-checked against the `v0.1.42` tree (`61b3fb5d`, built
+`/nix/store/m2nlr8xyhwvxm27b5n9g62qj3k9q033w-strata-0.1.42`; **not yet live** — the box
+still serves 0.1.41).
+
+- **The guard diff needed exactly one re-base and is now offset-free.** 0.1.42 added a
+  new A770 XMX block (`kXmxGroupMax`, `iq_xmx_grouped`) to `iq_kernels.hpp` between
+  `native_expert_scratch_bytes` and the `native_expert_grouped` comment, moving that
+  hunk's trailing context. Regenerated from the patched 0.1.42 tree: all 19 hunks
+  apply with `--fuzz=0` and no offsets, and the added lines are byte-identical to the
+  0.1.40.2 diff (277 additions, 0 deletions). `iq_kernels.cu` changed outside the
+  #879 path (the #1474 gfx1201 `-0 × +0` HIP workaround at the i-quant decode site);
+  `verify.cpp` changed outside the guard (per-GPU `STRATA_ROUTE_RESIDENT` counters
+  #1578, `logit_bias` plumbing, the `always_publish_` fence).
+- **Both remaining clamps stay: 0.1.42 changed neither `kv_q8.cu` nor
+  `src/prefill/kernels.cu`** (byte-identical to 0.1.41), so `kv_q8.cu:55` and
+  `kv_append_kernel` (`src/prefill/kernels.cu:1691`) are still unclamped.
+- **#879 is still open** (updated 2026-10-10); no 0.1.42 change references the
+  routed-expert data path. The guard and the two remaining clamps stay. Full notes
+  in [`strata.md`](./strata.md).
+
 ## Still open
 
 - **Retry #879 on 0.1.40.1 — in progress.** Switched 2026-10-06 14:39 BST: the live

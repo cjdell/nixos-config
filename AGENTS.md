@@ -837,10 +837,10 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.1.41** (`fb58e0dbc8399662c0e47c76578c6e878b14f6cf`, updated 2026-10-09 from
-0.1.40.3 `d5ea7133`; **live since 2026-10-09 17:23:48** — `ExecStart` and the engine
-both run `/nix/store/ap1x4fnmjwvmirrjp3d02x58s9vgj122-strata-0.1.41/…`, the previous
-0.1.40.3 build having run since 2026-10-08 20:49:51):
+**0.1.42** (`61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406`, updated 2026-10-10 from
+0.1.41 `fb58e0d`; built `/nix/store/m2nlr8xyhwvxm27b5n9g62qj3k9q033w-strata-0.1.42`
+but **not yet deployed** — the live service still runs 0.1.41, which has been up
+since 2026-10-09 17:23:48):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -893,13 +893,15 @@ switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
 - **The local finiteness guard is `hosts/zen3-nixos/ai/strata-nan-guard.diff`**
   (`patches = [...]`, applied before `postPatch`): it fails a verify window with
   `verify: non-finite logits` instead of emitting the degenerate token, and dumps
-  per-stage layer/row/col/raw bits (`STRATA_KERNEL_AUDIT=1`). It was re-based onto
-  0.1.40.2 on 2026-10-07 (3 hunks drifted: 2 in `verify.cpp`, 1 in `sampler.cu`) and is
-  regenerated to apply with `--fuzz=0`; it still applies to 0.1.41 with `--fuzz=0` and
-  **offsets only** (`verify.cpp` +35/+43, `iq_kernels.cu` +72/+80; `sampler.cu` and all
-  three headers byte-identical to 0.1.40.3), the hunks still landing in
+  per-stage layer/row/col/raw bits (`STRATA_KERNEL_AUDIT=1`). Re-based onto
+  0.1.40.2 on 2026-10-07 (3 hunks drifted: 2 in `verify.cpp`, 1 in `sampler.cu`),
+  then onto 0.1.42 on 2026-10-10 (one hunk: the `iq_kernels.hpp` declaration block —
+  0.1.42's new A770 XMX declarations moved its trailing context). It is regenerated
+  to apply to 0.1.42 with `--fuzz=0` and **no offsets** (all 19 hunks; the added
+  lines are byte-identical to the previous diff), the hunks still landing in
   `Verifier::run`/`record_window` and inside `native_expert_grouped`. **#879 is still
-  open upstream** and nothing in 0.1.41 touches that path, so the guard stays needed.
+  open upstream** (updated 2026-10-10) and nothing in 0.1.42 touches that path, so the
+  guard stays needed.
   **Never re-apply it with fuzz** — `--fuzz=3`
   "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
   inside the PLE `try` block.

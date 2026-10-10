@@ -35,7 +35,7 @@ s1=$(stat -c %s "$SHARD1"); s2=$(stat -c %s "$SHARD2")
 if [ "${1:-}" = "--check" ]; then echo "IQ3_S shards OK"; exit 0; fi
 
 STRATA=$(nix build --no-link --print-out-paths "$FLAKE#strata")
-# Not the engine's python: 0.1.41's iq_pack.py imports `from gguf import ...`,
+# Not the engine's python: 0.1.41/0.1.42's iq_pack.py imports `from gguf import ...`,
 # whose package __init__ needs pyyaml, which serverPython does not carry.  Same
 # python scripts/repack-strata-udiq4xs.sh uses.
 PY=$(nix build --no-link --print-out-paths --impure --expr \
