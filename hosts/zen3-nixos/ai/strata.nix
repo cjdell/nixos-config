@@ -189,13 +189,19 @@ let
       # match by UUID, not BDF). HIP_VISIBLE_DEVICES=0 pins that one.
       backend = "hip";
       env.HIP_VISIBLE_DEVICES = "0";
-      # Local #879 instrumentation (see strata-package.nix): when the finiteness
-      # guard trips, dump the first non-finite (layer, row, col, raw bits) per
+      # Local #879 instrumentation (see strata-package.nix): when a window's logits come
+      # out non-finite, dump the first non-finite (layer, row, col, raw bits) per
       # grouped-expert stage. Tracks down whether our fire is the same
-      # 0x7FFFFFFF routed-expert data-path garbage the CUDA reporter saw.
-      # Costs an extra scan per stage per layer -> mostly prefill; set to "0"
-      # (or drop the key) once we have a capture. The guard itself stays on
-      # regardless (STRATA_NAN_GUARD defaults to on).
+      # 0x7FFFFFFF routed-expert data-path garbage the CUDA reporter saw - the thing
+      # upstream still cannot reproduce (#879 open; 1,870 R9700 requests) and has asked us
+      # for capture data. Since 0.1.43 this is opt-in in the code too: the flags are only
+      # allocated with this set to 1, because every audit probe is an extra node in the
+      # captured verify graph (~10 per layer) and 0.1.43 measured that cost while removing
+      # nodes for +1.6-2.0% decode. Set to "0" (or drop the key) to get upstream's window
+      # graph back byte for byte once we have a capture.
+      # The GUARD is upstream's now (#1892, on by default, STRATA_NAN_GUARD=0 disables):
+      # the poisoned window emits nothing, the caches are dropped and the prompt is read
+      # again from token 0, so this only observes - it never changes an answer.
       env.STRATA_KERNEL_AUDIT = "1";
       # Hang watchdog (#29) work-around, 2026-10-08: ROCr maps paged host
       # allocations through a KFD userptr, and while the kernel reclaims those

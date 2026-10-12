@@ -47,59 +47,103 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.1.42";
+  version = "0.1.43";
 
-  # v0.1.42 (2026-10-10).  NOTE: upstream rewrote this repo's history on
+  # v0.1.43 (2026-10-11, rev 7695859a).  NOTE: upstream rewrote this repo's history on
   # 2026-10-06 (the 0.1.40.1 release notes say so), so any pin older than that has
   # no common ancestor with main and GitHub's compare API cannot diff them - diff
   # two trees instead.  The old tag v0.1.39 is also not 6f32ec0 (it is a1641e9f).
   #
-  # 0.1.41 -> 0.1.42 (checked against the trees, not the changelog; only the files
+  # 0.1.42 -> 0.1.43 (checked against the trees, not the changelog; only the files
   # this build touches are listed):
-  #   * src/kernels/cuda/iq_kernels.cu - ONE hunk, and it is for us: #1474 extends the
-  #     gfx1151 "half path's negative scale times +0 folds to +0" workaround (the
-  #     `if constexpr (std::is_same_v<dst_t, __half>)` block, ~line 1708) to RDNA4
-  #     gfx1200/gfx1201 (ROCm 7.10).  That is a HIP-compiler bug our card hits, so
-  #     nothing to opt out of.  The q8_1 sites #1448 clamped stay clamped.
-  #   * src/kernels/cuda/kv_q8.cu and src/prefill/kernels.cu are byte-identical to
-  #     0.1.41 (0 changed lines): kv_q8.cu:55 and kv_append_kernel
+  #   * THE HEADLINE FOR US: upstream shipped the #879 finiteness GUARD (#1892 by
+  #     lask3802), ON BY DEFAULT and behind the SAME `STRATA_NAN_GUARD` switch our patch
+  #     had invented, so our guard is GONE from ./strata-kernel-audit.diff (the file is
+  #     renamed for exactly that reason).  What upstream does: every window graph records
+  #     `logits_nonfinite_rows(head_logits_, T, n_vocab, m_nf_)` (verify.cpp:1795),
+  #     `Verifier::note_nonfinite` sets nf_row_/nf_pos_/nf_mask_ after the window sync,
+  #     generate.cpp ends the request `DONE ... nonfinite` emitting NONE of the poisoned
+  #     window's tokens and drops every cached state (the next request re-reads the prompt
+  #     from token 0), and serve/server.py raises EngineNonFinite and retries the request
+  #     once (`nf_retried`).  Engine log line: `non-finite logits (#879)`; cost <=0.2%
+  #     decode, `STRATA_NAN_GUARD=0` off.  Strictly better than ours, which failed the
+  #     window with "verify: non-finite logits" and only reached a retry because rewrite
+  #     (4) below made it a "server error" Pi would accept.  Keeping both would also have
+  #     left two guards on one env var, so which one answered first was luck.
+  #   * What upstream does NOT have is WHERE the poison is born - #879 is still OPEN
+  #     (updated 2026-10-11; the maintainer could not fire it in 1,870 R9700 requests or
+  #     276 MMQ kernel cases) - so the AUDIT half stays and is now the only non-upstream
+  #     thing in the diff: 19 hunks, 280 additions, 0 deletions, --fuzz=0 with NO offsets
+  #     on 7695859a.  Two changes while re-basing, both about cost:
+  #       - `lay_flags_` (the per-stage poison flags) is allocated ONLY with
+  #         STRATA_KERNEL_AUDIT=1.  Until now it was allocated always, so ~10 audit
+  #         launches per layer sat in every captured window graph whether anyone was
+  #         looking or not; 0.1.43 priced exactly that (it ships STRATA_DUMMY_NODES to
+  #         measure "one empty kernel node per layer" and wins 1.6-2.0% decode by
+  #         removing and fusing decode-window nodes), so paying it silently was the wrong
+  #         trade.  Every write site is gated on the pointer, so with the audit off the
+  #         window graph matches upstream's.  ./strata.nix still sets it to 1 - we are
+  #         mid-hunt and the maintainer asked for capture data.
+  #       - the failure dump moved and no longer fails anything: it rides on upstream's
+  #         nf_mask_ instead of its own scan, prints EVERY fire (upstream's
+  #         STRATA_DBG_NAN reports the first only, and the maintainer asked for more than
+  #         one), and reads only memory the window already wrote.  It needs
+  #         STRATA_NAN_GUARD unset (those are the flags it reads) and
+  #         STRATA_KERNEL_AUDIT=1 for the per-layer lines.
+  #   * Three audit sites needed a re-base; the other 16 hunks moved by offset alone:
+  #       - the layer-input site: 0.1.43 inserted the STRATA_DUMMY_NODES probe between
+  #         `q8_attn = gr_read_group(...)` and `if (inputs_pending)`.
+  #       - the attention-output site: a new `stamp(l, 32, grp)` profile line after
+  #         `q8_ffn = gr_read_group(...)`.
+  #       - the routed-total site: 0.1.43's fused combine made the hit add CONDITIONAL
+  #         (`hits_in_combine`, fuse_hits_on, the decode default) -
+  #         `native_moe_combine_multi_hits_added` folds it inside the combine, so
+  #         `parts_out` is not the routed total there and sampling it would have lied.
+  #         That probe is now gated `&& !hits_in_combine`; the hit_out and miss-row probes
+  #         moved before the add (moe_hit_add only reads hit_out, so they see the same
+  #         bytes), and site 4 (the layer's whole contribution, after the combine) still
+  #         covers the fused case.
+  #   * src/kernels/cuda/kv_q8.cu and src/prefill/kernels.cu are byte-identical to 0.1.42
+  #     (0 changed lines) again: kv_q8.cu:55 and kv_append_kernel
   #     (prefill/kernels.cu:1691) are STILL unclamped, so postPatch clamps (2) and (3)
-  #     stay - the int8 KV sites #606/#1448 never covered and the ones our
-  #     132,947-token incident was fixed by.
-  #   * src/core/verify.cpp - 161 changed lines, all unrelated to our guard: the
-  #     STRATA_ROUTE_RESIDENT counters become per-GPU (a map+mutex, #1578), the
-  #     logit_bias plumbing, a batch_rows/route_prior include, and an
-  #     `always_publish_` fence test.  `patches` still applies with --fuzz=0: the 11
-  #     verify.cpp hunks land in Verifier::init/run/record_window with pure offsets
-  #     (+94 .. +108).  verify.hpp/sampler.hpp gained the logit_bias/rr_stats_ fields;
-  #     our declaration hunks still land in the same sections (+6 / +1).
-  #   * include/strata/kernels/iq_kernels.hpp - the ONE rebase our patch needed: a new
-  #     A770 XMX port block (`kXmxGroupMax`, `iq_xmx_grouped`) was inserted between
-  #     `native_expert_scratch_bytes` and the `native_expert_grouped` doc comment, so
-  #     the hunk's trailing context moved.  Regenerated below; the added lines are
-  #     byte-identical to the old diff (277 additions, 0 deletions).
-  #   * serve/server.py - both installPhase rewrite targets still there verbatim (now
-  #     lines 5269 and 5277).  New: a damaged llama.cpp archive is re-fetched (#1797),
-  #     tool-set first-seen order is kept so the prompt cache survives (#1624),
-  #     llama.cpp's repeat_penalty/repeat_last_n are accepted, and
-  #     reasoning_loop_recovery catches a loop written as one long word (#1753).
-  #   * AMD/gfx1201: the gfx12 prompt switches (STRATA_GDN_HEAD, GDN_PP=2, GDN_CONVL2,
-  #     GDN_NOY, CVEC_FUSE) are ON by default (#1478) - residual/logits byte-identical
-  #     at 4K/20K, prompt +0.8%/+1.6%/+1.8% at 4K/16K/32K; STRATA_GFX12_DEFAULTS=0
-  #     turns them off.  The two new default changes (STRATA_ROUTE_TAIL_SKIP=7 and the
-  #     measured PCIe share) are CUDA-only and off on AMD, so no answer change here and
-  #     nothing to pin back.  Upstream's R9700 rows vs 0.1.41 are +0.03%/+0.1% decode,
-  #     +0.9%/+0.3% prompt; the identity checks include the R9700 (one card, 2-card
-  #     split, gfx12 switches on and off).
-  #   * #879 (the routed-expert garbage our guard exists for) is STILL OPEN upstream
-  #     (updated 2026-10-10) and no 0.1.42 change references it, so `patches` stays
-  #     relevant.
-  # The ggml pin is unchanged too (setup.py:166 LLAMA_CPP_COMMIT = 3cf03257...).
+  #     stay - the int8 KV sites #606/#1448 never covered, live because we run --kv int8.
+  #   * include/strata/kernels/iq_kernels.hpp: 0 changed lines, so last release's one
+  #     re-base (the A770 XMX block that had moved that hunk's trailing context) is stable.
+  #   * src/kernels/cuda/iq_kernels.cu: 6 changed lines (the #1737 route-resident work);
+  #     our four audit hunks land with offset 4 and the q8_1 emit sites #1448 clamped stay
+  #     clamped upstream - nothing here reintroduces a clamp of ours.
+  #   * src/core/verify.cpp: 242 changed lines, almost all of it the #1892 guard above
+  #     (plus STRATA_NAN_INJECT for testing it and the pipelined-window hooks); our
+  #     remaining hunks still land in Verifier::init/record_window/run.
+  #   * serve/server.py: 138 changed lines; both installPhase rewrite targets are still
+  #     there verbatim (now 5392 and 5400), so the "server error" prefix that makes our
+  #     remaining hard errors retryable by Pi still applies.  New around them: the #879
+  #     EngineNonFinite retry, timings fixes (#1869/#1870) and STRATA_DROP_CACHE_ON_EXIT
+  #     (opt-in, off - and keep it off: it posix_fadvise(DONTNEED)s the model files on
+  #     exit, and the warm page cache is what makes a restart take seconds).
+  #   * AMD/gfx1201 behaviour changes to EXPECT (no config change needed, but they move
+  #     answers): the two decode defaults NVIDIA got in 0.1.42 now apply here too -
+  #     STRATA_ROUTE_TAIL_SKIP=7 (generate.cpp:8203; it stays off only from 90% of the
+  #     experts in the GPU cache on one card, and we sit at 10,679 of 24,576 = 43%, so it
+  #     is ON: KL ~0.003-0.006, answers differ slightly from 0.1.42) and the measured
+  #     PCIe share (STRATA_PCIE_FRAC_DEFAULT=old reverts it).  STRATA_PF_FUSED's new
+  #     gfx12 default covers IQ3_S/IQ3_XXS gate/up ONLY
+  #     (moe_fused_iq.cu:1131 `if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS)
+  #     return false;`), so our UD-IQ4_XS pack keeps MMQ - no answer change from it.
+  #     Long prompts may now chunk at 16384 (STRATA_GFX12_CHUNK=0 keeps 8192).  Note the
+  #     tail skip and the PCIe share are two of the variables the maintainer asks us to
+  #     pin while hunting #879: `STRATA_ROUTE_TAIL_SKIP=0 --pcie-frac 0` is the A/B.
+  #     Upstream's R9700 rows vs 0.1.42: decode +2..10% (IQ3_S +6..14%), prompt
+  #     +12..14% (32K +17%, 64K +27%); with a 16 GB card's cache +21..38%.
+  #   * #879 (the routed-expert garbage the audit exists for) is STILL OPEN upstream, so
+  #     `patches` stays relevant - just for the audit, not the guard.
+  # The ggml pin is unchanged (setup.py:166 LLAMA_CPP_COMMIT = 3cf03257..., same rev as
+  # 0.1.41/0.1.42), so the `llama` fetch above stays exactly as it was.
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406";
-    hash = "sha256-FPwm4cuGTFiXgWkK5eTcfD9VIrH/OnVZiG6ToQFOfMQ=";
+    rev = "7695859aa13afb248bdb4d36f9b2e95707db079d";
+    hash = "sha256-SjhgL3wXV36a4AuDlrQH9E9PDAOAqDS6dXMuVM5/5yw=";
   };
 
   nativeBuildInputs = [
@@ -138,31 +182,34 @@ stdenv.mkDerivation (finalAttrs: {
     }"
   ];
 
-  # Local HIP port of the upstream #879 finiteness instrumentation + guard
-  # (gist 66419118nnn/7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact
-  # pin 61b3fb5d (v0.1.42) on 2026-10-10; all 19 hunks now apply with --fuzz=0 and
-  # NO offsets (checked against the fetched source), and the hunks still land in
-  # Verifier::run/record_window and inside native_expert_grouped - the #879 suspect
-  # site is untouched upstream.  The only hunks that needed a re-base were the
-  # iq_kernels.hpp declaration block (0.1.42's new A770 XMX declarations moved its
-  # trailing context); every other file applied with offsets, and the added lines are
-  # byte-identical to the 0.1.40.2/0.1.41 diff (277 additions, 0 deletions - verified
-  # by diffing the + lines of the two patch files).  Regenerated from the patched
-  # tree, so every hunk applies with --fuzz=0; do not re-apply the old file with fuzz
-  # (fuzz 3 once put the arena carve inside the mapped() chain and the input audit
-  # inside the PLE try block).  #879 proved the repeated-token
-  # degeneration is NOT the fp16-overflow class the postPatch clamps below fix:
-  # the first poisoned value is garbage 0x7FFFFFFF bits written into a
-  # routed-expert output row (a data-path defect in native_expert_grouped).  This
-  # patch does two things:
-  #   * a finiteness GUARD (on by default; STRATA_NAN_GUARD=0 disables) in
-  #     Verifier::run/record_window that FAILS the window with
-  #     "verify: non-finite logits" instead of emitting the degenerate token;
-  #   * opt-in per-stage audit kernels (STRATA_KERNEL_AUDIT=1, set in ./strata.nix)
-  #     that dump the first non-finite (layer, row, col, raw bits) at each of the
-  #     four grouped-expert stages, plus the attention/shared/routed/GPU-hit/CPU-miss
-  #     rows.  HIP-safe: pure cuda* shims + <<<>>> the tree already builds.
-  patches = [ ./strata-nan-guard.diff ];
+  # Our kernel AUDIT port (2026-10-05, from the 0.1.35 audit build; the HIP-adapted copy
+  # of the upstream #879 reporter's instrumentation, gist 66419118nnn /
+  # 7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact pin 7695859a (v0.1.43) on
+  # 2026-10-12: all 19 hunks apply with --fuzz=0 and NO offsets (checked against the
+  # fetched tree), landing in Verifier::init/record_window/run and inside
+  # native_expert_grouped - the #879 suspect site, still untouched upstream.  Regenerated
+  # from the patched tree, so every hunk applies with --fuzz=0; do not re-apply an old
+  # file with fuzz (fuzz 3 once put the arena carve inside the mapped() chain and the
+  # input audit inside the PLE try block).  #879 proved the repeated-token degeneration
+  # is NOT the fp16-overflow class the postPatch clamps below fix: the first poisoned
+  # value is garbage 0x7FFFFFFF bits written into a routed-expert output row (a data-path
+  # defect in native_expert_grouped).
+  #
+  # THIS PATCH NO LONGER CONTAINS A GUARD.  0.1.43 shipped upstream's own (#1892), on by
+  # default, on the same STRATA_NAN_GUARD switch, and it recovers instead of erroring: the
+  # poisoned window emits nothing, the engine drops every cached state, re-reads the prompt
+  # from token 0 and serve/server.py retries the request once.  Ours only failed the window,
+  # so keeping both would have meant two guards behind one env var and the worse recovery
+  # winning whenever ours saw the window first.  What is left is the part upstream does not
+  # have - WHERE the poison was born:
+  #   * opt-in per-stage audit kernels (STRATA_KERNEL_AUDIT=1, set in ./strata.nix) that
+  #     record the first non-finite (layer, row, col, raw bits) at each of the four
+  #     grouped-expert stages, plus the attention/shared/routed/GPU-hit/CPU-miss rows and
+  #     the layer's folded input; HIP-safe: pure cuda* shims + <<<>>> the tree builds.
+  #   * a dump in Verifier::run that prints those flags - every fire, not just the first -
+  #     triggered by upstream's own nf_mask_, so it costs nothing on a healthy window and
+  #     nothing at all with STRATA_KERNEL_AUDIT=0 (the flags are never allocated).
+  patches = [ ./strata-kernel-audit.diff ];
 
   # Activation quantizers must keep their fp16 scale and sum finite: a value past
   # fp16's 65504 rounds to +inf, the dequantised dot product then reads inf * 0 =
@@ -170,9 +217,9 @@ stdenv.mkDerivation (finalAttrs: {
   # degeneracy the guard in serve/server.py exists to end (upstream #606;
   # ggml-org/llama.cpp#23606 is the same defect).
   #
-  # STATUS ON 0.1.42 (checked against the tree, not the changelog): 0.1.42 changed
+  # STATUS ON 0.1.43 (checked against the tree, not the changelog): 0.1.43 changed
   # NONE of the clamp sites - kv_q8.cu and prefill/kernels.cu are byte-identical to
-  # 0.1.41 - and upstream #1448
+  # 0.1.41 and 0.1.42 - and upstream #1448
   # ("q8_1 scale overflow at the three remaining emit sites is clamped like the
   # others") landed in 0.1.41 and took over one of ours.  The three sites our 0.1.39
   # build clamped itself are all fixed upstream now - native_mmvq.cu

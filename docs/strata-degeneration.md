@@ -485,6 +485,50 @@ still serves 0.1.41).
   routed-expert data path. The guard and the two remaining clamps stay. Full notes
   in [`strata.md`](./strata.md).
 
+## Update 2026-10-12: 0.1.42 → 0.1.43 — upstream shipped the guard, ours came out
+
+Re-checked against the `v0.1.43` tree (`7695859a`, built
+`/nix/store/1s8ca3glsa0arp6hk39xnqv6sc7rkcgp-strata-0.1.43`; **not yet live** — the box
+serves 0.1.42 since 2026-10-10 23:19).
+
+- **#1892 (lask3802) is the guard, on by default, on our env var.** `STRATA_NAN_GUARD` now
+  means upstream's: `logits_nonfinite_rows(head_logits_, T, n_vocab, m_nf_)` recorded in
+  every window graph (`verify.cpp:1795`), `Verifier::note_nonfinite` →
+  `nf_row_/nf_pos_/nf_mask_`, `DONE … nonfinite` from `generate.cpp` emitting none of the
+  poisoned window's tokens and dropping every cached state (next request re-reads from token
+  0), `EngineNonFinite` + one automatic retry in `serve/server.py`, log line
+  `non-finite logits (#879)`, ≤0.2 % decode. **That is strictly better than our
+  fail-the-window-and-hope-Pi-retries**, so our guard is deleted from the patch and the file
+  is renamed `strata-nan-guard.diff` → **`strata-kernel-audit.diff`**. Verified in the built
+  binary: `non-finite logits (#879)` present (upstream's), `window failed rather than
+  sampled` gone (ours).
+- **The audit stays — it is the half upstream asked for.** Their 2026-10-11 reply could not
+  reproduce #879 in 1,870 R9700 requests (four configs, `--short-read 150`,
+  `--prompt-cache-root 256`, 0.1.40 and 0.1.42 engines) nor in 276 MMQ kernel cases, and
+  asks for `STRATA_DBG_NAN` from more than one fire, the `expert cache N slots` line, and
+  `STRATA_PREFILL_CPU_SHARE=0` / `--pcie-frac 0` / stock power limit. Our per-stage dump
+  answers the first better than `STRATA_DBG_NAN` does (every fire, and it names the stage).
+- **The audit is now opt-in in code, not just in config.** `lay_flags_` is allocated only
+  with `STRATA_KERNEL_AUDIT=1`; before this ~10 probes per layer sat in every captured
+  verify graph unconditionally, and 0.1.43 is the release that priced extra nodes
+  (`STRATA_DUMMY_NODES` measures one empty node per layer; removing/fusing decode nodes is
+  worth 1.6–2.0 % decode). The dump also moved to after `note_nonfinite(T, nullptr)` and
+  reads upstream's `nf_mask_` instead of scanning `head_logits_` itself.
+- **Three sites needed a re-base** (16 hunks moved by offset alone): the new
+  `STRATA_DUMMY_NODES` block after `q8_attn = gr_read_group(…)`; a new `stamp(l, 32, grp)`
+  after `q8_ffn = gr_read_group(…)`; and `moe_hit_add` becoming conditional
+  (`hits_in_combine`, `fuse_hits_on`) — with the fused combine the hit add happens inside
+  `native_moe_combine_multi_hits_added`, so the routed-total probe is gated
+  `&& !hits_in_combine` and the `hit_out`/miss-row probes moved before the add. Result: 20
+  hunks, 280 additions, 0 deletions, `--fuzz=0` with **no offsets**, and the build ran it
+  with no hunk messages at all.
+- **Both clamps still ours:** `kv_q8.cu` and `src/prefill/kernels.cu` are byte-identical to
+  0.1.41/0.1.42 for the third release running, so `kv_q8.cu:55` and `kv_append_kernel`
+  (`src/prefill/kernels.cu:1691`) still store `amax / 127` as fp16 unclamped. Both
+  `installPhase` rewrite targets moved to `serve/server.py:5392`/`:5400`, verbatim.
+- **#879 is still open** (updated 2026-10-11). Nothing in 0.1.43 touches the routed-expert
+  data path — the guard only catches the symptom. Full notes in [`strata.md`](./strata.md).
+
 ## Still open
 
 - **Retry #879 on 0.1.40.1 — in progress.** Switched 2026-10-06 14:39 BST: the live

@@ -838,16 +838,21 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.1.42** (`61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406`, updated 2026-10-10 from
-0.1.41 `fb58e0d`; built `/nix/store/m2nlr8xyhwvxm27b5n9g62qj3k9q033w-strata-0.1.42`
-but **not yet deployed** — the live service still runs 0.1.41, which has been up
-since 2026-10-09 17:23:48):
+**0.1.43** (`7695859aa13afb248bdb4d36f9b2e95707db079d`, updated 2026-10-12 from
+0.1.42 `61b3fb5d`; built `/nix/store/1s8ca3glsa0arp6hk39xnqv6sc7rkcgp-strata-0.1.43`
+but **not yet deployed** — the live service runs 0.1.42, up since 2026-10-10 23:19:18):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
 `Qwen3.8-Flash-Next-UD-IQ4_XS` (Unsloth ~4-bit GGUF) since 2026-10-09 19:23 —
 switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
 [`docs/strata.md`](docs/strata.md).
+
+⚠️ **0.1.43 changes answers on our card**: the two decode defaults that were CUDA-only in
+0.1.42 now apply to gfx1200/gfx1201 — `STRATA_ROUTE_TAIL_SKIP=7` (stays off only from 90 % of
+experts in the GPU cache; we are at 43 %, so it is ON; KL ~0.003–0.006) and the measured
+PCIe share (`STRATA_PCIE_FRAC_DEFAULT=old` reverts). Upstream's R9700 rows: decode +2–10 %,
+prompt +12–14 %. Details: `docs/strata.md` "0.1.43".
 
 - **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
   sets `"ud-iq4-xs"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
@@ -891,19 +896,24 @@ switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
   **7.2.3**) is applied in `configFile`'s `env` since 2026-10-08 — verify with
   `sudo tr '\0' '\n' < /proc/$(pgrep -f '[b]in/strata --serve')/environ | grep -i userptr`.
   Full write-up: [`docs/strata-hang.md`](docs/strata-hang.md).
-- **The local finiteness guard is `hosts/zen3-nixos/ai/strata-nan-guard.diff`**
-  (`patches = [...]`, applied before `postPatch`): it fails a verify window with
-  `verify: non-finite logits` instead of emitting the degenerate token, and dumps
-  per-stage layer/row/col/raw bits (`STRATA_KERNEL_AUDIT=1`). Re-based onto
-  0.1.40.2 on 2026-10-07 (3 hunks drifted: 2 in `verify.cpp`, 1 in `sampler.cu`),
-  then onto 0.1.42 on 2026-10-10 (one hunk: the `iq_kernels.hpp` declaration block —
-  0.1.42's new A770 XMX declarations moved its trailing context). It is regenerated
-  to apply to 0.1.42 with `--fuzz=0` and **no offsets** (all 19 hunks; the added
-  lines are byte-identical to the previous diff), the hunks still landing in
-  `Verifier::run`/`record_window` and inside `native_expert_grouped`. **#879 is still
-  open upstream** (updated 2026-10-10) and nothing in 0.1.42 touches that path, so the
-  guard stays needed.
-  **Never re-apply it with fuzz** — `--fuzz=3`
+- **`hosts/zen3-nixos/ai/strata-kernel-audit.diff`** (`patches = [...]`, applied before
+  `postPatch`) is **audit only — the guard is upstream now.** 0.1.43 shipped #1892: a
+  finiteness guard on by default behind the *same* `STRATA_NAN_GUARD` switch our patch had
+  invented, which emits nothing for the poisoned window, drops every cached state, re-reads
+  the prompt from token 0 and retries the request once in `serve/server.py`
+  (`non-finite logits (#879)`). Our guard only failed the window, and two guards behind one
+  env var is a coin toss, so ours was dropped on 2026-10-12 and the file renamed from
+  `strata-nan-guard.diff`. What remains is what upstream still cannot get: **where the
+  poison is born** — per-stage first-non-finite (layer/row/col/raw bits) probes across the
+  MoE path plus a dump in `Verifier::run` that rides on upstream's `nf_mask_` and prints
+  *every* fire. It is allocated and launched **only** with `STRATA_KERNEL_AUDIT=1` (set in
+  `strata.nix`) because each probe is an extra node in the captured verify graph. Re-based
+  onto 0.1.43 on 2026-10-12: 3 sites moved (the new `STRATA_DUMMY_NODES` probe, a new
+  `stamp(l, 32, grp)`, and `moe_hit_add` becoming conditional on `hits_in_combine`); 20
+  hunks, 280 additions, 0 deletions, `--fuzz=0` with **no offsets**.
+  **#879 is still open upstream** (updated 2026-10-11; 1,870 R9700 requests did not fire it)
+  and nothing in 0.1.43 fixes the routed-expert data path, so the audit stays needed.
+  **Never re-apply an old file with fuzz** — `--fuzz=3`
   "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
   inside the PLE `try` block.
 - **Two incidents, two sites.** Incident 1 (`!` ×256, ~156K context) was fixed

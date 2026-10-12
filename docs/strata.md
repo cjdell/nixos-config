@@ -247,6 +247,100 @@ script had the same latent break and is fixed the same way.
 switch`; both packs stay on disk, and the unit's `ConditionPathExists` still
 protects a pack that is not built.
 
+## 0.1.43 (2026-10-12)
+
+Pinned `7695859a` (v0.1.43), built `/nix/store/1s8ca3glsa0arp6hk39xnqv6sc7rkcgp-strata-0.1.43` (HIP/gfx1201; the patch applied in
+`patchPhase` with **no offsets and no fuzz**, and every `--replace-fail` clamp and both
+`installPhase` rewrites still matched, so both int8-KV clamps and the Pi-retry rewrite are
+intact). The ggml pin is unchanged (`setup.py:166 LLAMA_CPP_COMMIT = 3cf03257…`), so the
+`llama` fetch in `strata-package.nix` did not move.
+
+**Upstream shipped our guard.** #1892 (lask3802) is a finiteness guard on by default behind
+the *same* `STRATA_NAN_GUARD` switch our patch invented, and it *recovers* instead of
+erroring: `logits_nonfinite_rows(head_logits_, T, n_vocab, m_nf_)` is recorded in every
+window graph (`verify.cpp:1795`), `Verifier::note_nonfinite` fills
+`nf_row_/nf_pos_/nf_mask_`, `generate.cpp` ends the request `DONE … nonfinite` emitting
+**none** of the poisoned window's tokens and drops every cached state (the next request
+re-reads the prompt from token 0), and `serve/server.py` raises `EngineNonFinite` and
+retries the request once (`nf_retried`). Engine log line `non-finite logits (#879)`; costs
+≤0.2 % decode; `STRATA_NAN_GUARD=0` turns it off. **Our guard is therefore gone from the
+patch** — two guards behind one env var, ours being the one that only failed the window and
+relied on the `"server error"` rewrite to get Pi to retry the whole request, was not a trade
+worth keeping.
+
+**What is left is the audit** — and that is the half upstream still wants. #879 is open
+(updated 2026-10-11): the maintainer ran MKheru's stress script over 1,870 R9700 requests in
+four configurations plus 276 MMQ kernel cases and *could not* fire it, and asks the reporters
+(we are one of them — `cjdell`, 2026-10-05, the second HIP/RDNA4 data point) for (1) whether
+it still fires without MKheru's CUDA-helper patch, (2) `STRATA_PREFILL_CPU_SHARE=0`,
+`--pcie-frac 0` and the stock power limit, (3) the `expert cache N slots` line and
+`STRATA_DBG_NAN` from **more than one** fire. Our dump prints per-stage
+(layer, row, col, raw bits) for *every* fire, which is more than `STRATA_DBG_NAN` (first
+fire only) reports. The file is renamed **`strata-kernel-audit.diff`** to say what it is:
+19 hunks, 280 additions, 0 deletions.
+
+Still open from MKheru's 2026-10-10 analysis (**not** applied): every one of their 28 fires
+was a prompt read of 198–258 new tokens over a cached conversation, and `--short-read 260`
+— which routes those reads through the verify windows instead of the batched prompt path —
+gave 0 fires in 770 requests at no measurable speed cost. Upstream could not reproduce the
+fire at all, so that is a workaround for a defect they cannot see rather than a fix; with
+#1892 recovering instead of answering `!`, we keep the speed and the capture.
+
+Two cost fixes done while re-basing:
+
+- `lay_flags_` (the per-stage flags) is allocated **only** with `STRATA_KERNEL_AUDIT=1`.
+  Until now it was allocated unconditionally, so ~10 audit probes per layer sat in every
+  captured verify graph whether anyone was reading them or not — and 0.1.43 is precisely
+  the release that priced that: it ships `STRATA_DUMMY_NODES` to measure "one empty kernel
+  node per layer" and wins 1.6–2.0 % decode by removing and fusing decode-window nodes.
+  Every write site is gated on the pointer, so with the audit off the window graph matches
+  upstream's. `strata.nix` still sets it to `1` — we are mid-hunt; set it to `0` for full
+  speed once we have a capture.
+- The failure dump moved to just after `note_nonfinite(T, nullptr)` and rides on upstream's
+  `nf_mask_` instead of its own scan, prints every fire, and **no longer fails the window**.
+  It needs `STRATA_NAN_GUARD` unset (those are the flags it reads) and
+  `STRATA_KERNEL_AUDIT=1` for the per-layer lines.
+
+Three sites needed a re-base; the other 16 hunks moved by offset alone:
+
+- the layer-input probe: 0.1.43 inserted the `STRATA_DUMMY_NODES` block between
+  `q8_attn = gr_read_group(…)` and `if (inputs_pending)`;
+- the attention-output probe: a new `stamp(l, 32, grp)` profile line after
+  `q8_ffn = gr_read_group(…)`;
+- the routed-total probe: 0.1.43's fused combine made the hit add **conditional**
+  (`hits_in_combine`, `fuse_hits_on`, the decode default) —
+  `native_moe_combine_multi_hits_added` folds it inside the combine, so `parts_out` is not
+  the routed total there and sampling it would have lied. That probe is now gated
+  `&& !hits_in_combine`; the `hit_out` and miss-row probes moved *before* the add
+  (`moe_hit_add` only reads `hit_out`, so they see the same bytes), and site 4 (the layer's
+  whole contribution, after the combine) still covers the fused case.
+
+Behaviour to expect on this box (no config change made, but they move answers):
+
+- **`STRATA_ROUTE_TAIL_SKIP=7` is now the default on HIP gfx1200/gfx1201**
+  (`generate.cpp:8203`) — it was CUDA-only in 0.1.42. It stays off only from 90 % of the
+  experts in the GPU cache on a single card (60 % on an AMD layer split, #1884), and we sit
+  at 10,679 of 24,576 = **43 %**, so it is ON: KL ~0.003–0.006, answers differ slightly from
+  0.1.42. `STRATA_ROUTE_TAIL_SKIP=0` restores 0.1.41's bytes.
+- **The measured PCIe share is now the default here too** (`STRATA_PCIE_FRAC_DEFAULT=old`
+  reverts). Both of these are among the variables the maintainer asks us to pin when
+  reproducing #879: `STRATA_ROUTE_TAIL_SKIP=0 --pcie-frac 0` is the A/B.
+- **`STRATA_PF_FUSED`'s new gfx12 default does not touch us**: it is IQ3_S/IQ3_XXS gate/up
+  only (`moe_fused_iq.cu:1131` `if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS)
+  return false;`), so UD-IQ4_XS keeps MMQ — no answer change from it.
+- Long prompts may chunk at 16384 (`STRATA_GFX12_CHUNK=0` keeps 8192).
+- `STRATA_DROP_CACHE_ON_EXIT` is new, opt-in, off — **keep it off**: it
+  `posix_fadvise(DONTNEED)`s the model files when the server stops, and that warm page cache
+  is what makes a restart take seconds instead of minutes.
+- Upstream's R9700 rows vs 0.1.42: decode +2–10 % (IQ3_S +6–14 %), prompt +12–14 %
+  (32K +17 %, 64K +27 %); with a 16 GB card's cache +21–38 %. `bench.sh` /
+  `tools/strata_bench.py` is new if we ever want to publish numbers.
+
+Still byte-identical, still ours: `kv_q8.cu` and `src/prefill/kernels.cu` (0 changed lines
+again) — `kv_q8.cu:55` and `kv_append_kernel` (`prefill/kernels.cu:1691`) write `amax / 127`
+to fp16 unclamped, so clamps (2) and (3) stay, and they are the reason `--kv int8` is safe.
+Both `installPhase` rewrite targets moved to `serve/server.py:5392` and `:5400`, verbatim.
+
 ## 0.1.42 (2026-10-10)
 
 Pinned `61b3fb5d` (v0.1.42), built
