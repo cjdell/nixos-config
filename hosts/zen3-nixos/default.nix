@@ -45,6 +45,21 @@
       xxd
       # opencode
       # nodejs moved to the user profile: users/cjdell/home.nix (home.packages)
+
+      # Build-machine tooling. This host is the fleet's Nix builder
+      # (alderlake-thinkpad / macbook-pro-2009 offload here) and also drives
+      # the `nest` firmware build (self-hosted Nest thermostat server + the
+      # GTVHacker 2.6.37 kernel uImage). These are what that workflow reaches
+      # for outside a Nix derivation. The 2008 ARM cross-toolchain is i686 and
+      # now runs NATIVELY here (the kernel has IA32 emulation, so no qemu-i386):
+      # the nest flake rewrites its ELF interpreter with `patchelf` — see
+      # nest/firmware/default.nix.
+      bc
+      cpio
+      file
+      gnumake
+      patchelf
+      ubootTools # mkimage, for the uImage
     ];
 
     # zram swap: the llama-swap r9700 RAM prompt cache (`-cram 65536` in
@@ -75,6 +90,24 @@
     # 00:0e:c6:8e:b3:ff (hosts/grafton-router/networking/dns.nix); it used to
     # reach this box at a dynamic .191 because the lease named the wrong MAC.
     nix = {
+      # Local build tuning. This box is the fleet's builder: keep the store
+      # deduplicated, and let the operator (not just root) drive extra
+      # substituters/builders via --option.
+      settings = {
+        auto-optimise-store = true;
+        trusted-users = [
+          "root"
+          "cjdell"
+        ];
+        # NixOS defaults to max-jobs = "auto" (all 32 logical CPUs) with
+        # cores = 0, so a wide dependency graph can spawn 32 jobs each running
+        # `make -j32`. Cap concurrency at the physical core count, but leave
+        # cores = 0 so a lone heavy build (the nest kernel uses
+        # -j$NIX_BUILD_CORES) still uses every thread.
+        max-jobs = 16;
+        cores = 0;
+      };
+
       distributedBuilds = true;
       buildMachines = [
         {
