@@ -63,6 +63,7 @@ workstation, etc.). Key layout:
 | `docs/zen3-random-crashes.md` | **OPEN** investigation into zen3-nixos' random hard resets (watchdog-reaped hangs, not panics; memory/IMC hypothesis; `[S]`=CPU_OUT_OF_SPEC) + the `scripts/stress-monitor.sh` soak harness — sequel to `docs/kernel-rcu-wedge.md` |
 | `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), the 2026-09-30 tuning, the exact nudge-gate formulas, and how to health-check it (`bili doctor`, `/__bili/*` on the **pi lane port 18789**, not 18787) |
 | `docs/strata-hang.md` | Strata's `no progress for 60 s` watchdog aborts (upstream #29) → 32 GB core dumps → amdgpu MES teardown failure + MODE1 GPU reset: why the cores are useless, the journal line that names the stall, and the `HSA_USERPTR_FOR_PAGED_MEM=0` candidate fix (#750 = two R9700s on ROCm 7.2) |
+| `docs/strata-expert-helper.md` | Options for a **second GPU as a Strata expert helper** on zen3-nixos (from #879): the three walls (mixed-vendor unsupported, ROCm arch coverage, and the board's second slot training at **Gen1 x2 = 0.5 GB/s**), candidate cards (RX 580 unusable / RTX 2060 needs a cross-vendor patch / RX 5600 gfx1010 clean but link-bound), the #1184 +10–18 % reference numbers, and why the PCIe link is the dealbreaker |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
