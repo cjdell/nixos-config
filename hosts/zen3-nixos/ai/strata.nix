@@ -188,6 +188,18 @@ let
       # the R9700 (GPU 0, UUID 47ff7551-…; BDF 09:00.0 now, 03:00.0 before —
       # match by UUID, not BDF). HIP_VISIBLE_DEVICES=0 pins that one.
       backend = "hip";
+      # ROCm 10.0.0 (TheRock) runtime, prepared by hand at /opt/rocm-10.0/lib
+      # (scripts/setup-rocm10-libs.sh). serve/server.py's child_env() PREPENDS
+      # lib_dirs to the engine's LD_LIBRARY_PATH, which overrides the Nix
+      # build's RUNPATH to ROCm 7.2.3 - so the same 0.1.43 binary loads the
+      # ROCm 10 libamdhip64/hsa-runtime. This is the fix for the #879
+      # poisoned-context class: same binary, same source, runtime only =
+      # 0 fires in 1911 requests (vs 2/1399 on 7.2.3 the same day; the ROCm
+      # 7.2.1 r9700 libs fire again). It is a local asset, not in the store;
+      # child_env() silently DROPS a missing dir, so ExecStartPre below refuses
+      # to start rather than fall back to the buggy 7.2.3.
+      # docs/strata-degeneration.md, docs/strata-maintainer-report.md.
+      lib_dirs = [ "/opt/rocm-10.0/lib" ];
       env.HIP_VISIBLE_DEVICES = "0";
       # Local #879 instrumentation (see strata-package.nix): when a window's logits come
       # out non-finite, dump the first non-finite (layer, row, col, raw bits) per
@@ -244,6 +256,10 @@ in
 
     serviceConfig = {
       ExecStart = "${strata}/bin/strata-server --engine strata --config ${configFile} --host 127.0.0.1 --port 8080";
+      # Refuse to start if the hand-prepared ROCm 10 runtime is gone: lib_dirs
+      # drops a missing dir, and the engine would silently run ROCm 7.2.3 again
+      # (the #879 poison). Fail loudly instead.
+      ExecStartPre = "${pkgs.coreutils}/bin/test -e /opt/rocm-10.0/lib/libamdhip64.so.7";
       # The engine log (config "log") is written here; StateDirectory creates it.
       StateDirectory = "strata";
       Restart = "on-failure";

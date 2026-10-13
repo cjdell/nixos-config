@@ -529,6 +529,39 @@ serves 0.1.42 since 2026-10-10 23:19).
 - **#879 is still open** (updated 2026-10-11). Nothing in 0.1.43 touches the routed-expert
   data path — the guard only catches the symptom. Full notes in [`strata.md`](./strata.md).
 
+## Update 2026-10-13: the runtime is the variable — we now run ROCm 10.0.0
+
+**The poison is fixed for us by changing only the ROCm runtime, not Strata.**
+
+- MKheru cross-built 0.1.43 against ROCm 10.0.0 and got **0 fires**; our own
+  A/B on this box is the same result with **one variable**: the same 0.1.43
+  binary, unmodified source, differing only in which `libamdhip64`/`hsa-runtime`
+  the engine loads. `LD_LIBRARY_PATH` -> the 10.0.0 libs: **0 fires in 1911
+  requests**; back to the 7.2.3 libs: **2 fires in 1399** over the same window on
+  the same hardware; the **7.2.1** r9700 libs fire again too, so it tracks the
+  library version, not "newer is better" in general.
+- ROCm 10.0.0 is not "7.2 + two majors": AMD never shipped 8 or 9. The 7.x
+  stable line ended at 7.2 (ours); 7.9-7.14 were tech previews; 7.14 moved the
+  whole stack to the **TheRock** build/release system, then renumbered to 10.0.
+  So 7.2.x-vs-10.0.0 also swaps build systems, and *which* part of 7.2.x is at
+  fault is not nailed down — but 10.0 fixes it, so we are not blocked on that.
+- **Deployed, not just tested.** `hosts/zen3-nixos/ai/strata.nix` sets
+  `lib_dirs = [ "/opt/rocm-10.0/lib" ]` in the serve config; `serve/server.py`'s
+  `child_env()` prepends it to the engine's `LD_LIBRARY_PATH`, which overrides
+  the Nix build's RUNPATH to the store's ROCm 7.2.3. The 16 GB of libs are a
+  local asset at `/opt/rocm-10.0/lib`, reproduced by
+  `scripts/setup-rocm10-libs.sh` (pinned image digest
+  `sha256:a90cf047…4981b374`); `ExecStartPre` refuses to start if the dir is
+  gone (otherwise `child_env()` silently drops it and the engine falls back to
+  7.2.3). Live 2026-10-13: the engine maps
+  `/opt/rocm-10.0/lib/libamdhip64.so.7.15.26333-0000000` and
+  `libhsa-runtime64.so.1.21.0`, decode ~50 tok/s.
+- The clamps and the finiteness guard **stay** — they mitigate the symptom and
+  the upstream routed-expert data-path defect (#879) is still unfixed. The
+  trigger is what changed.
+- **Not yet evaluated on ROCm 10:** the #29 hangs (always long-prompt prefill).
+  The move is independent of `HSA_USERPTR_FOR_PAGED_MEM=0`, which is still set.
+
 ## Still open
 
 - **Retry #879 on 0.1.40.1 — in progress.** Switched 2026-10-06 14:39 BST: the live
