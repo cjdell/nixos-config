@@ -247,6 +247,69 @@ script had the same latent break and is fixed the same way.
 switch`; both packs stay on disk, and the unit's `ConditionPathExists` still
 protects a pack that is not built.
 
+## 0.1.44 / 0.1.44.1 (2026-10-14)
+
+Pinned `296b59d2` (v0.1.44.1, the hotfix on 0.1.44 `ed4773eb` of 2026-10-13, which follows
+0.1.43.1 `a0116b27` of 2026-10-12), built
+`/nix/store/yrxmsd6ss59ni7874xcri0mn9rf2kr8b-strata-0.1.44.1` (HIP/gfx1201). **Nothing of ours
+had to be rewritten:** the audit patch applied in `patchPhase` with **no offsets and no fuzz**
+(19 hunks, 280 additions, 0 deletions — the added lines are *byte-identical* to the 0.1.43
+file, only the hunk line numbers moved: +11 `verify.hpp`, +4 `iq_kernels.hpp`, +22/+35/+134
+`verify.cpp`, +190/+206 `iq_kernels.cu`), both `--replace-fail` int8-KV clamps matched (each
+target still unique: `kv_q8.cu:55` — that file is byte-identical to 0.1.43 — and
+`prefill/kernels.cu:1702`, up from 1691), and both `installPhase` rewrites of `serve/server.py`
+matched (now 5861 and 5869). The ggml pin is unchanged (`setup.py:167 LLAMA_CPP_COMMIT =
+3cf03257…`), so the `llama` fetch did not move. Build surface unchanged: still no `install()`
+rules, `add_executable(strata src/program/generate.cpp)` at `CMakeLists.txt:622`, no new
+third-party import in `serve/` (still jinja2 / PIL / psutil), and all 13 engine args in
+`strata.nix` are still parsed. Upstream added its own `flake.nix` (#2198); we keep ours.
+
+**The three answer-changing RDNA4 defaults now in force** (each documented in a comment in
+`strata.nix`, none set there — we take upstream's defaults):
+
+| switch | since | effect here | revert |
+| --- | --- | --- | --- |
+| `STRATA_ROUTE_TAIL_SKIP=7` | 0.1.43 | ON (we hold ~43 % of experts in the GPU cache, the skip only stays off from 90 %); KL ~0.003–0.006 | `=0` |
+| measured PCIe share | 0.1.43 | replaces the fixed fraction | `STRATA_PCIE_FRAC_DEFAULT=old` |
+| `STRATA_HC_Q8` | **0.1.44** | hc\_* projections read as Q8_0, not BF16: R9700 decode +2.5–4 %, mean KL 0.0003–0.0010, answers can differ in near-ties. For our `--compat-bf16` pack the engine requantizes the pack's BF16 copy to Q8_0 at load (`fused_gr.cu:2090 gr_quantize_q8_0_kernel`, new in 0.1.44) — a little load time and `hc_q8_bytes` of extra arena (`native_dense.cpp:496`) | `=0` |
+| `STRATA_GFX12_CHUNK` | 0.1.43/44 | a bare `--prefill auto` (what we pass) may chunk prompts at 16384, not 8192; 0.1.44's #2090 guard (`generate.cpp:6634`) keeps 8192 when free RAM does not cover the extra slot loan + 6 GiB — relevant with `--resident-budget-gib 55` on 94 GB | `=0` |
+
+`STRATA_GFX12_DEFAULTS=0` turns off the last two at once. `STRATA_PF_FUSED`'s new gfx12 default
+covers IQ3_S/IQ3_XXS gate/up only, so UD-IQ4_XS keeps MMQ — no answer change from it. Two more
+new defaults are bit-identical per upstream: `STRATA_COMMIT_BATCH` (one commit-graph launch per
+layer kind, `verify.cpp:2041`) and `STRATA_MTP_HIP_PRIO` (draft stream at high priority on
+gfx1200/gfx1201, `mtp.cpp:445`).
+
+**Two 0.1.43.1 fixes land with this update** (our previous pin was 0.1.43, so we did not have
+them) and they map onto our two remaining failure classes: the prompt path's pageable
+host→GPU copies now go through a ring of **pinned** buffers
+(#1996, an RX 7900 XTX memory-access fault after ~30 min; a 65-min 6-client R9700 stress ran
+clean) — the same class we expose with `--kv-resident` streaming KV into host RAM; and the PLE
+n-gram table is **no longer switched to mmap by itself** (the start-up check only warns now,
+`STRATA_PLE_AUTO_MMAP=1` restores the 0.1.42 behaviour) with the watchdog's slow-disk allowance
+widened — our 26.82 GiB PLE table is read with direct IO, and the auto-mmap made SATA prompts
+~7× slower (#2040). Also fixed: a short prompt right after start ending the engine with
+`lending the prompt path its slots failed` (#2090). From 0.1.44: `serve/server.py:528
+START_RETRIES` (default 3) retries a server start that dies inside the GPU runtime's own
+set-up — "a ROCm `hsa_exception` one start in twenty after a quick restart" — at 2, 4 and 8 s.
+
+**Checked and dismissed**: 0.1.44's new fp16 scale stores are `gr_quantize_q8_0_kernel`
+(`fused_gr.cu:2099`, **weights**, bounded) and the NVFP4 dequant scales (`iq_kernels.cu:2071/
+2088`, `prefill/kernels.cu` `row_sd`) — NVFP4 is NVIDIA-only, never loaded here. The one new
+q8_1 *activation* emit site upstream added (the `STRATA_HC_Q8` read) already goes through
+`q8_1_finite`/`q8_1_quant`/`q8_1_ds`. `native_mmvq.cu:2074` (was 1985) still writes a fixed
+synthetic scale. `s2_expert_grouped.cu:193` does keep an unclamped Q8_0 activation scale, but
+it predates this pin and 0.1.44 only added a geometry `static_assert` to that file.
+`serve/server.py` gained four more `the next request restarts it` exits (5559, 5933, 5966, 6085
+— the 503, Responses and Anthropic paths) that our `"server error"` rewrite does **not** match;
+Pi talks to `/chat/completions`, so coverage is still complete — revisit if we move routes.
+
+**#879 is still open.** Neither 0.1.44 nor 0.1.44.1 touches the routed-expert data path (0.1.44's
+300 changed lines in `iq_kernels.cu` are the route-resident work and NVFP4 dequant), so the
+audit stays the point of our patch. Note the ROCm 10.0.0 runtime swap (2026-10-13,
+`lib_dirs = ["/opt/rocm-10.0/lib"]`) is still the thing that actually stopped the fires — 0 in
+1911 requests — and it is orthogonal to the version pin.
+
 ## 0.1.43 (2026-10-12)
 
 Pinned `7695859a` (v0.1.43), built `/nix/store/1s8ca3glsa0arp6hk39xnqv6sc7rkcgp-strata-0.1.43` (HIP/gfx1201; the patch applied in

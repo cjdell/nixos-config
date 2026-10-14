@@ -215,6 +215,25 @@ let
       # the poisoned window emits nothing, the caches are dropped and the prompt is read
       # again from token 0, so this only observes - it never changes an answer.
       env.STRATA_KERNEL_AUDIT = "1";
+      # 0.1.44 turned on TWO more RDNA4 defaults that apply to us and we deliberately take
+      # them (upstream's numbers, not our measurements - so these are the first suspects if an
+      # answer changes or a prompt behaves differently after that deploy, and the A/B is one
+      # line each way):
+      #   * STRATA_HC_Q8 - on by default for gfx1200/gfx1201 (native_dense.cpp:46-70). The
+      #     hyper-connection projections are read as Q8_0 instead of BF16: R9700 decode
+      #     +2.5..4%, mean KL 0.0003-0.0010, so answers CAN differ in near-ties. For our pack
+      #     (repacked with --compat-bf16, so its 195 hc_* tensors are BF16) the engine
+      #     requantizes that BF16 copy to Q8_0 at load - a little more load time and arena.
+      #     Revert: env.STRATA_HC_Q8 = "0";
+      #   * STRATA_GFX12_CHUNK - a bare `--prefill auto` (what engineArgs passes) may now chunk
+      #     prompts at 16384 instead of 8192 on gfx12. 0.1.44's #2090 guard keeps 8192 when the
+      #     available RAM does not cover the extra slot loan + 6 GiB, which is the case worth
+      #     watching here: --resident-budget-gib 55 on 94 GB. Revert: env.STRATA_GFX12_CHUNK =
+      #     "0"; (or STRATA_GFX12_DEFAULTS = "0" for both at once).
+      # Carried over from 0.1.43 and unchanged: STRATA_ROUTE_TAIL_SKIP=7 and the measured PCIe
+      # share are still on for gfx12 (we hold ~43% of the experts in the GPU cache, so the skip
+      # is active; KL ~0.003-0.006). `STRATA_ROUTE_TAIL_SKIP=0 --pcie-frac 0` is the A/B the
+      # maintainer asks for while #879 is open - pin those before reporting a capture.
       # Hang watchdog (#29) work-around, 2026-10-08: ROCr maps paged host
       # allocations through a KFD userptr, and while the kernel reclaims those
       # host pages the GPU's queues get suspended; a restore that keeps

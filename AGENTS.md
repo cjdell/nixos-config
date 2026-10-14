@@ -838,9 +838,9 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.1.43** (`7695859aa13afb248bdb4d36f9b2e95707db079d`, updated 2026-10-12 from
-0.1.42 `61b3fb5d`; built `/nix/store/1s8ca3glsa0arp6hk39xnqv6sc7rkcgp-strata-0.1.43`
-but **not yet deployed** — the live service runs 0.1.42, up since 2026-10-10 23:19:18):
+**0.1.44.1** (`296b59d2f73c8f04a805df29c2fa97655adace78`, updated 2026-10-14 from
+0.1.43 `7695859a`; built `/nix/store/yrxmsd6ss59ni7874xcri0mn9rf2kr8b-strata-0.1.44.1`
+but **not yet deployed** — the live service runs 0.1.43, up since 2026-10-13 13:03:04):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -848,11 +848,18 @@ but **not yet deployed** — the live service runs 0.1.42, up since 2026-10-10 2
 switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
 [`docs/strata.md`](docs/strata.md).
 
-⚠️ **0.1.43 changes answers on our card**: the two decode defaults that were CUDA-only in
-0.1.42 now apply to gfx1200/gfx1201 — `STRATA_ROUTE_TAIL_SKIP=7` (stays off only from 90 % of
-experts in the GPU cache; we are at 43 %, so it is ON; KL ~0.003–0.006) and the measured
-PCIe share (`STRATA_PCIE_FRAC_DEFAULT=old` reverts). Upstream's R9700 rows: decode +2–10 %,
-prompt +12–14 %. Details: `docs/strata.md` "0.1.43".
+⚠️ **0.1.43 and 0.1.44 change answers on our card** — three RDNA4 defaults now apply that
+did not in 0.1.42: `STRATA_ROUTE_TAIL_SKIP=7` (stays off only from 90 % of experts in the GPU
+cache; we are at 43 %, so it is ON; KL ~0.003–0.006), the measured PCIe share
+(`STRATA_PCIE_FRAC_DEFAULT=old` reverts), and **new in 0.1.44: `STRATA_HC_Q8`** — the
+hyper-connection projections are read as Q8_0 instead of BF16 on gfx1200/gfx1201 (R9700 decode
++2.5–4 %, mean KL 0.0003–0.0010, "answers can differ in near-ties"); for our `--compat-bf16`
+pack the engine requantizes the pack's BF16 copy to Q8_0 at load. Revert with
+`STRATA_HC_Q8=0`, or `STRATA_GFX12_DEFAULTS=0` for that **and** the new 16384 prompt chunk
+(`STRATA_GFX12_CHUNK=0` keeps 8192; 0.1.44's #2090 guard already falls back to 8192 when free
+RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a comment in
+`hosts/zen3-nixos/ai/strata.nix`. Upstream's R9700 rows: 0.1.43 decode +2–10 % / prompt
++12–14 %; 0.1.44 adds +2.5–4 % from HC_Q8. Details: `docs/strata.md` "0.1.43".
 
 - **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
   sets `"ud-iq4-xs"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
@@ -881,7 +888,11 @@ prompt +12–14 %. Details: `docs/strata.md` "0.1.43".
   `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
   `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
   the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
-  `prefill/kernels.cu:1691` (was 1340) — both live here because we run `--kv int8`.
+  `prefill/kernels.cu:1702` (was 1691 in 0.1.43, 1340 in 0.1.42) — both live here because we
+  run `--kv int8`. Still unclamped on 0.1.44.1: `kv_q8.cu` is byte-identical to 0.1.43 and
+  0.1.44's 27 changed lines in `prefill/kernels.cu` are NVFP4 `row_sd` + a gfx1103 WMMA case,
+  so both `postPatch` clamps are still needed and both `--replace-fail` targets are still
+  unique.
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
 - **The recurring strata "core dumps" are not crashes — they are the engine's hang
@@ -908,11 +919,16 @@ prompt +12–14 %. Details: `docs/strata.md` "0.1.43".
   MoE path plus a dump in `Verifier::run` that rides on upstream's `nf_mask_` and prints
   *every* fire. It is allocated and launched **only** with `STRATA_KERNEL_AUDIT=1` (set in
   `strata.nix`) because each probe is an extra node in the captured verify graph. Re-based
-  onto 0.1.43 on 2026-10-12: 3 sites moved (the new `STRATA_DUMMY_NODES` probe, a new
-  `stamp(l, 32, grp)`, and `moe_hit_add` becoming conditional on `hits_in_combine`); 20
-  hunks, 280 additions, 0 deletions, `--fuzz=0` with **no offsets**.
-  **#879 is still open upstream** (updated 2026-10-11; 1,870 R9700 requests did not fire it)
-  and nothing in 0.1.43 fixes the routed-expert data path, so the audit stays needed.
+  onto 0.1.44.1 on 2026-10-14: **no site moved** — the 280 added lines are byte-identical to
+  the 0.1.43 file and only the hunk line numbers changed (+11 verify.hpp, +4 iq_kernels.hpp,
+  +22/+35/+134 verify.cpp, +190/+206 iq_kernels.cu); 19 hunks, 280 additions, 0 deletions,
+  `--fuzz=0` with **no offsets** (`patch -p1 --fuzz=0` and `git apply --check` both clean).
+  Its two anchors are intact: upstream's `nf_mask_` (`Verifier::note_nonfinite`,
+  `verify.cpp:3311`) and the `hits_in_combine` gate the routed-total probe checks
+  (`verify.cpp:1624/1677/1680/1692`).
+  **#879 is still open upstream** (0.1.44 and 0.1.44.1 do not touch the routed-expert data
+  path — 0.1.44's 300 changed lines in `iq_kernels.cu` are route-resident work and NVFP4
+  dequant), so the audit stays needed.
   **Never re-apply an old file with fuzz** — `--fuzz=3`
   "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
   inside the PLE `try` block.
