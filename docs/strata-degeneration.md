@@ -546,16 +546,19 @@ serves 0.1.42 since 2026-10-10 23:19).
   So 7.2.x-vs-10.0.0 also swaps build systems, and *which* part of 7.2.x is at
   fault is not nailed down — but 10.0 fixes it, so we are not blocked on that.
 - **Deployed, not just tested.** `hosts/zen3-nixos/ai/strata.nix` sets
-  `lib_dirs = [ "/opt/rocm-10.0/lib" ]` in the serve config; `serve/server.py`'s
+  `lib_dirs = [ "${rocm10}/lib" ]` in the serve config; `serve/server.py`'s
   `child_env()` prepends it to the engine's `LD_LIBRARY_PATH`, which overrides
-  the Nix build's RUNPATH to the store's ROCm 7.2.3. The 16 GB of libs are a
-  local asset at `/opt/rocm-10.0/lib`, reproduced by
-  `scripts/setup-rocm10-libs.sh` (pinned image digest
-  `sha256:a90cf047…4981b374`); `ExecStartPre` refuses to start if the dir is
-  gone (otherwise `child_env()` silently drops it and the engine falls back to
-  7.2.3). Live 2026-10-13: the engine maps
-  `/opt/rocm-10.0/lib/libamdhip64.so.7.15.26333-0000000` and
-  `libhsa-runtime64.so.1.21.0`, decode ~50 tok/s.
+  the Nix build's RUNPATH to the store's ROCm 7.2.3. Since 2026-10-14 those
+  16 GB are a **store path built by `hosts/zen3-nixos/ai/rocm10-runtime.nix`**
+  (fixed-output curl of the ROCm layer of `rocm/dev-ubuntu-24.04:10.0.0-full`,
+  image digest `sha256:a90cf047…4981b374`, then a `lib/*`-only tar extract), so
+  the runtime is declared, hashed and reproducible instead of a hand-laid
+  `/opt` directory. The old `ExecStartPre test -e` guard is gone with the hand
+  install: a store path cannot be missing, and a missing dir used to be silent
+  because `child_env()` drops non-existent entries — which would have meant a
+  quiet fall back to the buggy 7.2.3. Live 2026-10-13 (and after the move): the
+  engine maps `…-rocm10-runtime-10.0.0/lib/libamdhip64.so.7.15.26333-0000000`
+  and `libhsa-runtime64.so.1.21.0`, decode ~50 tok/s.
 - The clamps and the finiteness guard **stay** — they mitigate the symptom and
   the upstream routed-expert data-path defect (#879) is still unfixed. The
   trigger is what changed.

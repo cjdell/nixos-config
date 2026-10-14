@@ -307,8 +307,9 @@ Pi talks to `/chat/completions`, so coverage is still complete — revisit if we
 **#879 is still open.** Neither 0.1.44 nor 0.1.44.1 touches the routed-expert data path (0.1.44's
 300 changed lines in `iq_kernels.cu` are the route-resident work and NVFP4 dequant), so the
 audit stays the point of our patch. Note the ROCm 10.0.0 runtime swap (2026-10-13,
-`lib_dirs = ["/opt/rocm-10.0/lib"]`) is still the thing that actually stopped the fires — 0 in
-1911 requests — and it is orthogonal to the version pin.
+`lib_dirs = ["${rocm10}/lib"]`, built by `ai/rocm10-runtime.nix` since 2026-10-14) is still the
+thing that actually stopped the fires — 0 in 1911 requests — and it is orthogonal to the version
+pin.
 
 ## 0.1.43 (2026-10-12)
 

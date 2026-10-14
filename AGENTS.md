@@ -947,6 +947,27 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   response: it omits the turn and starts a compact-and-retry loop that never
   recovers. Look in `bili.log` for a *degenerate terminal turn* retry before
   assuming Pi or the host died — there is no `crashes.json`, OOM, or coredump.
+- **The engine does not run on nixpkgs' ROCm — it runs on a store-built ROCm
+  10.0.0.** `hosts/zen3-nixos/ai/rocm10-runtime.nix` fetches the ROCm 10.0.0
+  (TheRock) runtime and `strata.nix` puts it first with
+  `lib_dirs = [ "${rocm10}/lib" ]`; `serve/server.py`'s `child_env()` PREPENDS
+  that to `LD_LIBRARY_PATH`, overriding the build's RUNPATH to nixpkgs' ROCm
+  7.2.3. That swap — not any clamp — is what stopped the #879 poison (0 fires in
+  1911 requests vs 2/1399 on 7.2.3), so **do not "simplify" it back to
+  `pkgs.rocmPackages`**: nixpkgs only has 7.2.3 (`rocmPackages_8/_9/_10` do not
+  exist) and 7.2.x is the version that fires. Two stages on purpose: a
+  fixed-output `curl` of the one 8 GB ROCm layer of
+  `rocm/dev-ubuntu-24.04:10.0.0-full` (an OCI blob's sha256 *is* its manifest
+  digest, so no skopeo/dockerTools needed) and then a `lib/*`-only tar extract —
+  changing the filter costs a re-extract, never a second 8 GB download. Don't
+  trim the 16 GB to the ~2 GB the engine maps: it dlopens by SONAME and a
+  missing one fails at runtime. Until 2026-10-14 this lived at
+  `/opt/rocm-10.0/lib`, laid down by hand by `scripts/setup-rocm10-libs.sh`,
+  with an `ExecStartPre test -e` guard because `child_env()` silently drops a
+  missing dir (that guard is gone — a store path cannot be missing).
+  `/opt/rocm` → `pkgs.rocmPackages.clr` (a tmpfiles symlink in
+  `ai/default.nix`) is a different, unrelated thing. Verify with
+  `sudo cat /proc/$(pgrep -f '[b]in/strata --serve')/maps | grep -c rocm10-runtime`.
 - **Verify the running engine, don't assume:**
   `systemctl show strata -p ExecStart` and `readlink /proc/$(pgrep -f '[b]in/strata --serve')/exe`
   must show the store path from the latest build (the build is offline and the
@@ -959,6 +980,15 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
 
 ## Known gotchas on this host
 
+- **`/nix/store` is bind-mounted read-only for everything except `nix-daemon`.**
+  PID 1's `mountinfo` shows `/dev/nvme0n1p3 … /nix/store ro,nosuid,nodev` (the
+  ext4 itself is `rw`) and the daemon carries its own `rw` bind, so builds work
+  but `sudo rm -rf /nix/store/<path>` fails with *"Read-only file system"* — not
+  a filesystem error, `dmesg` stays clean. Delete paths with **`nix store delete
+  <path>`**, which goes through the daemon. Related: a `nix build` backgrounded
+  from an agent shell dies when the tool call ends, the daemon cancels the build
+  on client disconnect and leaves a partial output in the store — run long builds
+  in the foreground with a `timeout`, not `nohup … &`.
 - **GPU pinning (single router, still Vulkan).** The mesa
   device-select layer (`VK_LAYER_MESA_device_select`, an implicit layer
   auto-loaded by every Vulkan app because NixOS patches the loader's search
