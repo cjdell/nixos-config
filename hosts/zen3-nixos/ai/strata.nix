@@ -163,6 +163,38 @@ let
     "int8"
     "--kv-resident"
     "32768"
+    # ---- parked conversations (the multi-agent cache) --------------------
+    # A chat or an agent resends its whole conversation on every turn.  By
+    # default the engine keeps exactly ONE live session, so when an agent and
+    # its subagents alternate requests they throw each other's KV away and
+    # every turn re-reads the whole prompt from token 0.  Observed here before
+    # this change: a 92,571-token prompt read at ~1.6K tok/s = ~56 s for a turn
+    # that should have read a few hundred tokens, and the engine's own request
+    # log showed reused=0 on every request that followed a different
+    # conversation (consecutive turns of the same one reused 68-76K of ~75-85K).
+    # Parking keeps up to `slots` independent conversations in host RAM (their
+    # K/V pages + the ~118 MB/turn checkpoints) and restores the one a request
+    # continues.  Matching is by exact token/image prefix only - no client
+    # session id - so it is transparent to Pi and its subagents.  It costs host
+    # RAM, not VRAM, and the cache slot is a switch-time decision: it degrades
+    # to a fresh read, never a failure.
+    #
+    # Sizing for this box (94 GiB RAM, ~31 GiB resident experts, int8 KV
+    # ~13.7 KiB/token, so a 100K-token conversation parks in ~1.4 GB): 12 GiB
+    # holds ~8 conversations at 100K or ~3 at the full 256K.  Past the budget
+    # the least-recently-used conversation is evicted, so this is a cap, not a
+    # reservation.  `--conversation-cache-min-free-mib` (default 2560) is the
+    # RAM floor: parking is skipped when there is no room.
+    "--conversation-cache-mib"
+    "12288"
+    "--conversation-cache-slots"
+    "12"
+    # Only park conversations worth a slot; one-shot probes / titles /
+    # classification calls are cheap to re-read and must not evict a long
+    # agent conversation (the log line is "skip parking (N tokens, below the M
+    # minimum)").  2048 also skips the root-only checkpoint of a tiny request.
+    "--conversation-cache-min-tokens"
+    "2048"
   ]
   ++ m.extraArgs;
 

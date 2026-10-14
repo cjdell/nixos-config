@@ -669,6 +669,26 @@ VRAM-fitting Flash-Next quant, so this is the one to use.
   stay in VRAM, so the expert cache does not shrink as context grows).
 - `--expert-cache auto`, `--prefill auto`, `--spec 4 --spec-min-p 0.5`,
   `--mtp <rt>`, `--expert-profile <shipped expert-profile.bin>`.
+- **Parked conversations (the multi-agent cache), added 2026-10-14:**
+  `--conversation-cache-mib 12288 --conversation-cache-slots 12
+  --conversation-cache-min-tokens 2048`. Without it the engine keeps exactly
+  one live session, so an agent and its subagents alternating requests throw
+  each other's KV away and every turn re-reads the whole prompt from token 0.
+  Measured on this box before the change (engine `/metrics`): `reused=0` on
+  every request that followed a *different* conversation - e.g. 92,571 tokens
+  read at ~1.6K tok/s = ~56 s - while consecutive turns of the same one reused
+  68-76K of ~75-85K. Parking keeps up to 12 independent conversations in host
+  RAM (K/V pages + the ~118 MB/turn checkpoints), matched by exact token/image
+  prefix only (no client session id), and restores the one a request continues.
+  Cost is host RAM, not VRAM; int8 KV is ~13.7 KiB/token, so a 100K-token
+  conversation parks in ~1.4 GB and 12 GiB holds ~8 at 100K or ~3 at 256K; past
+  the budget the LRU conversation is evicted, and `--conversation-cache-min-free-mib`
+  (default 2560) skips parking rather than forcing it when RAM is short.
+  `min-tokens 2048` keeps one-shot probes/titles from spending a slot. Watch it
+  on the web Monitor tab's **Conversation cache** card (parked vs slots/budget,
+  parks/restores/evictions, tokens reused) or `GET /metrics` -> `"conversation_cache"`
+  (`enabled`, `parked`, `restores`, `reused_tokens`). Upstream reference:
+  `docs/DETAILS.md` "Multiple conversations (opt-in)".
 - The HIP engine only has `gfx1201` kernels, but the box also has the 5700G's
   Vega 8 iGPU, so the run config sets `backend = "hip"` +
   `env.HIP_VISIBLE_DEVICES = "0"` (amd-smi: GPU 0 = R9700, BDF `03:00.0`,
