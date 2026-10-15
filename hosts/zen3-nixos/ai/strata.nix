@@ -121,6 +121,14 @@ let
   # only reads it).
   expertProfile = "${strata}/share/strata/data/expert-profile.bin";
 
+  # ISTA's vision encoder for Flash-Next: a 27-layer ViT + the projector into
+  # the language model (0.85 GiB). Model data, so it lives beside the GGUFs and
+  # NOT in the store — scripts/fetch-strata-mmproj.sh puts it there and checks
+  # it against upstream's pinned size + SHA-256. One file serves every
+  # Flash-Next family (setup.py:388/403/413/422 all point at the ISTA GSQ-RCO
+  # repo), so switching `ai.strataModel` needs nothing extra.
+  mmproj = "/home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf";
+
   # 393216 = 1.5x the model's native 262144 window, raised from it on
   # 2026-10-15 because live traffic reached 211,459 tokens (81% of 256K).
   # Measured ceilings for this box (94 GB RAM, 32 GB R9700) are in
@@ -271,6 +279,45 @@ let
       # so that needed an ExecStartPre `test -e` to stop a silent fall back to
       # the buggy 7.2.3; a store path cannot be missing, so the guard is gone.
       lib_dirs = [ "${rocm10}/lib" ];
+      # ---- image input (vision) ----------------------------------------
+      # This section IS the switch. serve/server.py's engine_args() adds
+      # `--vision` to the engine when it is present (#1322 — a config with the
+      # section but without the flag advertised images and then refused every
+      # picture), and the serve layer runs `strata-vision` as a resident second
+      # process: `ENC <img> <out>` in, one SVE1 record of float32
+      # [n_tokens][2560] out, which the engine splices in at the prompt's
+      # `<|image_pad|>` rows with 2-D M-RoPE positions (generate.cpp:9682).
+      #   gpu = false is forced, not a preference: tools/vision's only GPU
+      # backend is STRATA_VISION_CUDA and docs/AMD_HIP.md:52/203 says images on
+      # HIP run through the CPU encoder. What that buys us is VRAM: `--vision`
+      # alone allocates only the (max_context+64)x3 int32 M-RoPE table
+      # (generate.cpp:3201) = 4.5 MiB, and the 700 MiB `--vram-reserve-mib` the
+      # serve layer adds is gated on gpu = true. The expert cache (232 MiB
+      # free) is untouched. Upstream's GPU-encoder table (-2..8 % decode) does
+      # not apply for that reason.
+      #   What it does cost: encode time on the CPU — upstream measures ~3 s at
+      # 300 image tokens on 8 cores (6-13 s on 4), and encoding takes the FIFO
+      # turn, so generation waits for it. Encoder peak RSS is 1.2 GiB (flash
+      # attention on, which is the AVX2 case here) to 2.2 GiB (off): real on a
+      # box with the OOM history in docs/strata.md, but transient.
+      #   model = the text GGUF, opened VOCAB-ONLY (strata_vision.cpp:31
+      # `mp.vocab_only = true`) — no weights load, it is only there for the
+      # image token ids. max_tokens = the most tokens one picture becomes (a
+      # 640x480 photo is ~300; 1024 keeps small text/charts legible and costs
+      # encode time roughly in proportion). `min_tokens` (mtmd's
+      # image_min_tokens) is deliberately NOT set: upstream keeps it off because
+      # raising it changes image answers and mtmd only wants >=1024 for
+      # grounding tasks (pointing, counting).
+      # Text-only requests are unaffected: upstream states the output is
+      # bit-identical with images on when the VRAM is the same, and the serve
+      # layer only touches a prompt that actually carries image parts.
+      vision = {
+        exe = "${strata}/bin/strata-vision";
+        mmproj = mmproj;
+        model = m.nativeGguf;
+        gpu = false;
+        max_tokens = 1024;
+      };
       env.HIP_VISIBLE_DEVICES = "0";
       # Local #879 instrumentation (see strata-package.nix): when a window's logits come
       # out non-finite, dump the first non-finite (layer, row, col, raw bits) per
@@ -333,6 +380,11 @@ let
       proxy_read_timeout 3600s;
       proxy_send_timeout 3600s;
       proxy_buffering off;
+      # Image input: a base64 picture in a chat request is ~1.37x the file on
+      # disk, and nginx's default body cap is 1 MiB — a phone photo would 413
+      # at the proxy before Strata ever saw it. Strata's own cap is 32 MiB
+      # (serve/server.py IMAGE_URL_MAX = 32 << 20), so match it.
+      client_max_body_size 32m;
     '';
   };
 in
@@ -342,7 +394,14 @@ in
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
     # Don't crash-loop before the hand-run model prep has produced a pack.
-    unitConfig.ConditionPathExists = "${m.packDir}/index.txt";
+    # The mmproj is a second such precondition: with a `vision` section the
+    # serve layer starts the encoder BEFORE the engine and a missing file takes
+    # the whole service down (Restart=on-failure would loop), so the guard
+    # covers it too — the unit then stays inactive instead of flapping.
+    unitConfig.ConditionPathExists = [
+      "${m.packDir}/index.txt"
+      mmproj
+    ];
 
     serviceConfig = {
       ExecStart = "${strata}/bin/strata-server --engine strata --config ${configFile} --host 127.0.0.1 --port 8080";

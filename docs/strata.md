@@ -9,6 +9,10 @@ replaces llama-swap on this box (see "Why llama-swap is off" below). This doc
 records the install (which is half hand-prepared outside Nix), the config, and
 the measured context / memory ceilings that were the point of the exercise.
 
+**Image input is live** since 2026-10-15 22:09: `strata-vision` (mtmd, CPU encoder)
++ the ISTA mmproj, ~5 s to encode a picture, text output unchanged — see
+"Vision (image input)" below.
+
 **Concurrency:** the service runs **one request at a time** (`/v1/status` →
 `concurrency.serving: 1`). Strata's batching (`"parallel"` / `--batch`, `--batch-mtp`)
 is available and deliberately **not enabled** — on this card it buys second-session
@@ -616,8 +620,9 @@ never be imported at once.
 | pack (index + dense + tokenizer) | `/home/cjdell/Strata/pack/iq3s/` (~1.5 GB) |
 | MTP fetch source | `/home/cjdell/Strata/mtp/mtp-q2_0.gguf` + `tensors/` |
 | MTP draft runtime | `/home/cjdell/Strata/mtp/rt/` (`experts.bin`, `dense.bin`, `draft_vocab.bin`) |
-| Nix package (engine + serve) | `hosts/zen3-nixos/ai/strata-package.nix`, flake attr `.#strata` |
+| Nix package (engine + serve + encoder) | `hosts/zen3-nixos/ai/strata-package.nix`, flake attr `.#strata` |
 | NixOS module + nginx | `hosts/zen3-nixos/ai/strata.nix` |
+| Vision encoder weights (0.85 GiB) | `/home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, fetched + SHA-checked by `scripts/fetch-strata-mmproj.sh` |
 | Service | `systemd` unit `strata`, engine on `127.0.0.1:8080` |
 | Log | `/var/lib/strata/strata.log` (plus `journalctl -u strata`) |
 
@@ -761,6 +766,117 @@ reuse the KV cache, so the quadratic cost is paid once per conversation.
   prefill is minutes-to-tens-of-minutes, and 2M leaves only ~20 GB RAM free.
   Not recommended for interactive agent work.
 
+## Vision (image input) — live since 2026-10-15 22:09
+
+The engine takes pictures. OpenAI `image_url` parts and Anthropic image blocks
+(base64, `http(s)` and local paths) are decoded by the serve layer, encoded by a
+resident **`strata-vision`** helper (llama.cpp's `mtmd` + a ViT), and reach the
+engine as float32 embeddings on the `GENI` prompt path with 2-D M-RoPE positions.
+Nothing about the text path changes: upstream states the output is bit-identical
+with images enabled at equal VRAM, and only prompts that carry image parts are
+touched.
+
+Three things were needed, none of them in the engine itself:
+
+1. **Build the encoder.** `tools/vision/CMakeLists.txt` is a *separate* CMake
+   project (`add_subdirectory(${LLAMA_DIR} llama)`), so the engine build does not
+   produce it and upstream installs nothing — `postBuild` in
+   `hosts/zen3-nixos/ai/strata-package.nix` configures and builds it, and
+   `installPhase` installs `$out/bin/strata-vision` next to `bin/strata`.
+2. **Get the mmproj.** `scripts/fetch-strata-mmproj.sh` pulls
+   `mmproj-Qwen3.8-Flash-Next-BF16.gguf` from ISTA's GSQ-RCO repo at the rev
+   `setup.py` pins (907,543,008 bytes, SHA-256
+   `b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0`) into
+   `/home/cjdell/Models/`. One file serves every Flash-Next family
+   (`setup.py:388/403/413/422` all point at the same repo), so flipping
+   `ai.strataModel` needs nothing extra. It is model data, so it is *not* in the
+   store, and `ConditionPathExists` now lists it beside the pack index: with a
+   `vision` section the serve layer starts the encoder **before** the engine, so
+   a missing mmproj would take the whole service down (crash-loop, not degrade).
+3. **Raise nginx's body cap.** `strataRootLocation` had no
+   `client_max_body_size`, so nginx's 1 MiB default 413'd any phone photo before
+   Strata saw it. Now `32m`, matching Strata's own `IMAGE_URL_MAX = 32 << 20`
+   (`serve/server.py`).
+
+**The switch is the `vision` section** of the run config
+(`hosts/zen3-nixos/ai/strata.nix`): `engine_args()` adds `--vision` to the engine
+when the section exists (#1322 — a config with the section but not the flag
+advertises images and then refuses every picture), so the generated JSON's `args`
+do *not* contain `--vision`; check the engine's own cmdline instead. `gpu = false`
+is **forced, not preferred**: `STRATA_VISION_CUDA` is the only GPU backend in that
+CMakeLists and `docs/AMD_HIP.md:52/203` says images on HIP go through the CPU
+encoder. That costs almost no VRAM — `--vision` alone allocates only the
+`(max_context+64)×3` int32 M-RoPE table (`generate.cpp:3201`) = **4.5 MiB** at our
+393,216 ctx — and the serve layer's `--vram-reserve-mib 700` is gated on
+`gpu = true`, so the 232 MiB of expert cache we have left is untouched. Upstream's
+"GPU encoder costs −2..8 % decode" table therefore does not apply here.
+
+### Measured on this box (5950X, 16 threads, BF16 mmproj, UD-IQ4_XS pack)
+
+| Case | Image tokens | Encode | Whole request |
+| --- | --- | --- | --- |
+| 1024×768 text card (33 KB PNG) | 768 (32×24) | **4.7 s** | **9 s** (837 prompt tokens, 3.6 s prefill, 56 tok/s decode) |
+| 930 KB photo, at the `max_tokens = 1024` cap | 1024 | ~25 s | 32 s first, **7.4 s** repeat (same picture is encoded once, #2228) |
+| same photo uncapped (standalone, no `--max-tokens`) | 2040 (60×34) | 20.2 s | — |
+
+Correctness: a rendered text card came back as `MEN WALK\nON MOON`, and a real
+JPEG was described sensibly ("sunlight filters through a narrow sea cave…").
+Encoder peak RSS is 1.2 GiB with flash attention on (the AVX2 case here) / 2.2 GiB
+off — transient, but real on a box with the OOM history above.
+
+### The one thing that actually mattered: `-march=native` is silently dropped
+
+Building the encoder the way `setup.py` does on an AMD box
+(`-DSTRATA_PORTABLE=OFF`, i.e. "use this CPU") produced a **78 s** encode of the
+768-token picture. The same source with `-DSTRATA_PORTABLE=ON` (upstream's own
+default, the AVX2 baseline the released encoder ships with) encodes it in **4.7 s
+— 16.5× faster**. The reason is in the build log, ~40 times:
+
+```
+warning: Skipping impure flag -march=native because NIX_ENFORCE_NO_NATIVE is set
+```
+
+stdenv's `cc` wrapper strips `-march=native`, so ggml's *native* path — which is
+where `-mavx2 -mfma -mf16c` come from when `GGML_NATIVE=ON` — silently compiled as
+baseline x86-64 with no vector extensions at all. `STRATA_PORTABLE=ON` instead
+forces `GGML_AVX/AVX2/FMA/F16C/BMI2` per translation unit (`Adding CPU backend
+variant ggml-cpu: -mf16c;-mfma;-mbmi2;-mavx;-mavx2`) and keeps AVX-512 off, which
+is both reproducible and what upstream benchmarks. **Any future "just build it
+native here" flag in this package has to reckon with the same silent strip** — the
+engine's own ggml still gets `-march=native` dropped (15 occurrences in the log);
+that is pre-existing and untouched, since the engine is GPU/expert-cache bound, but
+it is a plausible thread to pull if CPU-side strata work ever looks slow.
+
+### mmproj format: BF16 stays
+
+`docs/DETAILS.md` recommends a Q8_0 mmproj for `--vision cpu`. On this file it
+cannot be made — `llama-quantize` refuses:
+
+```
+warning: v.blk.0.ffn_down.weight - ncols   4304 not divisible by  32 (required for type    q8_0) llama_model_quantize: failed to quantize: no tensor type fallback is defined for type q8_0
+```
+
+`f16` *does* convert (same 907,543,008 bytes) and is ~19 % faster to encode with
+(3.99 s vs 4.74 s), but the embeddings drift more than upstream's own quantization
+report: per-token cosine vs BF16 mean 0.9989, **worst token 0.650** on a
+normal-magnitude token (‖v‖ 1.46 → 2.46), where #625's Q8_0 report claims a worst
+token of 0.94-0.96. 0.75 s per picture is not worth an unvalidated format change,
+so the F16 file was deleted and the shipped BF16 file is used as-is. Revisit only
+with a real OCR/chart benchmark.
+
+### Verifying it
+
+```sh
+systemctl is-active strata                       # and ConditionPathExists must hold
+pgrep -af '[b]in/strata-vision'                  # the resident encoder + its --mmproj/--model/--max-tokens
+sudo tr '\0' '\n' < /proc/$(pgrep -f '[b]in/strata --serve')/cmdline | grep -c -- --vision   # 1 = on
+curl -s 127.0.0.1:8080/v1/models | grep -o 'input_modalities[^}]*}'   # ["text","image"]
+sudo journalctl -u strata | grep -E 'vision|images on'   # "loading the vision encoder …", "… context 393216 tokens, images on"
+```
+
+Or drive it: a base64 `image_url` part to `/v1/chat/completions` should return an
+answer about the picture, and `prompt_tokens` should be roughly (image tokens + 60).
+
 ## Gotchas
 
 - **A long-context reply can collapse to one repeated token** (or a thinking-only
@@ -786,6 +902,16 @@ reuse the KV cache, so the quadratic cost is paid once per conversation.
   'yaml'`.
 - **`STRATA_GGUF_PY` must point at the pinned llama.cpp `gguf-py`** (it knows
   `Q2_0 = type 42`). The engine package does not bundle it.
+- **`-march=native` does nothing in a Nix build** — stdenv drops it
+  (`NIX_ENFORCE_NO_NATIVE`), so a "native" CMake option silently means baseline
+  x86-64. For `strata-vision` that was a 16.5× encode-time difference; prefer
+  flags that set the ISA extensions explicitly (`STRATA_PORTABLE=ON`). Details
+  under "Vision (image input)".
+- **Making a test image with ImageMagick needs an explicit `-font`.** `magick
+  … -annotate 0 "TEXT"` without `-font DejaVu-Sans` renders **nothing at all** and
+  exits 0 — three "unreadable" vision test images were blank PNGs, and the model
+  was right every time it said there was no text. Check with
+  `-format "%[fx:mean]" info:` (1.0 = blank) before believing a vision failure.
 - **nginx passes the client's Host header**, and the serve layer 403s unknown
   names: every public name must be in `allowed_hosts` (this bit once:
   `refused a request for Host 'llama.ai.chrisdell.info'`).

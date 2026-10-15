@@ -8,8 +8,10 @@
 # an R9700; see upstream docs/AMD_HIP.md, "RDNA4 (gfx1201)").
 #
 # This builds the engine for HIP/gfx1201 and bundles the Python `serve`
-# layer. Model data (GGUF, packs, MTP runtime) is NOT in the store: it is
-# prepared once by hand and passed via a JSON run config (see ./strata.nix).
+# layer, plus `strata-vision` (the image encoder of the multimodal path, see
+# `postBuild` below). Model data (GGUF, packs, MTP runtime, mmproj) is NOT in
+# the store: it is prepared once by hand and passed via a JSON run config (see
+# ./strata.nix).
 {
   lib,
   stdenv,
@@ -300,6 +302,51 @@ stdenv.mkDerivation (finalAttrs: {
     # no-op for the installed file, so the substituteInPlace lives below.
   '';
 
+  # strata-vision: the image encoder for image INPUT (`vision` in the run
+  # config; OpenAI image_url parts / Anthropic image blocks -> mtmd -> the
+  # engine's GENI prompt path). It is a SEPARATE CMake project —
+  # `tools/vision/CMakeLists.txt` does its own `add_subdirectory(${LLAMA_DIR}
+  # llama)` and builds `mtmd + llama` — so the engine build above does not
+  # produce it, and upstream's installPhase-less layout means nothing else
+  # installs it either. Same flags setup.py uses for an AMD box
+  # (`build_vision_cpu`, setup.py:3035): CUDA OFF, and the same Release build
+  # type. CUDA OFF is not a shortcut — `STRATA_VISION_CUDA` is the ONLY
+  # GPU backend in that CMakeLists, and docs/AMD_HIP.md:52/203 is explicit that
+  # on HIP images run through the CPU encoder. That costs no VRAM here (see the
+  # `vision` comment in ./strata.nix), and it links ggml/llama from the SAME
+  # pinned llama.cpp as the engine's ggml, so the embedding width matches the
+  # pack (n_embd from `clip.vision.projection_dim`). It differs from setup.py in
+  # one flag, PORTABLE, which is deliberate — see the STRATA_PORTABLE note.
+  #
+  # cwd is the CMake build dir from here on (cmake's setup hook `cd`s into
+  # $cmakeBuildDir in configurePhase), hence the relative -B and the relative
+  # path in installPhase below. No `-G Ninja`: this package has no `ninja` in
+  # nativeBuildInputs, so the hook leaves buildPhase on `make` and the engine
+  # itself configures with Unix Makefiles — asking for Ninja here fails the
+  # configure with "unable to find a build program corresponding to Ninja".
+  # The compiler flags mirror what cmakeConfigurePhase passes for the main
+  # build (setup-hook.sh:32-35), since we invoke cmake directly.
+  #
+  # STRATA_PORTABLE=ON (upstream's own default, and what the released encoder
+  # is built with) even though we build on the machine that runs it: the
+  # alternative here, STRATA_PORTABLE=OFF, asks ggml for `-march=native`, and
+  # stdenv's cc wrapper silently DROPS that flag ("Skipping impure flag
+  # -march=native because NIX_ENFORCE_NO_NATIVE is set", ~40 times in the log)
+  # — so the "native" build silently comes out as baseline x86-64 with no AVX2
+  # at all, which measured 80 s to encode one 768-token picture on the 5950X
+  # instead of seconds. Portable forces GGML_AVX2/AVX_FMA/F16C ON per translation
+  # unit and keeps AVX-512 off, which is exactly the "AVX2 (as released)" row of
+  # docs/DETAILS.md's own benchmark table, and it stays reproducible.
+  postBuild = ''
+    cmake -S ${finalAttrs.src}/tools/vision -B build-vision \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \
+      -DLLAMA_DIR=${llama} \
+      -DSTRATA_VISION_CUDA=OFF \
+      -DSTRATA_PORTABLE=ON
+    cmake --build build-vision --target strata-vision --parallel $NIX_BUILD_CORES
+  '';
+
   # Upstream has no install() rules for `strata`; install the binary and the
   # Python serve layer by hand. `strata-server` is what systemd runs
   # (`python -m serve.server`); the model pack / GGUF / MTP runtime stay
@@ -308,6 +355,7 @@ stdenv.mkDerivation (finalAttrs: {
     runHook preInstall
     mkdir -p $out/bin $out/share/strata
     install -Dm755 strata $out/bin/strata
+    install -Dm755 build-vision/bin/strata-vision $out/bin/strata-vision
     cp -r ${finalAttrs.src}/serve ${finalAttrs.src}/tools ${finalAttrs.src}/data $out/share/strata/
 
     # (4, cont.) the retryable-guard rewrite, on the installed copy (see the
