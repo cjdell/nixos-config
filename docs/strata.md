@@ -9,6 +9,12 @@ replaces llama-swap on this box (see "Why llama-swap is off" below). This doc
 records the install (which is half hand-prepared outside Nix), the config, and
 the measured context / memory ceilings that were the point of the exercise.
 
+**Concurrency:** the service runs **one request at a time** (`/v1/status` →
+`concurrency.serving: 1`). Strata's batching (`"parallel"` / `--batch`, `--batch-mtp`)
+is available and deliberately **not enabled** — on this card it buys second-session
+waiting time and costs expert-cache slots and the MTP draft path. Analysis, the
+upstream measurement tables and the numbers to watch if that changes: [`strata-batching.md`](./strata-batching.md).
+
 ## IQ3_XXS -> IQ3_S (2026-10-06)
 
 We moved to the **highest** GSQ-RCO quant, IQ3_S (3.50 bpw non-uniform), from

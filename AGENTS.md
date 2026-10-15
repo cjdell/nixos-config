@@ -63,6 +63,7 @@ workstation, etc.). Key layout:
 | `docs/zen3-random-crashes.md` | **OPEN** investigation into zen3-nixos' random hard resets (watchdog-reaped hangs, not panics; memory/IMC hypothesis; `[S]`=CPU_OUT_OF_SPEC) + the `scripts/stress-monitor.sh` soak harness — sequel to `docs/kernel-rcu-wedge.md` |
 | `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), the 2026-09-30 tuning, the exact nudge-gate formulas, and how to health-check it (`bili doctor`, `/__bili/*` on the **pi lane port 18789**, not 18787) |
 | `docs/strata-hang.md` | Strata's `no progress for 60 s` watchdog aborts (upstream #29) → 32 GB core dumps → amdgpu MES teardown failure + MODE1 GPU reset: why the cores are useless, the journal line that names the stall, and the `HSA_USERPTR_FOR_PAGED_MEM=0` candidate fix (#750 = two R9700s on ROCm 7.2) |
+| `docs/strata-batching.md` | Strata **batching / concurrent sessions** (`"parallel"` → `--batch N`, `--batch-mtp`, `--batch-groups`): why zen3-nixos stays at `concurrency.serving: 1` — slots cost 0.56 GiB of expert-cache VRAM each (232 MiB free) and carry **no MTP drafts** by default, the RTX 5070 table (2 concurrent = −15 % aggregate, TTFT 4.1 s → 0.9 s) vs the `--batch-mtp` +31–39 % single-card claim and the 2× R9700 −21.9 % counter-example, the #1603 risk the single-slot setup avoids, and how to enable + verify it |
 | `docs/strata-expert-helper.md` | Options for a **second GPU as a Strata expert helper** on zen3-nixos (from #879): the three walls (mixed-vendor unsupported, ROCm arch coverage, and the board's second slot training at **Gen1 x2 = 0.5 GB/s**), candidate cards (RX 580 unusable / RTX 2060 needs a cross-vendor patch / RX 5600 gfx1010 clean but link-bound), the #1184 +10–18 % reference numbers, and why the PCIe link is the dealbreaker |
 | `docs/leighhack-tailscale.md` | The **second** tailscale net on grafton-router (the hackspace's, `10.3.0.0/16`, via the `grafton-hackspace-client` microVM): why `tailscale status` being healthy proves nothing about it, the diskless-VM + single-use-pre-auth-key root cause of the 2026-10 outage, `scripts/check-hackspace-tailscale.sh`, and the QMP trick for a console in a VM with no password |
 | `secrets/` | sops-encrypted secrets |
@@ -841,13 +842,20 @@ reads corresponds to something reviewable.
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
 **0.1.44.1** (`296b59d2f73c8f04a805df29c2fa97655adace78`, updated 2026-10-14 from
 0.1.43 `7695859a`; built `/nix/store/yrxmsd6ss59ni7874xcri0mn9rf2kr8b-strata-0.1.44.1`
-but **not yet deployed** — the live service runs 0.1.43, up since 2026-10-13 13:03:04):
+and **live since 2026-10-15 17:40:35** — `ExecStart` names that store path and
+`/v1/status` reports `"engine": "0.1.44.1"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
 `Qwen3.8-Flash-Next-UD-IQ4_XS` (Unsloth ~4-bit GGUF) since 2026-10-09 19:23 —
 switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
 [`docs/strata.md`](docs/strata.md).
+
+**One request at a time** (`/v1/status` → `concurrency.serving: 1`): Strata's
+batching (`"parallel"` / `--batch N` / `--batch-mtp`) is available and **not
+enabled** — slots cost 0.56 GiB of expert-cache VRAM each against **232 MiB free**
+and drop the MTP draft path, which is what the 54.8 tok/s is made of. Analysis and
+the numbers to watch if concurrency ever reaches 3+: [`docs/strata-batching.md`](docs/strata-batching.md).
 
 ⚠️ **0.1.43 and 0.1.44 change answers on our card** — three RDNA4 defaults now apply that
 did not in 0.1.42: `STRATA_ROUTE_TAIL_SKIP=7` (stays off only from 90 % of experts in the GPU
