@@ -6,9 +6,10 @@
 }:
 
 # Recallium: memory server for AI agents (MCP + web UI + Postgres), rootful
-# podman container. LLM processing runs on the local llama.cpp via the
-# /recallium-llm nginx proxy (GPU in config.ai.recalliumGpu). See
-# docs/recallium.md.
+# podman container. LLM processing runs on the Strata engine
+# (Qwen3.8-Flash-Next on the R9700) via the /recallium-llm nginx proxy, i.e.
+# the same backend https://strata.ai.chrisdell.info/ serves - see ./strata.nix
+# and docs/recallium.md.
 #
 # nginx: owns the Recallium locations on the IP vhost (/recallium,
 # /recallium-llm, /api/ catch-all, /recallium-mcp with CORS) plus the public
@@ -89,18 +90,46 @@ in
   # stops responding to /mcp (upstream bug, no fixed image yet), which clients
   # see as a "context server request timeout". POST an `initialize`; if two
   # consecutive checks fail, restart the container (volumes persist).
+  #
+  # The probe must never leave this unit failed: it is a oneshot triggered by a
+  # timer whose OnBootSec has long passed, so it fires the instant it is started
+  # — including during `switch-to-configuration`, alongside podman-recallium
+  # itself. A curl exit 7 (nothing listening yet, the container is still booting)
+  # used to kill the script under `set -e`, and a failed unit makes the whole
+  # activation report `status 4` even though everything was applied.
   systemd.services.recallium-healthcheck = {
     description = "Restart Recallium container if its MCP endpoint stops responding";
     serviceConfig = {
       Type = "oneshot";
     };
-    path = [ pkgs.curl ];
+    path = [
+      pkgs.curl
+      pkgs.podman
+    ];
     script = ''
+      # A container that is down or still coming up is not a wedged MCP server:
+      # start it and leave it alone. Recallium's entrypoint brings up Postgres
+      # and runs migrations before /mcp answers, which takes the best part of a
+      # minute, and restarting it mid-boot only pushes the answer further away.
+      if ! podman inspect -f '{{.State.Running}}' recallium 2>/dev/null | grep -q true; then
+        echo "Recallium container is not running; starting it"
+        podman start recallium || true
+        exit 0
+      fi
+      started=$(podman inspect -f '{{.State.StartedAt}}' recallium 2>/dev/null || true)
+      started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
+      age=$(( $(date +%s) - started_epoch ))
+      if [ "$age" -lt 180 ]; then
+        echo "Recallium container is ''${age}s old; not probing /mcp yet"
+        exit 0
+      fi
+
       mcp_code() {
         curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
           -X POST http://127.0.0.1:8001/mcp \
           -H 'Content-Type: application/json' -H 'Accept: application/json' \
-          -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1"}}}'
+          -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1"}}}' \
+          || true
       }
       first=$(mcp_code)
       if [ "$first" != "200" ]; then
@@ -108,9 +137,10 @@ in
         second=$(mcp_code)
         if [ "$second" != "200" ]; then
           echo "Recallium MCP endpoint unhealthy (HTTP ''${first}, then ''${second}); restarting container"
-          podman restart recallium
+          podman restart recallium || true
         fi
       fi
+      exit 0
     '';
   };
 
@@ -205,16 +235,35 @@ in
         # Stable LLM endpoint for Recallium's OpenAI provider (container's
         # base_url in llm_provider_accounts id 3 is fixed at
         # http://host.containers.internal/recallium-llm). The prefix is
-        # stripped and the call is proxied to the llama-swap router of the GPU
-        # selected by config.ai.recalliumGpu (./default.nix). Switching GPUs =
-        # edit that option + rebuild; no DB changes needed.
+        # stripped and the call is proxied to Strata on loopback (./strata.nix,
+        # 127.0.0.1:8080) - the same upstream as the strata.ai.chrisdell.info
+        # vhost, reached directly instead of hairpinning through TLS and the
+        # public IPv6 address. Nothing in the container's DB has to change:
+        # Strata serves one model and routes by engine, not by the requested
+        # name, so the stale `Qwen3-4B-Instruct-2507-Q4_K_M` in
+        # llm_provider_configs still works (verified: /v1/chat/completions with
+        # an unknown model returns the loaded qwen3.8-flash-next-ud-iq4-xs).
         "/recallium-llm/" = {
-          proxyPass = "http://127.0.0.1:8081";
+          proxyPass = "http://127.0.0.1:8080";
           extraConfig = ''
-            rewrite ^/recallium-llm/?(.*)$ /upstream/${config.ai.recalliumGpu}/v1/$1 break;
-            # LLM calls can take minutes (model load, long generations).
-            proxy_read_timeout 600s;
-            proxy_send_timeout 600s;
+            rewrite ^/recallium-llm/?(.*)$ /v1/$1 break;
+            # Strata's DNS-rebinding guard 403s any Host it was not told about
+            # ("Host 'host.containers.internal' is not allowed"), and
+            # recommendedProxySettings forwards the client's Host verbatim -
+            # which from the container is host.containers.internal. The upstream
+            # IS loopback, so name it: 127.0.0.1 is allowed by default, while
+            # strata.nix's allowed_hosts carries only the public names.
+            proxy_set_header Host 127.0.0.1;
+            # LLM calls can take minutes: Strata serves ONE slot
+            # (concurrency.serving: 1), so a Recallium metadata extraction can
+            # queue behind a full-length interactive request before it is even
+            # prefilled. Match strataRootLocation's timeout.
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            # A memory-processing prompt carries the whole session; nginx's
+            # 1 MiB default body cap would 413 a large-context extraction
+            # before Strata saw it (Strata's own cap is 32 MiB).
+            client_max_body_size 32m;
           '';
           recommendedProxySettings = true;
         };

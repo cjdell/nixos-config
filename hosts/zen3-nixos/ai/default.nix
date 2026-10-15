@@ -11,6 +11,7 @@
 #   llama-log-viewer.nix- log viewer web app + logs. subdomain
 #   ollama-bridge.nix   - legacy Ollama-compatible bridge (no proxy)
 #   recallium.nix       - Recallium container + recallium./recallium-mcp.
+#                         (its LLM calls ride on ./strata.nix via /recallium-llm)
 #   diamcp.nix          - diamcp container + mcp. subdomain
 #   alexandria.nix      - Alexandria audiobook container (ROCm on the R9700, port 4200) + alexandria. subdomain
 #   gpu-panel.nix       - GPU telemetry/overdrive/PID-fan web panel + gpu. subdomain
@@ -32,14 +33,19 @@
     # ./llama-swap.nix
     ./strata.nix
     # ./ollama-bridge.nix
-    # ./recallium.nix
+    ./recallium.nix
     # ./sd-gate.nix
   ];
 
   options.ai = {
-    # Which llama-swap router serves Recallium's and litellm's LLM calls. It
-    # also picks the backend behind llm.ai.chrisdell.info (public
-    # OpenAI-compatible endpoint, see llama-swap.nix).
+    # Which llama-swap router serves litellm's LLM calls. It also picks the
+    # backend behind llm.ai.chrisdell.info (public OpenAI-compatible endpoint,
+    # see llama-swap.nix).
+    #
+    # ⚠️ Recallium no longer follows this: llama-swap is disabled while Strata
+    # runs, and Recallium's /recallium-llm proxy now goes straight to Strata on
+    # 127.0.0.1:8080 (see ./recallium.nix). This option is only read by
+    # ./llama-swap.nix, so it is dead config until that import comes back.
     #
     # "r9700" is the only router that exists since 2026-09-26 (the vega and
     # rx580 routers were removed - too slow / too little VRAM); the option is
@@ -48,7 +54,7 @@
     recalliumGpu = lib.mkOption {
       type = lib.types.str;
       default = "r9700";
-      description = "llama-swap router (r9700) serving Recallium's/litellm's LLM calls";
+      description = "llama-swap router (r9700) serving litellm's LLM calls (unused while llama-swap is disabled)";
     };
 
     # Which Qwen3.8-Flash-Next build Strata serves (see ./strata.nix, which

@@ -4,8 +4,8 @@
 server for AI agents: an MCP server + web UI + Postgres that stores what you
 and your agents learn, then serves it back through semantic search. This box
 runs the `recalliumai/recallium:latest` container and drives its LLM
-processing with the **local llama.cpp instance** (via llama-swap) — no cloud
-APIs involved.
+processing with the **Strata engine** (Qwen3.8-Flash-Next on the R9700, see
+`docs/strata.md`) — no cloud APIs involved.
 
 - **UI:** `http://192.168.49.50:9001` or `http://192.168.49.50/recallium/`
 - **MCP endpoint:** `http://192.168.49.50/recallium-mcp` (Streamable HTTP, protocol 2025-11-25)
@@ -20,22 +20,34 @@ flowchart LR
     Agent[IDE agent / chat client<br/>Cursor, Claude, opencode, Zed] -->|MCP over HTTP| Nginx[nginx :80<br/>/recallium-mcp]
     Nginx --> MCP[Recallium container<br/>MCP server :8000]
     MCP -->|OpenAI API| Nginx2[nginx :80<br/>/recallium-llm]
-    Nginx2 -->|proxy| Swap[llama-swap :8081<br/>/upstream/vega/v1]
-    Swap --> CPP[llama.cpp llama-server<br/>Vega 8 iGPU, GTT-backed]
+    Nginx2 -->|proxy, Host: 127.0.0.1| Strata[Strata :8080<br/>/v1]
+    Strata --> Engine[Qwen3.8-Flash-Next UD-IQ4_XS<br/>R9700 VRAM + RAM + CPU]
     MCP --> PG[(Postgres 17<br/>in container :5432)]
     MCP --> UI[Web UI :9000]
 ```
 
 - **LLM endpoint** — the container's OpenAI provider (account id 3) has a fixed
   `base_url` of `http://host.containers.internal/recallium-llm`. nginx strips
-  the prefix and proxies to the llama-swap router of the GPU selected by the
-  `config.ai.recalliumGpu` option in `hosts/zen3-nixos/ai/default.nix` (currently
-  `vega`). Switching GPU = edit that one string + rebuild; no DB changes.
-- **Model routing** — llama-swap auto-loads a GGUF by basename from
-  `/home/cjdell/Models`. The model name stored in Recallium must be the GGUF
-  basename without `.gguf` (e.g. `Qwen3-4B-Instruct-2507-Q4_K_M`). The same
-  basename is loadable on every router (shared dir), so the model follows the
-  selected GPU.
+  the prefix and proxies to **Strata on loopback** (`127.0.0.1:8080/v1/…`) — the
+  same upstream `https://strata.ai.chrisdell.info/` serves, reached directly
+  instead of hairpinning through TLS and the public IPv6 address. The backend is
+  whatever `hosts/zen3-nixos/ai/strata.nix` runs; changing it is a Nix change in
+  that one location block (`/recallium-llm/` in `hosts/zen3-nixos/ai/recallium.nix`).
+  Two things the proxy has to get right, both learned the hard way:
+  - **`proxy_set_header Host 127.0.0.1;`** — Strata's DNS-rebinding guard 403s
+    any Host it was not told about (`Host 'host.containers.internal' is not
+    allowed`), and `recommendedProxySettings` forwards the client's Host
+    verbatim. `127.0.0.1` is allowed by default; `allowed_hosts` in `strata.nix`
+    carries only the public names.
+  - **`client_max_body_size 32m;`** — a metadata prompt carries the whole
+    session and nginx's 1 MiB default would 413 it (Strata's own cap is 32 MiB).
+- **Model routing** — Strata serves ONE model and routes by engine, not by the
+  requested name: a `/v1/chat/completions` naming any (even unknown) model
+  returns the loaded `qwen3.8-flash-next-ud-iq4-xs`. So the `model_name` row in
+  Recallium's DB (`Qwen3-4B-Instruct-2507-Q4_K_M`, model id 1006) is **cosmetic
+  and stale** — switching the quant Strata serves (`config.ai.strataModel`) is
+  all it takes, no DB change. Under llama-swap this used to be the opposite: the
+  name had to match a GGUF basename in `/home/cjdell/Models`.
 - **Embeddings** — fully offline `nomic-ai/nomic-embed-text-v1.5` (baked into
   the image, embedding config id 1). No external calls ever.
 - **Volumes** — `/var/lib/recallium/{data,wal,documents,secrets}` (tmpfiles,
@@ -45,13 +57,18 @@ flowchart LR
 
 | Thing | Value |
 | --- | --- |
-| LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx proxy → llama-swap) |
-| LLM model | `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai provider account id 3) |
-| LLM GPU | Vega 8 (GTT-backed) — set by `config.ai.recalliumGpu` in `hosts/zen3-nixos/ai/default.nix` |
+| LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx proxy → Strata) |
+| LLM model | served by the engine: `qwen3.8-flash-next-ud-iq4-xs`. Recallium's row says `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, openai provider account id 3) — Strata ignores the name |
+| LLM GPU | R9700 (32 GB VRAM + RAM + CPU offload) — the model `hosts/zen3-nixos/ai/strata.nix` runs |
 | Embedding | `nomic-ai/nomic-embed-text-v1.5` (local, 768-dim, config id 1) |
 | Ports | 8001→:8000 MCP · 9001→:9000 UI · 5433→:5432 Postgres |
 
 `GET /api/setup/status` shows `completed: true, active_llm_config_id: 1002`.
+
+Verified end to end 2026-10-15 after the llama-swap → Strata switch: container →
+`/recallium-llm` → Strata chat completion, a memory created through
+`POST /api/memories/` reached `complete` with a Strata-written summary and
+tags, semantic search returned it, and `initialize` on `/mcp` answered.
 
 ---
 
@@ -123,8 +140,10 @@ curl -s "http://127.0.0.1:8001/api/memories/?limit=1&order_by=id&order_direction
 curl -s http://127.0.0.1:8001/api/memories/<id>
 ```
 
-`processing_status` goes `pending → processing → complete` in ~30 s (first call
-after idle is slower — the 2.5 GB model must load). On completion the row has a
+`processing_status` goes `pending → processing → complete` in ~27 s (measured
+2026-10-15: `total` 26.6 s — `llm_enrichment` 25.1 s, everything else < 0.2 s).
+The engine is always resident, so there is no cold-start penalty; the queue in
+front of it is the only thing that varies. On completion the row has a
 markdown `summary` (bold `**Type: Topic**` header) and `smart_tags`.
 
 ### 4. Search
@@ -195,33 +214,62 @@ curl -s "http://127.0.0.1:8001/api/memories/search?query=model+that+emits+JSON&p
 
 ## Admin / operations
 
-### Switching the LLM GPU (Nix, no DB changes)
+### Switching the LLM backend (Nix, no DB changes)
 
 The container's OpenAI `base_url` (provider account id 3) is fixed at
-`http://host.containers.internal/recallium-llm`. nginx strips the prefix and
-proxies to the llama-swap router of the GPU selected by the `recalliumGpu`
-option in `hosts/zen3-nixos/ai/default.nix`:
+`http://host.containers.internal/recallium-llm`, so the backend is chosen by the
+`/recallium-llm/` location in `hosts/zen3-nixos/ai/recallium.nix`. It currently
+proxies to Strata:
 
-```sh
-# edit config.ai.recalliumGpu ("rx580" | "r9700" | "vega") in ai/default.nix, then:
-sudo nixos-rebuild switch --flake . --max-jobs 1
-sudo nixos-confirm   # autoRollback host — mandatory
+```nix
+"/recallium-llm/" = {
+  proxyPass = "http://127.0.0.1:8080";          # Strata (./strata.nix)
+  extraConfig = '' rewrite ^/recallium-llm/?(.*)$ /v1/$1 break; … '';
 ```
 
-No DB edits and no container restart needed: the proxy points at a new router
-and the same model basename (available on every router via the shared
-`/home/cjdell/Models` dir) loads there on the next LLM call. To also move back
-onto a bigger model, change the model as below (the failover-priority note
-applies).
+To go back to llama-swap, re-enable `./llama-swap.nix` in
+`hosts/zen3-nixos/ai/default.nix` and restore the old target — `proxyPass =
+"http://127.0.0.1:8081"` with `rewrite … /upstream/${config.ai.recalliumGpu}/v1/$1`
+(the `recalliumGpu` option still defaults to `r9700` and is only read by
+llama-swap now). Then:
 
-### Changing the LLM model
+```sh
+sudo nixos-rebuild switch --flake .   # zen3-nixos: autoRollback is commented out, no nixos-confirm
+```
+
+No DB edits and no container restart needed — the proxy is the whole switch, and
+Strata ignores the model name (see *Model routing* above). What *does* have to
+survive a switch: the two proxy settings the backend needs (`Host`,
+`client_max_body_size`) — dropping the `Host` override 403s every Recallium call
+with Strata's rebinding message.
+
+To sanity-test the path end to end, ask through the proxy the way the container
+does (from inside it, so the `Host` header and the rebinding guard are covered
+too):
+
+```sh
+cat > /tmp/mr.json <<'EOF'
+{"model":"anything","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":300}
+EOF
+sudo podman cp /tmp/mr.json recallium:/tmp/mr.json
+sudo podman exec recallium curl -s --max-time 90 http://host.containers.internal/recallium-llm/chat/completions \
+  -H 'Content-Type: application/json' -d @/tmp/mr.json
+# 403 "Host 'host.containers.internal' is not allowed" => the Host override is gone
+```
+
+### Changing the LLM model (only needed if llama-swap comes back)
+
+With Strata this is a no-op: the engine routes by model, not by name, so
+`llm_models.model_name` is never matched against anything. The procedure below is
+for a name-routed backend (llama-swap / a real API), where the name does matter.
 
 There is **no API for this** (`PUT /api/providers/llm/{id}` only edits
 provider *accounts*). Edit Postgres directly (container has psql):
 
 ```sh
-sudo podman exec recallium psql -h localhost -U recallium -d recallium_memories
-# (password: recallium_password)
+sudo podman exec recallium psql -h 127.0.0.1 -U recallium -d recallium_memories
+# (password: recallium_password) — `-h` is required: there is no unix socket at
+# /var/run/postgresql, Postgres listens on TCP only.
 ```
 
 ```sql
@@ -284,7 +332,20 @@ PGPASSWORD=recallium_password psql -h 127.0.0.1 -p 5433 -U recallium -d recalliu
   container may need `SIGKILL` to stop). A systemd watchdog
   (`recallium-healthcheck.timer`, every 2 min) POSTs an `initialize` and
   restarts the container if two consecutive checks fail — it self-heals, but a
-  client connected during the wedge must reconnect.
+  client connected during the wedge must reconnect. The probe deliberately
+  **exits 0 always** and skips containers younger than 180 s: the timer's
+  `OnBootSec` has long passed, so it fires the moment it is installed — during
+  `switch-to-configuration`, next to `podman-recallium` itself — and a curl exit
+  7 (nothing listening yet) under `set -e` used to fail the unit, which makes
+  the whole activation report `status 4` even though everything was applied.
+- **Recallium shares Strata's ONE slot with everything else.** Strata runs
+  `concurrency.serving: 1`, so a memory-enrichment call queues behind an
+  interactive request (and vice versa) — hence `proxy_read_timeout 3600s` on
+  `/recallium-llm/`, not the 600 s it had with llama-swap. Measured cost of one
+  memory: ~27 s total, of which `llm_enrichment` 25.1 s (`metadata.processing_time_ms`
+  on the row). `MEMORY_PROCESSOR_MAX_WORKERS = 8` in the container is therefore
+  about embedding/tag parallelism, not LLM concurrency — it cannot speed the LLM
+  up, it only fills the queue.
 - **CORS for the MCP endpoint is handled at nginx**, not by the app: the
   container's `CORSMiddleware` only permits its fixed `CORS_ORIGINS` list and
   returns 400 to preflights from any other origin. The `/recallium-mcp` nginx
@@ -302,24 +363,34 @@ PGPASSWORD=recallium_password psql -h 127.0.0.1 -p 5433 -U recallium -d recalliu
   server works and all 28 tools are registered.
 - **Model must emit JSON reliably.** Tiny models loop forever on the metadata
   prompt: `LFM2.5-2.6B-Q8_0` PGLoops (`PG PG PG…`), ignores token caps, and
-  burns CPU for hours. `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M` reliably emits
-  valid metadata in ~25 s.
-- **Client timeout → zombie generation.** Recallium's Ollama client times out
-  at 120 s, but llama.cpp keeps generating after a disconnect. If a model is
-  too slow (or loops), you get an orphaned generation chewing CPU. Kill it
-  with llama-swap's unload:
+  burns CPU for hours. `Qwen3-Coder-REAP-25B-A3B-Rust-Q4_K_M` reliably emitted
+  valid metadata in ~25 s; Qwen3.8-Flash-Next does too (verified 2026-10-15:
+  summary + 15 smart_tags, `processing_status: complete`). It is a *thinking*
+  model, so the chain of thought arrives in `reasoning_content` and `content`
+  holds the clean JSON — that split is what keeps Recallium's parser happy, and
+  `response_format: {"type":"json_object"}` is honoured (Strata implements it as
+  prompt-and-validate, `constrained_decoding: false`, so a malformed object is
+  still possible in principle).
+- **Client timeout → zombie generation.** Recallium's client times out at 120 s
+  but the engine keeps generating after the disconnect, and with one slot that
+  orphan blocks every other request. llama-swap's unload endpoints
+  (`POST :8081/api/models/unload`) are gone with it; Strata has
+  `POST /v1/unload` but it answers `409 a request is running or queued` rather
+  than interrupting the in-flight generation — there is no cancel. So a runaway
+  generation can only be stopped by restarting the engine, which costs a full
+  model reload (tens of GB, minutes):
   ```sh
-  curl -X POST http://127.0.0.1:8081/api/models/unload/<MODEL_BASENAME>
-  # or unload everything:
-  curl -X POST http://127.0.0.1:8081/api/models/unload
+  curl -s --max-time 30 -X POST http://127.0.0.1:8080/v1/unload   # idle only
+  sudo systemctl restart strata                                   # last resort
   ```
-- **GGUF compatibility.** Some models in `/home/cjdell/Models` use quant
-  formats this llama.cpp build can't read (`neutrino-8b-fv5.gguf` →
-  `invalid ggml type 44`). Stick to Q4_K_M/Q8_0 era quantisations, or check
+- **GGUF compatibility** *(llama-swap era; Strata loads its own pack)*. Some
+  models in `/home/cjdell/Models` use quant formats that llama.cpp build can't
+  read (`neutrino-8b-fv5.gguf` → `invalid ggml type 44`). Stick to
+  Q4_K_M/Q8_0 era quantisations, or check
   with `llama-cli -m <file> --no-warmup -p x -n 1` before wiring one in.
-- **Health checks** hit the bridge through llama-swap: `curl -s -X POST
+- **Health checks** go through the same proxy: `curl -s -X POST
   http://127.0.0.1:8001/api/providers/health-check -H 'Content-Type:
-  application/json' -d '{"provider_account_id":1}'` reports per-provider
+  application/json' -d '{"provider_account_id":3}'` reports per-provider
   status (the *ollama account* row itself stays `inactive` in that response —
   only the config's `health_status` matters, which sits in
   `llm_provider_configs`).

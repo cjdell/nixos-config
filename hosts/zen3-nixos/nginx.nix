@@ -30,6 +30,25 @@
     # `open() "/tmp/nginx_client_body/..." failed (2: No such file or directory)`.
     # Point all spill dirs at /var/cache/nginx (the unit's CacheDirectory,
     # persistent on disk) — pre-created for the nginx worker user below.
+    # `user` is a MAIN-context directive; NixOS does not emit one (the whole
+    # unit runs as User=nginx with ambient CAP_NET_BIND_SERVICE). That absence
+    # is a trap: when the nginx binary is run DIRECTLY as root — `sudo nginx -t`
+    # or `sudo nginx -T` to read the effective config, the documented way to
+    # inspect this host — `ngx_create_paths()` chowns every `*_temp_path` dir it
+    # walks to its unset-user fallback, uid 65534 (nobody). The spill dirs then
+    # become `nobody:nginx 0700`, the worker (uid 60) loses write access, and
+    # every request with a body larger than client_body_buffer_size dies with
+    # `[crit] open() "/var/cache/nginx/client_body_temp/00000000NN" failed (13:
+    # Permission denied)` → a bare nginx 500. That is not hypothetical: it took
+    # out every pi session on 2026-10-15 (22:57–23:04) after a `nginx -t`
+    # verification run. Declaring the user makes that chown land on nginx:nginx
+    # instead, where it is harmless. nginx warns "the "user" directive makes
+    # sense only if the master process runs with super-user privileges,
+    # ignored" once per start — expected, do not remove this line to silence it.
+    appendConfig = ''
+      user nginx;
+    '';
+
     appendHttpConfig = ''
       client_body_temp_path /var/cache/nginx/client_body_temp;
       proxy_temp_path /var/cache/nginx/proxy_temp;
@@ -42,11 +61,18 @@
   # nginx spill dirs (see appendHttpConfig above) — owned by the worker user
   # (workers run as nginx:nginx; /var/cache/nginx itself is 0750 nginx:nginx
   # and not group-writable, so these subdirs must exist ahead of the service).
+  #
+  # 0770, not 0700: the group is nginx on both the service and these dirs, but
+  # the OWNER can be changed from under us by a root-run nginx (see the
+  # appendConfig comment: a `sudo nginx -t` used to leave them nobody:nginx).
+  # Group-write makes the worker's access independent of that, so the same
+  # mistake can no longer take the whole HTTP surface down. Nothing but the
+  # nginx group (gid 60) and the owner can enter a 0770 dir.
   systemd.tmpfiles.rules = [
-    "d /var/cache/nginx/client_body_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/proxy_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/fastcgi_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/uwsgi_temp 0700 nginx nginx -"
-    "d /var/cache/nginx/scgi_temp 0700 nginx nginx -"
+    "d /var/cache/nginx/client_body_temp 0770 nginx nginx -"
+    "d /var/cache/nginx/proxy_temp 0770 nginx nginx -"
+    "d /var/cache/nginx/fastcgi_temp 0770 nginx nginx -"
+    "d /var/cache/nginx/uwsgi_temp 0770 nginx nginx -"
+    "d /var/cache/nginx/scgi_temp 0770 nginx nginx -"
   ];
 }

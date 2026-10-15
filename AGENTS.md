@@ -82,7 +82,7 @@ All in `hosts/<name>` (directory name == host name == flake attribute), on the
 | Host | LAN IP | Role | What it actually runs | Deploy notes |
 | --- | --- | --- | --- | --- |
 | **grafton-router** | `.1` (`2a02:8010:6680:49::1`) | Edge router **and** the main homelab app host | PPPoE WAN (`pppoe-zen`), `lan` bridge + VLAN10, nftables, dnsmasq DHCP+DNS, AdGuard, WireGuard `10.47.0.0/16`, headscale + Tailscale, **kanidm** IdP (`kanidm.home.chrisdell.info`), nginx public edge `*.home.chrisdell.info` (ACME DNS-01 Route 53 + route53 dynamic DNS) proxying to itself *and* to N100-NAS (`grafana…`→`:3000`, `filebrowser…`→`:8002`), Home Assistant + InfluxDB + Mosquitto + zigbee2mqtt, Frigate (+`frigate-whisper`/`frigate-monitor`), Jellyfin, Immich, qBittorrent, Ghost, 2fauth, Beszel, Postgres, **meter-relay** (`:8484`), container-ui, TFTP/iPXE netboot, a microVM host (`grafton-hackspace-client`, `.15`), dsh-harness `:3080` | **autoRollback ON** → `sudo nixos-confirm`. 15 GiB RAM + 8 GiB `/swapfile`. No Rust toolchain. Config is `hosts/grafton-router/` (imports its own flake inputs). |
-| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Strata `:8080`, llama-swap/llama.cpp (Vulkan, R9700 32 GB) `:8081`, sd-gate + SDXL, Recallium, diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
+| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Strata `:8080` (R9700 32 GB; llama-swap `:8081` is **disabled** — see the Strata section), sd-gate + SDXL, Recallium (its LLM = Strata via `/recallium-llm`), diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
 | **N100-NAS** | `.22` | Media/app NAS (ZFS pool `samsung-4tb`: `ds-media`, `ds-photos`) | Jellyfin, Immich (podman: server/ml/redis/postgres), qBittorrent, Postgres + postgresqlBackup, filebrowser, Grafana `:3000` (kanidm OIDC, `grafana.home.chrisdell.info`), container-ui `:8091`, Samba + NFS, sanoid + syncoid → N40L-NAS and dbthr33, Scrutiny, Prometheus exporters, Tailscale | **autoRollback ON** → `sudo nixos-confirm`. Repo checkout lives here too. The folding@home module is imported but `services.foldingathome` is commented out in `common/folding-at-home.nix` — it is **not** running. |
 | **GEN8-NAS** | `.23` | Bulk file + snapshot host (ZFS `sas-24tb`: `ds-public`, `ds-cjdell`, `ds-backup`) | Samba + NFS shares, sanoid snapshots, syncoid → N40L-NAS, `backup-host` receiver (`backup` user, `/var/lib/backup`), Scrutiny, Prometheus exporters, Tailscale, `lsiutil`/`sasutils` (HBA) | no autoRollback. ZFS via disko. |
 | **N40L-NAS** | `.21` (`…:49::21`) | The backup **target** (ZFS `sas-16tb`) | Receives the GEN8 + N100 syncoid streams under `sas-16tb/ds-external-backups/…`, holds dbthr33's `ds-frigate-archive`, UniFi controller container, `zfs-status`, Scrutiny, Tailscale | `nfs.nix`, `samba.nix` and `backup.nix` exist in the directory but are **not imported** by `default.nix` — no shares and no offsite push from this box. no autoRollback. |
@@ -549,9 +549,11 @@ model), so SDXL is **not** kept resident:
 ## Recallium (memory server, live on zen3-nixos)
 
 Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a
-memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs
-on the **local llama.cpp** (no cloud), currently on the **Vega 8 iGPU** via an nginx
-proxy. Full usage docs: `docs/recallium.md`.
+memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs on
+the **Strata engine** (no cloud) — the same Qwen3.8-Flash-Next the rest of this
+box uses, reached over loopback. It was **disabled from 2026-09-26 to 2026-10-15**
+while llama-swap was torn down, and is live again since 2026-10-15 22:41 BST with
+its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
 
 - **UI:** `http://192.168.49.50:9001`, `http://192.168.49.50/recallium/` or
   `https://recallium.ai.chrisdell.info/`
@@ -562,16 +564,26 @@ proxy. Full usage docs: `docs/recallium.md`.
   `https://recallium.ai.chrisdell.info/api/...`; Postgres on `127.0.0.1:5433`
   (user `recallium` / `recallium_password`, db `recallium_memories`)
 - **Chain:** container (OpenAI provider, fixed `base_url`
-  `http://host.containers.internal/recallium-llm`) → nginx proxy → llama-swap
-  `/upstream/<gpu>/v1` where `<gpu>` is the **`config.ai.recalliumGpu` option
-  in `hosts/zen3-nixos/ai/default.nix`** (currently `r9700`, the only router
-  that exists since 2026-09-26) → llama.cpp.
-  Switching GPU =
-  edit that one option + `nixos-rebuild switch` (see docs/recallium.md). The
-  old `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it.
-- **Active model:** `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, openai
-  provider account id 3, `llm_provider_configs`). Model names are GGUF
-  basenames auto-loaded by llama-swap from `/home/cjdell/Models`.
+  `http://host.containers.internal/recallium-llm`) → nginx `/recallium-llm/`
+  (in `hosts/zen3-nixos/ai/recallium.nix`) → **Strata on `127.0.0.1:8080/v1`** —
+  the same upstream `https://strata.ai.chrisdell.info/` serves, hit on loopback
+  instead of hairpinning TLS. Switching backend = edit that one location block
+  + `nixos-rebuild switch`; no DB change (see docs/recallium.md). The old
+  `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it, and
+  `config.ai.recalliumGpu` is now read only by the disabled `llama-swap.nix`.
+  ⚠️ Two things that location must keep or every Recallium LLM call breaks:
+  **`proxy_set_header Host 127.0.0.1;`** (Strata's DNS-rebinding guard 403s the
+  container's `Host: host.containers.internal` — `recommendedProxySettings`
+  forwards the client's Host verbatim; `127.0.0.1` is allowed by default, the
+  public names are what `allowed_hosts` in `strata.nix` carries) and
+  **`client_max_body_size 32m;`** (nginx's 1 MiB default 413s a whole-session
+  metadata prompt).
+- **Active model:** whatever Strata serves — `qwen3.8-flash-next-ud-iq4-xs` while
+  `config.ai.strataModel = "ud-iq4-xs"`. Recallium's DB row still says
+  `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, provider
+  account id 3) and that is **harmless**: Strata routes by engine, not by the
+  requested name, so an unknown/absent model name still gets the loaded model
+  (verified). Changing `ai.strataModel` needs no Recallium change at all.
 
 Operational essentials:
 
@@ -584,12 +596,25 @@ Operational essentials:
   `llm_provider_configs.is_active` — repoint that row too or the status (and
   routing) won't change.
 - **Zombie generations:** if a model is slow/looping, Recallium's 120 s client
-  timeout disconnects but llama.cpp keeps generating forever. Kill with
-  `curl -X POST http://127.0.0.1:8081/api/models/unload` (or `/unload/<name>`).
+  timeout disconnects but the engine keeps generating — and Strata serves ONE
+  slot, so the orphan blocks every other request. llama-swap's
+  `POST :8081/api/models/unload` is gone; Strata's `POST /v1/unload` answers
+  `409 a request is running or queued` instead of interrupting it (there is no
+  cancel), so the last resort is `sudo systemctl restart strata` — a multi-minute
+  model reload.
+- **Memory enrichment costs ~27 s per memory** on Strata (`llm_enrichment`
+  25.1 s of it) and queues behind interactive traffic; `MEMORY_PROCESSOR_MAX_WORKERS
+  = 8` in the container is embedding/tag parallelism, not LLM concurrency.
 - `LFM2.5-2.6B-Q8_0` PGLoops on Recallium's JSON metadata prompt (see the
   llama-swap UI at `http://192.168.49.50/ui/#/logs`); don't switch it back.
-- Setup is complete (`active_llm_config_id: 7`); `mcp_tools_enabled: false` in
+- Setup is complete (`active_llm_config_id: 1002`); `mcp_tools_enabled: false` in
   `/api/setup/status` is cosmetic and does not block MCP.
+- **The `recallium-healthcheck` oneshot must always exit 0.** Its timer's
+  `OnBootSec` has long passed, so it fires the instant it is installed — during
+  `switch-to-configuration`, alongside `podman-recallium` itself — and a curl
+  exit 7 (container still booting) under `set -e` failed the unit, which made
+  the whole activation report `status 4` even though everything applied. It now
+  skips containers younger than 180 s and treats "not running" as "start it".
 
 ## DeepSeek Harness web GUI (`dsh-web-harness`, live on zen3-nixos + grafton-router)
 
@@ -1089,10 +1114,32 @@ paging. **Never restart the VM and immediately conclude it failed.**
   test-jinja.cpp). Benchmarks: `scripts/bench-r9700.sh` /
   `bench-compare.sh`, results in `bench-results/r9700/`.
 
-- **`sudo nginx -T` is misleading** — it reads the package's stock
-  `conf/nginx.conf`, NOT the NixOS-generated config under
-  `/nix/store/<hash>-nginx.conf`. To see the real config, pass it explicitly:
-  `sudo nginx -T -c "$(grep -o '/nix/store/[a-z0-9]*-nginx.conf' /run/current-system/etc/systemd/system/nginx.service/nginx.service)"`.
+- **`sudo nginx -T`/`-t` is misleading *and* has a side effect.** It reads the
+  package's stock `conf/nginx.conf` unless you pass the generated one, so the
+  documented invocation is
+  `sudo nginx -T -c "$(systemctl cat nginx | grep -oE '/nix/store/[a-z0-9]+-nginx\.conf' | head -1)"`
+  (the older `/run/current-system/etc/systemd/system/nginx.service/nginx.service`
+  path is **not a directory** any more — grep fails with "Not a directory" and
+  the command runs with no config at all). ⚠️ **The side effect:** NixOS emits
+  no `user` directive, so a root-run nginx chowns every `*_temp_path` dir under
+  `/var/cache/nginx` to its unset-user fallback **`nobody` (65534), mode 0700**.
+  The worker (uid 60) then cannot create the client-body spill file, and every
+  request with a body over `client_body_buffer_size` (i.e. every agent prompt)
+  gets a bare `500` with `[crit] open()
+  "/var/cache/nginx/client_body_temp/00000000NN" failed (13: Permission denied)`
+  in the **journal** (the generated config sets `error_log stderr;`, so there is
+  no `/var/log/nginx/error.log` to grep on the live service). This took out every
+  pi session on 2026-10-15 (22:57–23:04, right after a post-deploy `nginx -t`).
+  Recover without a rebuild:
+  `sudo find /var/cache/nginx -mindepth 1 -maxdepth 1 -exec chown nginx:nginx {} +`
+  (use `sudo find`, not `sudo ls /var/cache/nginx/*` — that glob expands in your
+  own shell and the dir is 0750 nginx:nginx). `hosts/zen3-nixos/nginx.nix` now
+  fixes it at the source: it declares `user nginx;` in the main context (nginx
+  warns "the \"user\" directive makes sense only if the master process runs with
+  super-user privileges, ignored" once per start — expected, don't remove it) and
+  keeps the spill dirs `0770 nginx:nginx`, so a wrong owner no longer locks the
+  worker out. On any *other* host (no `user` directive in its config), run root
+  tests as `sudo nginx -t -c <conf> -g 'user nginx nginx;'`.
 - The NixOS nginx unit runs `daemon off` under systemd (foreground).
   Standalone nginx tests need patched `pid`/`error_log`/`access_log` paths,
   ports, and `setsid`/`nohup` to background.
