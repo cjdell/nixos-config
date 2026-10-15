@@ -9,6 +9,7 @@
     ./frigate.nix
     ./frigate-whisper.nix
     ./ghost.nix
+    ./hackspace-tunnel.nix
     ./headscale.nix
     ./health.nix
     ./home-assistant.nix

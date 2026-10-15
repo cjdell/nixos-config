@@ -63,6 +63,52 @@ in
           ];
         };
 
+        # Root login was password-only, so when the leighhack tunnel died there
+        # was NO way in to run `tailscale status`: no key auth, no VSOCK
+        # (`microvm -s` refuses), and the serial console is qemu's stdio with no
+        # QMP-rebindable device id (QEMU 11 refuses `chardev-change` on an
+        # already-realized anonymous isa-serial). Give the same admin keys the
+        # host has, so `ssh root@192.168.49.15` always works — the LAN path is
+        # independent of tailscale, so it still works when the tunnel is dead.
+        users.users.root.openssh.authorizedKeys.keys =
+          config.users.users.cjdell.openssh.authorizedKeys.keys
+          # Dedicated keypair held by the host (sops) so the health check can
+          # name the failing layer instead of just "it is down". Public half is
+          # not secret; the private half is `grafton_hackspace_client_ssh_key`.
+          ++ [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF896J8Mhl9/r3R/8x8LlAVYIt+6O9A6sNpyfeJqpCgm grafton-router-health@grafton-router"
+          ];
+
+        # nixpkgs' tailscaled-autoconnect is Type=notify, runs under
+        # `set -o errexit`, calls `tailscale up` only while the backend state is
+        # NeedsLogin/NeedsMachineAuth/Stopped, and signals READY only once it
+        # reaches Running. It has no Restart=, so ONE failed or timed-out
+        # registration attempt kills it permanently - which is exactly what
+        # happened on 2026-10-09: the console shows "Starting
+        # tailscaled-autoconnect.service..." and never shows it started, so the
+        # VM never registered and never appeared on the hackspace headscale, for
+        # 5 days. Retry instead of dying.
+        systemd.services.tailscaled-autoconnect = {
+          serviceConfig = {
+            Restart = "on-failure";
+            RestartSec = "30s";
+            # generous: the failure path never sd_notifies, so a hang is only
+            # visible as a start timeout
+            TimeoutStartSec = "5min";
+          };
+        };
+
+        # Diagnostic tools. During the 2026-10 leighhack outage the VM had no
+        # tcpdump and no dig, so "is the tunnel actually carrying traffic?" and
+        # "does DNS work from inside?" could not be answered where it mattered.
+        environment.systemPackages = with pkgs; [
+          bind # dig / nslookup
+          curl
+          iputils # ping
+          jq
+          tcpdump
+        ];
+
         system.activationScripts.addHostKey = ''
           mkdir -p /var/secrets
           # The host's sops secret is bind-mounted into /run/secrets
@@ -74,6 +120,29 @@ in
         users.users.root.initialHashedPassword = "$y$j9T$8aqblMqV7q3.bcfzur3jd/$ldh1xzyCl4Dpq9QtPR76KTYSdhN3BmXB5kKFXiBKsU.";
 
         microvm = {
+          # Persist the tailscale node identity across VM restarts.
+          #
+          # This VM had NO disk at all (no -drive/-blockdev/-pflash in the qemu
+          # cmdline; root is the initrd tmpfs), so /var/lib/tailscale lived in
+          # RAM and every `nixos-rebuild switch` that touched this VM started
+          # from an empty state. tailscaled-autoconnect then has to re-register
+          # with the single-use pre-auth key, and if that key is expired or
+          # already consumed `tailscale up` fails, the unit exits (errexit) and
+          # is never retried — the box sits in NeedsLogin forever with nothing
+          # complaining. See docs/leighhack-tailscale.md.
+          #
+          # With the state on a volume the node key survives, so re-registration
+          # (and therefore the key's expiry) is no longer on the critical path.
+          volumes = [
+            {
+              image = "/var/lib/microvms/grafton-hackspace-client/tailscale-state.img";
+              label = "tsstate";
+              mountPoint = "/var/lib/tailscale";
+              size = 32;
+              fsType = "ext4";
+            }
+          ];
+
           shares = [
             {
               source = "/nix/store";

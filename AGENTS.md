@@ -64,6 +64,7 @@ workstation, etc.). Key layout:
 | `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), the 2026-09-30 tuning, the exact nudge-gate formulas, and how to health-check it (`bili doctor`, `/__bili/*` on the **pi lane port 18789**, not 18787) |
 | `docs/strata-hang.md` | Strata's `no progress for 60 s` watchdog aborts (upstream #29) → 32 GB core dumps → amdgpu MES teardown failure + MODE1 GPU reset: why the cores are useless, the journal line that names the stall, and the `HSA_USERPTR_FOR_PAGED_MEM=0` candidate fix (#750 = two R9700s on ROCm 7.2) |
 | `docs/strata-expert-helper.md` | Options for a **second GPU as a Strata expert helper** on zen3-nixos (from #879): the three walls (mixed-vendor unsupported, ROCm arch coverage, and the board's second slot training at **Gen1 x2 = 0.5 GB/s**), candidate cards (RX 580 unusable / RTX 2060 needs a cross-vendor patch / RX 5600 gfx1010 clean but link-bound), the #1184 +10–18 % reference numbers, and why the PCIe link is the dealbreaker |
+| `docs/leighhack-tailscale.md` | The **second** tailscale net on grafton-router (the hackspace's, `10.3.0.0/16`, via the `grafton-hackspace-client` microVM): why `tailscale status` being healthy proves nothing about it, the diskless-VM + single-use-pre-auth-key root cause of the 2026-10 outage, `scripts/check-hackspace-tailscale.sh`, and the QMP trick for a console in a VM with no password |
 | `secrets/` | sops-encrypted secrets |
 | `scripts/` | Install/PXE helper scripts |
 
@@ -977,6 +978,49 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `sudo nixos-rebuild switch --flake .` (zen3-nixos has autoRollback commented
   out — no `nixos-confirm`). The switch restarts `strata`; the model load takes
   ~30 s and can make the box sluggish for 1–3 min.
+
+## grafton-router has TWO tailscale connections (and only one is monitored)
+
+`tailscale status` on grafton-router shows the **grafton** tailnet (our headscale
+at `tailscale.home.chrisdell.info`, `100.64.0.0/24`, magicDNS `grafton.tailscale`).
+The **leighhack** tailnet (theirs, `tailscale.leighhack.org`, `10.3.0.0/16`,
+`int.leighhack.org`) is a *different* connection: it runs inside the
+`grafton-hackspace-client` microVM and is reached via a hand-written
+`ip route 10.3.0.0/16 via 192.168.49.15`. **A perfectly healthy
+`tailscale status` says nothing about leighhack.** When leighhack is down, what
+actually breaks is DNS: `adguard.nix` forwards `[/int.leighhack.org/]10.3.1.1:53`,
+so the symptom is "a page won't load", not "a VPN is down".
+
+Full write-up: **`docs/leighhack-tailscale.md`**. Diagnose with
+`sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh` (walks route → VM →
+tailscale session → tunnel → DNS and names the failing layer). `hackspace-tunnel-check.service`
+probes it every 2 min and pushes to the phone via `notifications.gateway`.
+
+The 2026-10 outage, in one paragraph: the VM had **no disk**, so
+`/var/lib/tailscale` was RAM-only and every restart had to re-register; nixpkgs'
+`tailscaled-autoconnect.service` is `set -e`, `Type=notify`, and has **no
+`Restart=`**, so on 2026-10-09 one registration attempt that never completed
+killed the connection permanently — the host journal shows
+`Starting tailscaled-autoconnect.service...` with no matching `Started` line,
+whereas working boots get it 3 s later. The node was therefore **absent from the
+hackspace's headscale**, not route-unapproved, and nothing retried for 5 days.
+**Nothing in the config had changed** (VM module last edited 09-28, secrets
+09-22); the key is reusable and worked first try, and the node is not ephemeral.
+It "always used to work" because the VM ran for weeks without restarting — every
+restart had always been a one-shot gamble against someone else's server.
+
+Fixed by: persistent `microvm.volumes` image for `/var/lib/tailscale` (so
+re-registering isn't needed at all — verified, same node `Created` survived a
+rebuild), `Restart=on-failure` on autoconnect, root `authorizedKeys` + a router→VM
+deploy key (there was previously **no way in**: password-only root, no VSOCK,
+serial on qemu stdio) plus `tcpdump`/`dig`/`jq`, and the health timer.
+
+**The return path is theirs.** The VM advertises `192.168.49.0/24`; if their
+headscale has not enabled it for the current node, packets leave and die on the
+way back — "tailscale down" from the router, "all fine" inside the VM. After a
+*fresh* registration this took **~20 min** to settle on 2026-10-15 (a recovery
+effect, not the outage cause), which is why the health check waits ~10 min before
+paging. **Never restart the VM and immediately conclude it failed.**
 
 ## Known gotchas on this host
 

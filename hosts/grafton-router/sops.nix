@@ -33,6 +33,10 @@
       };
       tailscale_pre_auth_key = { };
       leigh_hackspace_tailscale_pre_auth_key = { };
+      # Router -> grafton-hackspace-client key used by hackspace-tunnel-check to
+      # ask the VM which layer is down (root in there is password-only, and
+      # cjdell's agent keys are not available to a systemd service).
+      grafton_hackspace_client_ssh_key = { };
       borg_backup_key = { };
       frigate_whisper_db_password = { };
       # Fixed sshd host key for the grafton-hackspace-client microVM (mounted
