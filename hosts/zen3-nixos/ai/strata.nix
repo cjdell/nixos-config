@@ -121,15 +121,34 @@ let
   # only reads it).
   expertProfile = "${strata}/share/strata/data/expert-profile.bin";
 
-  # Measured ceiling for this box (93 GB RAM, 32 GB R9700) - see docs/strata.md:
-  # 262144 is the model's native window and the quality/prefill knee. With
-  # --kv-resident 32768 the int8 KV (~13.7 KB/token) lives in RAM, so the VRAM
-  # expert cache stays ~25 GiB whatever the context; RAM used grew ~49 GB at
-  # 256K, ~52 GB at 512K, ~59 GB at 1M, ~72 GB at 2M. 262144 needs no rope
-  # scaling; past it the engine adds yarn (factor = ctx/262144) and fresh
-  # prefill falls off (measured: 1393 t/s at 121K depth, 1184 at 255K, 728 at
-  # 486K, 376 at 931K), so raise only when the length is really needed.
-  context = 262144;
+  # 393216 = 1.5x the model's native 262144 window, raised from it on
+  # 2026-10-15 because live traffic reached 211,459 tokens (81% of 256K).
+  # Measured ceilings for this box (94 GB RAM, 32 GB R9700) are in
+  # docs/strata.md.  Two things make the step up cheap here:
+  #   * VRAM cost is ZERO. With --kv-resident 32768 only 32768 cells per QSA
+  #     layer live in VRAM whatever --max-context is (the log line is
+  #     "KV streaming: 32768 of 262144 cells per QSA layer in VRAM, the K/V in
+  #     3.09 GiB of pinned RAM"), and the expert cache is sized off *free*
+  #     VRAM, so a bigger context neither needs VRAM nor steals expert slots.
+  #   * the int8 KV is allocated up front at max-context and lives in host
+  #     RAM: 12 QSA layers x 1056 B = 12,672 B/token, so 3.09 GiB at 262144 ->
+  #     4.64 GiB here (+1.55). Box-used goes ~58.5 -> ~60 GiB of 94. (The
+  #     13.7 KB/token figure quoted in docs/strata.md counts the draft layer;
+  #     12,672 B/token is what reproduces the engine's own 3.09 GiB.)
+  # What it DOES cost: YaRN. The GGUF carries qwen4exp.context_length and NO
+  # rope.scaling.type, and the engine's default is "the model file's rope keys,
+  # else none" - so raising --max-context alone is raw 1.5x *extrapolation*
+  # with no warning. The --rope-scaling yarn / --rope-scale 1.5 pair in
+  # engineArgs below is MANDATORY, not tuning (--yarn-orig-ctx already defaults
+  # to 262144). YaRN rescales every position, so it changes the 0-262144 region
+  # we run 100% of traffic in, and "K in the cache is post-RoPE, so one run one
+  # scaling" - it is fixed at startup and no A/B within a run is possible.
+  # Prefill falls off with depth (measured on IQ3_S: 1393 t/s at 121K, 1184 at
+  # 255K, 728 at 486K, 376 at 931K; ingest ~ depth^1.75), which INTERPOLATES to
+  # ~870 t/s / ~7.4 min for a full fresh 384K prompt - unmeasured here, and it
+  # only applies to prompts that actually go past 262144, never to the 60-210K
+  # requests we actually serve. 524288 was rejected: 2x YaRN and ~11 min.
+  context = 393216;
 
   # Mirrors setup.py's args for the 2-shard native IQ3_XXS pack (setup.py:4224),
   # with --kv int8 and KV streaming (--kv-resident) for the long context.
@@ -159,6 +178,15 @@ let
     mtpDir
     "--max-context"
     (toString context)
+    # Required by the 393216 above - see the comment there. The engine reads
+    # rope scaling from the model file first and this GGUF declares none, so
+    # without these two flags the extra 131072 tokens are pure extrapolation.
+    # Confirm it engaged in /var/lib/strata/strata.log:
+    #   "rope scaling yarn, factor 1.5 (freq_scale ..., mscale ...), --max-context 393216 against a trained context of 262144"
+    "--rope-scaling"
+    "yarn"
+    "--rope-scale"
+    "1.5"
     "--kv"
     "int8"
     "--kv-resident"
@@ -179,14 +207,21 @@ let
     # RAM, not VRAM, and the cache slot is a switch-time decision: it degrades
     # to a fresh read, never a failure.
     #
-    # Sizing for this box (94 GiB RAM, ~31 GiB resident experts, int8 KV
-    # ~13.7 KiB/token, so a 100K-token conversation parks in ~1.4 GB): 12 GiB
-    # holds ~8 conversations at 100K or ~3 at the full 256K.  Past the budget
-    # the least-recently-used conversation is evicted, so this is a cap, not a
+    # Sizing for this box (94 GiB RAM, int8 KV 12,672 B/token, but a PARKED
+    # conversation costs ~15-18 KB/token - measured from two live
+    # "restored N tokens (live)" deltas, 1.2-1.4x the raw KV because it also
+    # carries the GDN/SSM state - PLUS a per-conversation snapshot term that
+    # peaked at 3.68 GiB.  So one FULL-LENGTH 393216 conversation is
+    # ~5.7 GiB + ~3.7 GiB = ~9.4 GiB, and the old 12288 budget (which live
+    # traffic had filled exactly: max bytes=12,852,981,612, evictions=100)
+    # would then hold one max-length conversation and nothing else - i.e. it
+    # stops working at the moment an agent and its subagent both need a slot.
+    # 16 GiB keeps two of them parkable.  Past the budget the
+    # least-recently-used conversation is evicted, so this is a cap, not a
     # reservation.  `--conversation-cache-min-free-mib` (default 2560) is the
     # RAM floor: parking is skipped when there is no room.
     "--conversation-cache-mib"
-    "12288"
+    "16384"
     "--conversation-cache-slots"
     "12"
     # Only park conversations worth a slot; one-shot probes / titles /
