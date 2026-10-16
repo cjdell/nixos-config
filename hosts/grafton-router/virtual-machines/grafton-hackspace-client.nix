@@ -292,10 +292,11 @@ in
         # host cannot re-register a session it does not hold.
         systemd.services.hackspace-tailscale-ensure = {
           description = "Keep the leighhack tailnet joined (re-register after a server-side logout)";
-          after = [
-            "tailscaled.service"
-            "network-online.target"
-          ];
+          # Deliberately no network-online.target: `after` without a matching
+          # wants/requires is a no-op (nixpkgs warns about it), and ordering is
+          # pointless for a reconciler — if the network is not up yet this tick
+          # fails and the next one is a minute later.
+          after = [ "tailscaled.service" ];
           wants = [ "tailscaled.service" ];
           serviceConfig = {
             Type = "oneshot";
