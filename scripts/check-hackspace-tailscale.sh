@@ -170,8 +170,15 @@ if vmrun true; then
   case "$backend" in
     Running) ok "VM tailscaled BackendState=Running" ;;
     *)       bad "VM tailscaled is not Running: ${backend:-no state (tailscaled down?)}"
-             note "vmrun is just ssh: ssh root@$VM_IP 'tailscale status; journalctl -u tailscaled-autoconnect -b'"
-             note "NeedsLogin == the pre-auth key was rejected or never applied" ;;
+             note "vmrun is just ssh: ssh root@$VM_IP 'tailscale status; journalctl -u tailscaled -u hackspace-tailscale-ensure --since -1h'"
+             # NeedsLogin is NOT usually a bad key. The hackspace's headscale can
+             # delete this node under a healthy tunnel, and tailscaled treats
+             # `404: node not found` exactly like a logout (2026-10-16 08:21 UTC).
+             # hackspace-tailscale-ensure.service re-registers within a minute,
+             # so a *stuck* NeedsLogin means the re-join itself is failing.
+             note "why did it drop? last state change and control error:"
+             vmrun "journalctl -u tailscaled --no-pager -o short-iso 2>/dev/null | grep -E 'Switching ipn state|active login|node not found|LocalAPI' | tail -3" | sed 's/^/       /'
+             ;;
   esac
   [ "$(vmrun 'systemctl is-failed tailscaled-autoconnect')" = failed ] \
     && bad "tailscaled-autoconnect.service is failed (it exits on a rejected auth key and is never retried)"
@@ -249,11 +256,11 @@ cat <<'EOF'
   Next step depends on the first FAIL above:
     route    systemctl restart grafton-hackspace-client-routes
     vm       systemctl status microvm@grafton-hackspace-client
-    session  needs a valid REUSABLE pre-auth key, then:
-               sudo systemctl restart microvm@grafton-hackspace-client
-             A restart spends a pre-auth key while the VM has no persistent
-             tailscale state, so confirm the key before rebooting. See
-             docs/leighhack-tailscale.md before reaching for this.
+    session  the VM re-joins itself (hackspace-tailscale-ensure, 1 min). If it is
+             still NeedsLogin the pre-auth key is spent/rejected/expired: read the
+             reason above, put a new REUSABLE key in sops
+             (leigh_hackspace_tailscale_pre_auth_key) and rebuild. Restarting the
+             VM is not the fix and costs a fresh node on their headscale.
     tunnel   the VM is logged in but has no path — check the hackspace side
              (their headscale / DERP) before touching this host.
 EOF

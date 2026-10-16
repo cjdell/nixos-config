@@ -7,6 +7,77 @@
 
 let
   constants = import ../constants.nix;
+
+  # How we join the leighhack tailnet — single source of truth. nixpkgs'
+  # tailscaled-autoconnect (via services.tailscale.extraUpFlags) and the
+  # keep-it-joined reconciler below must never disagree, or a re-registration
+  # comes up without the subnet route this VM exists to advertise and the link
+  # is silently one-way (see docs/leighhack-tailscale.md).
+  leighUpFlags = [
+    "--login-server=https://tailscale.leighhack.org"
+    "--advertise-routes=192.168.49.0/24"
+    "--advertise-exit-node"
+    "--accept-dns=true"
+    "--accept-routes=true"
+  ];
+
+  # Re-join the leighhack tailnet whenever the session dies, however it died.
+  #
+  # nixpkgs' tailscaled-autoconnect is a boot-time ONE-SHOT: it polls the
+  # backend state, and the first time it sees `Running` it sd_notifies and
+  # `exit 0`s. It never looks again. So any logout after boot — including one
+  # we did not ask for — sits there dead forever, because `Restart=on-failure`
+  # cannot fire on a clean exit.
+  #
+  # That is what happened 2026-10-16 08:21 UTC. The hackspace's headscale
+  # deleted our node from under a healthy tunnel:
+  #
+  #   active login: <missing-profile>
+  #   Switching ipn state Running -> NeedsLogin (WantRunning=true, nm=true)
+  #   control: lite map update error: initial fetch failed 404: node not found
+  #
+  # `LocalAPI: Logout` appears zero times in the guest journal, so nobody here
+  # logged out: control told us we no longer exist, and tailscaled's response
+  # to that is indistinguishable from a logout. Nothing retried, and the tunnel
+  # stayed down for 3 hours until a human restarted tailscaled-autoconnect.
+  #
+  # A node we do not control can be deleted at any time, so the answer is not a
+  # better alert but a loop that keeps the session joined: worst-case outage is
+  # now the timer interval instead of "until someone notices".
+  leighEnsure = pkgs.writeShellScript "hackspace-tailscale-ensure" ''
+    set -u
+
+    TS=${pkgs.tailscale}/bin/tailscale
+    KEY=${config.sops.secrets.leigh_hackspace_tailscale_pre_auth_key.path}
+
+    state=$($TS status --peers=false --json 2>/dev/null \
+      | ${pkgs.gnugrep}/bin/grep -o '"BackendState": *"[A-Za-z]*"' \
+      | ${pkgs.coreutils}/bin/cut -d'"' -f4)
+
+    case "$state" in
+      Running)
+        # healthy — the overwhelmingly common case, and the reason this stays quiet
+        exit 0 ;;
+      NeedsLogin | NeedsMachineAuth | Stopped)
+        # NeedsLogin does NOT imply a bad key. See the 404: node not found
+        # post-mortem above; the key is reusable and this is the path that
+        # recovers from a server-side deletion, an expired node key, or an admin
+        # pruning this node out of their headscale.
+        echo "leighhack session is '$state' — re-registering with the pre-auth key"
+        $TS up --auth-key "$(${pkgs.coreutils}/bin/cat "$KEY")" ${lib.escapeShellArgs leighUpFlags}
+        echo "re-registered: tailscale is now $($TS status --peers=false --json 2>/dev/null \
+          | ${pkgs.gnugrep}/bin/grep -o '"BackendState": *"[A-Za-z]*"' \
+          | ${pkgs.coreutils}/bin/cut -d'"' -f4)"
+        # A fresh registration starts WITHOUT the return route for
+        # 192.168.49.0/24 on their headscale, so expect the link to be one-way
+        # for a few minutes. That is their ACL, not a failure here — see docs.
+        ;;
+      *)
+        # NoState / Starting / empty: tailscaled is mid-handshake (normally at
+        # boot, where tailscaled-autoconnect owns it). Do not race it.
+        exit 0 ;;
+    esac
+  '';
 in
 {
   virtualisation.libvirtd = {
@@ -213,13 +284,37 @@ in
           enable = true;
           authKeyFile = config.sops.secrets.leigh_hackspace_tailscale_pre_auth_key.path;
           useRoutingFeatures = "client";
-          extraUpFlags = [
-            "--login-server=https://tailscale.leighhack.org"
-            "--advertise-routes=192.168.49.0/24"
-            "--advertise-exit-node"
-            "--accept-dns=true"
-            "--accept-routes=true"
+          extraUpFlags = leighUpFlags;
+        };
+
+        # The keep-it-joined loop. Runs in the GUEST (this whole attrset is the
+        # microVM's config), independent of the host's health timer, because the
+        # host cannot re-register a session it does not hold.
+        systemd.services.hackspace-tailscale-ensure = {
+          description = "Keep the leighhack tailnet joined (re-register after a server-side logout)";
+          after = [
+            "tailscaled.service"
+            "network-online.target"
           ];
+          wants = [ "tailscaled.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = leighEnsure;
+            # `tailscale up` blocks until the login completes, so a hang (not
+            # just a rejection) has to be cut short for the next tick to run.
+            TimeoutStartSec = "2min";
+          };
+        };
+
+        systemd.timers.hackspace-tailscale-ensure = {
+          description = "Re-join the leighhack tailnet within a minute if the session dropped";
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            Unit = "hackspace-tailscale-ensure.service";
+            OnBootSec = "1min";
+            OnUnitActiveSec = "1min";
+            RandomizedDelaySec = "10s";
+          };
         };
 
         networking.nftables.tables = {

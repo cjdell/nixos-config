@@ -1,9 +1,12 @@
 # The leighhack tailscale bridge (grafton-hackspace-client)
 
-**Status: resolved 2026-10-15.** Outage 2026-10-09 → 2026-10-14 (5 days).
+**Status: resolved 2026-10-16.** Outage 2026-10-09 → 2026-10-14 (5 days), then a
+second 3-hour outage on 2026-10-16 caused by the **hackspace's headscale deleting
+our node** — see [2026-10-16: logged out by the control plane](#2026-10-16-logged-out-by-the-control-plane).
 Diagnosed and fixed by giving the VM persistent tailscale state, SSH access and
-diagnostic tools, plus a health timer that alerts. One dependency stays outside
-our control: see [Return path is their decision](#return-path-is-their-decision).
+diagnostic tools, plus a health timer that alerts, and (2026-10-16) an in-guest
+timer that re-joins the tailnet by itself. One dependency stays outside our
+control: see [Return path is their decision](#return-path-is-their-decision).
 
 ## What this is: there are TWO tailscale connections on grafton-router
 
@@ -234,6 +237,76 @@ headscale routes enable -r 192.168.49.0/24 -n <node-id>
    half authorized in the VM) so the health check can report *which* layer is
    down rather than *that* something is down.
 
+## 2026-10-16: logged out by the control plane
+
+Symptom was identical to the Oct-9 outage (`BackendState=NeedsLogin`, tunnel
+dead, VM otherwise healthy), and the health timer did its job this time: it named
+the layer within minutes. The important part is **why**.
+
+The guest journal is unambiguous, and it was **not** a logout from our side:
+
+```
+2026-10-16T08:21:52Z  active login: <missing-profile>
+2026-10-16T08:21:52Z  magicsock: closing connection to derp-8 (derp-disabled), age 10h17m50s
+2026-10-16T08:21:52Z  Switching ipn state Running -> NeedsLogin (WantRunning=true, nm=true)
+2026-10-16T08:21:53Z  control: lite map update error: initial fetch failed 404: node not found
+```
+
+`LocalAPI: Logout` appears **zero times** in the whole journal. The tunnel was up
+and running (DERP connection 10 h 17 m old) when their headscale started
+answering `404: node not found`: **the node was deleted server-side**, and
+`tailscaled`'s response to being told it does not exist is to drop its keys and
+enter `NeedsLogin` — locally indistinguishable from someone running
+`tailscale logout`. Plausibly the admin pruning the stale
+`grafton-hackspace-client` nodes we asked them to clean up (there are several
+identically-named ones). The pre-auth key was never the problem: it is reusable,
+unexpired, and re-registration worked first try.
+
+> So "the client was logged out" is not evidence about anyone's typing. On a
+> tailnet you do not administer, a logout is an event that **will** happen. The
+> fix is not to prevent it but to recover without a human.
+
+### Why it sat dead for 3 hours: autoconnect is a boot-time one-shot
+
+`tailscaled-autoconnect` polls the backend state and, on `Running`, does
+`systemd-notify --ready` and **`exit 0`**:
+
+```sh
+      Running)
+        echo "Tailscale is running"
+        systemd-notify --ready
+        exit 0        # <- it never looks again
+        ;;
+```
+
+The `Restart = on-failure` added on 2026-10-15 only covers a *failed* registration
+at boot; it cannot fire on a clean exit. So any logout after boot — ours, theirs,
+or an expired node key — is permanent until something external intervenes. That
+is the whole 3-hour window: `08:21:52Z` down, `11:23:04Z` a human restarted the
+unit.
+
+### Fix: `hackspace-tailscale-ensure` (in the guest)
+
+A oneshot service + 1-minute timer in the VM's config
+(`virtual-machines/grafton-hackspace-client.nix`) reads `BackendState` and
+re-applies the pre-auth key when it is `NeedsLogin`/`NeedsMachineAuth`/`Stopped`.
+It deliberately ignores `NoState`/`Starting` so it never races `tailscaled` at
+boot, and it builds its `tailscale up` flags from the same `leighUpFlags` binding
+as `services.tailscale.extraUpFlags`, so a re-join can never come up without the
+subnet route this VM exists to advertise. Worst case is now ~1 minute of outage
+instead of "until someone notices".
+
+It runs **in the guest**, because the host cannot re-register a session it does
+not hold, and it is independent of the alerting timer: alerting and healing are
+separate concerns and both are now present.
+
+**What it cannot fix:** a fresh registration is a *new node* on their headscale,
+so the return route for `192.168.49.0/24` starts disabled and the link is
+one-way for ~20 min (observed again on 2026-10-16: re-registered 11:23:04Z,
+end-to-end 10.3.1.1 replies at ~12:40 BST). Auto-approving the route in their
+ACLs would remove that window too — worth asking for, since re-registrations are
+now automatic and can happen while nobody is watching.
+
 ## Diagnosing it
 
 ```sh
@@ -296,7 +369,18 @@ sleep 60
 sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh
 ```
 
-Only if the check reports `BackendState` != `Running` is the key involved. The
+**Since 2026-10-16 you should not have to do this at all:**
+`hackspace-tailscale-ensure.timer` in the VM re-joins within a minute of the
+session dropping, whatever caused the drop. Check that first:
+
+```sh
+ssh root@192.168.49.15 'systemctl list-timers hackspace-tailscale-ensure; \
+                        journalctl -u hackspace-tailscale-ensure --since -1h'
+```
+
+Only if the VM is *still* `NeedsLogin` after the timer has run is the key
+involved — that means the re-registration itself is failing. Read the reason
+before touching the key: The
 deployed key **is** reusable (`headscale preauthkeys create --user <u> --reusable
 --expiration 0`); if it ever has to be replaced, put the new value in sops as
 `leigh_hackspace_tailscale_pre_auth_key` in

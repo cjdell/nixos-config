@@ -107,7 +107,14 @@ let
           if [ -z "$backend" ]; then
             where="VM is up but ssh into it failed (tailscaled not even reachable?)"
           elif [ "$backend" != Running ]; then
-            where="VM's tailscale BackendState=$backend - the pre-auth key was rejected or never applied. Needs a reusable key + restart of microvm@grafton-hackspace-client"
+            # Usually self-healing now: hackspace-tailscale-ensure.service (in
+            # the VM) re-registers within a minute of the session dropping. So
+            # NeedsLogin persisting past that means the re-registration itself
+            # is failing - the key is the remaining suspect, NOT its being
+            # unused-at-boot. Cause seen 2026-10-16: their headscale deleted the
+            # node (`404: node not found`), which logs the client out on its
+            # own; check `journalctl -u tailscaled` in the VM for the reason.
+            where="VM's tailscale BackendState=$backend and the 1-min re-join timer is not fixing it - check 'journalctl -u tailscaled -u hackspace-tailscale-ensure' in the VM; a 404 'node not found' means the hackspace's headscale deleted this node and the pre-auth key may need replacing"
           elif [ "$inner" = up ]; then
             # This is the sneaky one, and what actually broke things on
             # 2026-10-14: the VM reaches the hackspace fine, but the return path
@@ -140,8 +147,9 @@ let
             "$where
 
     Diagnose: sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh
-    In the VM: ssh root@$VM_IP 'tailscale status; journalctl -u tailscaled-autoconnect -b'
-    Usual fix: a reusable pre-auth key, then systemctl restart microvm@grafton-hackspace-client"
+    In the VM: ssh root@$VM_IP 'tailscale status; journalctl -u tailscaled -u hackspace-tailscale-ensure --since -1h'
+    The VM re-joins by itself now; if it stays down the pre-auth key is spent or
+    rejected - see docs/leighhack-tailscale.md before restarting anything"
           ${pkgs.coreutils}/bin/echo "$now" > "$STATE_DIR/last-alert"
           ${pkgs.coreutils}/bin/echo "alert sent"
         fi
