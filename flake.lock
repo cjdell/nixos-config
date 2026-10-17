@@ -389,11 +389,11 @@
     "home-assistant-rust": {
       "flake": false,
       "locked": {
-        "lastModified": 1792279270,
-        "narHash": "sha256-oq/C2bddzrFr6dX/n0+RN+FKHezJ7xEizWkfSVU0/6o=",
+        "lastModified": 1792280382,
+        "narHash": "sha256-ouV+UH01dd7i4q9HytvTSdy4rkFI/xXiH0F8W/4efQ4=",
         "ref": "refs/heads/main",
-        "rev": "317683a22fb5c416b3a5f03d113ab82723304a32",
-        "revCount": 4,
+        "rev": "65094b736e2d1ff0c959a662d2867a833db0963a",
+        "revCount": 5,
         "type": "git",
         "url": "file:///home/cjdell/nixos-config/crates/home-assistant-rust"
       },

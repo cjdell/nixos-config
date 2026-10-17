@@ -4,8 +4,8 @@
 # Mosquitto/zigbee2mqtt tree, imports HA's registries and last-known states
 # read-only, and serves a server-rendered Topcoat dashboard. It does NOT run
 # automations (that would fire the estate's automations a second time) and its
-# HA-compatible API is loopback-only on :8124; nginx fronts the dashboard on
-# :8125 at hass-rs.home.chrisdell.info.
+# HA-compatible API is loopback-only on :8126 (8124 is zigbee2mqtt's web UI);
+# nginx fronts the dashboard on :8125 at hass-rs.home.chrisdell.info.
 #
 # The crate is a git submodule consumed as the `home-assistant-rust` flake
 # path input. If this host is rebuilt after editing the submodule, refresh the
@@ -48,7 +48,7 @@ let
           client_id: hass-rs-shadow
 
         http:
-          server_port: 8124
+          server_port: 8126
       '';
     }
     # Read-only view of HA's registries: areas, entity/device ids, restore
@@ -81,7 +81,7 @@ in
         "--config"
         configDir
         "--port"
-        "8124"
+        "8126"
         "--web-host"
         "127.0.0.1"
         "--web-port"

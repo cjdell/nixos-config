@@ -660,8 +660,8 @@ user `hass-rs` (group `users`):
   `.storage` symlink to `/srv/homeassistant/config/.storage`. Areas,
   entity/device ids and `core.restore_state` are therefore imported
   read-only from the live HA install; hass-rs never writes them.
-- **Ports:** HA-compatible API on `127.0.0.1:8124` (loopback only; not
-  proxied), dashboard on `127.0.0.1:8125`.
+- **Ports:** HA-compatible API on `127.0.0.1:8126` (loopback only; not
+  proxied; 8124 is zigbee2mqtt's web UI), dashboard on `127.0.0.1:8125`.
 - **Dashboard:** `https://hass-rs.home.chrisdell.info` → nginx → `:8125`.
   It is server-rendered (Topcoat, pinned 0.6.2) and has **no login**; nginx
   allow-lists `LAN_SUBNET`, `VLAN10_SUBNET`, `WIREGUARD_SUBNET`,
