@@ -97,6 +97,7 @@
     cargo
     cargo-binutils
     rustup
+    gh # GitHub CLI
     nixfmt
     alejandra
     nil
