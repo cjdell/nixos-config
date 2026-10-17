@@ -1,0 +1,4 @@
+[submodule "crates/home-assistant-rust"]
+	path = crates/home-assistant-rust
+	url = git@github.com:cjdell/home-assistant-rust.git
+	branch = main
