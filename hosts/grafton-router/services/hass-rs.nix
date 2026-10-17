@@ -48,6 +48,9 @@ let
           client_id: hass-rs-shadow
 
         http:
+          # The HA-compatible API has no token in shadow mode: keep it on
+          # loopback. Only nginx (dashboard :8125) is exposed.
+          server_host: 127.0.0.1
           server_port: 8126
       '';
     }
