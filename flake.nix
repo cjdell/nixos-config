@@ -1,9 +1,9 @@
-# alderlake-thinkpad offloads all Nix builds to the zen3-nixos build machine
-# (192.168.49.50): nix.settings.max-jobs = 0 disables local builds and the
-# daemon schedules up to 16 parallel jobs on the remote. Do NOT pass --max-jobs
-# to nixos-rebuild there — it overrides that and serializes remote builds.
-# Hosts without a build machine can still append --max-jobs 1 to keep builds
-# light on limited-RAM targets.
+# zen3-nixos (192.168.49.50) is the fleet's Nix build server: every machine
+# here uses it via common/build-client.nix (ssh-ng, 16 remote jobs), with one
+# local build slot kept as a fallback (nix.settings.max-jobs = 1) so a host
+# can still rebuild itself when zen3 is down — raise that with --max-jobs N.
+# Do NOT pass --max-jobs to nixos-rebuild expecting the remote to be used:
+# the flag overrides the fallback value, not the remote scheduling.
 # sudo nixos-rebuild boot   --flake .
 # sudo nixos-rebuild switch --flake .
 # (--impure is no longer needed: the deepseek-harness fork now fetches its

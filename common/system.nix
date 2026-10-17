@@ -2,6 +2,10 @@
 
 {
   imports = [
+    # zen3-nixos as this machine's remote Nix build server, with local
+    # builds kept as a fallback (self-disabling on zen3 itself).
+    ./build-client.nix
+
     # The forked DeepSeek Harness Web GUI as an always-on LAN service —
     # declared authorities are the operator's own surface (see
     # common/dsh-web-service.nix and docs/dsh-fork/). Off by default; enable

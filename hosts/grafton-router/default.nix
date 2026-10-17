@@ -7,6 +7,10 @@
 
 [
   ../../utils/oci.nix
+  # zen3-nixos as this machine's remote Nix build server, local builds as
+  # fallback (the router carries its own module set, so it does not get
+  # common/system.nix and imports the client module directly).
+  ../../common/build-client.nix
   ../../common/dsh-web-service.nix
 
   nixos-utils.nixosModules.rollback

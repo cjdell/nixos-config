@@ -107,6 +107,13 @@ Clients, not servers: `alderlake-thinkpad`, `rocketlakelatitude`, and the legacy
 
 ## Deploying an update to a host that cannot build it (NAS boxes, router)
 
+Since 2026-10-17 every host in this flake uses zen3-nixos as a remote Nix
+builder (see *Building and deploying*), so `nixos-rebuild switch --flake .`
+run **on** a NAS/router dispatches its builds to zen3 and the closure-streaming
+procedure below is no longer the only option — it remains useful when the
+target cannot reach zen3, or when you want to guarantee the exact toplevel you
+built here.
+
 Applied 2026-10-09 to bring N100-NAS / GEN8-NAS / N40L-NAS from `26.05.20260910`
 / `26.05.20260829` onto the flake pin `26.11.20261006.151fa4e`:
 
@@ -131,12 +138,14 @@ Applied 2026-10-09 to bring N100-NAS / GEN8-NAS / N40L-NAS from `26.05.20260910`
 - **A kernel bump means the ZFS module only loads on the next boot** (pools keep
   running on the loaded module; ZFS userland was unchanged at 2.4.4, so nothing
   complains). Reboot each ZFS host to actually move onto the new kernel.
-- **grafton-router cannot be built on zen3 at all**: `frigate-monitor` is a
+- **grafton-router cannot be *evaluated* on zen3 at all**: `frigate-monitor` is a
   `path:/home/cjdell/Projects/frigate-monitor` flake input (flake.nix:37) that
   exists only on the router, so evaluating `.#grafton-router` elsewhere dies with
-  `path "…/frigate-monitor" does not exist`. Rebuild it on the router — nixpkgs
-  paths (incl. kanidm) substitute from cache.nixos.org, so a switch there takes
-  minutes even with 15 GiB RAM.
+  `path "…/frigate-monitor" does not exist`. Rebuild it on the router — which is
+  separate from using zen3 as its *builder*: evaluation happens on the router and
+  only the derivations (with their path-input sources) go over ssh-ng. nixpkgs
+  paths (incl. kanidm) also substitute from cache.nixos.org, so a switch there
+  takes minutes even with 15 GiB RAM.
 - **kanidm is now `pkgs.kanidm_1_11.withSecretProvisioning` (1.11.2, domain level
   15)** — `hosts/grafton-router/services/kanidm.nix:9`; the 1.10.5 EOL permit is
   gone from `flake.nix`. Kanidm only migrates **one minor version at a time**, so
@@ -210,20 +219,25 @@ sudo nixos-rebuild switch --flake .
   rebuild here. Do not assume the repo lives only on zen3-nixos (*Step 0* above
   lists the hosts that carry a checkout, and the server roles table shows what
   each one runs).
-- **alderlake-thinkpad builds exclusively on zen3-nixos** (`192.168.49.50`):
-  `nix.distributedBuilds` + `nix.buildMachines` write `/etc/nix/machines`
-  (Nix's default `builders = @/etc/nix/machines` picks it up) and
-  `nix.settings.max-jobs = 0` disables local builds, so the daemon schedules
-  up to 16 parallel jobs on the remote. Do **not** pass `--max-jobs` there —
-  it overrides the config and serializes remote builds to one at a time.
-- **If zen3-nixos is down**, the Thinkpad can still build locally: pass
-  `--max-jobs 4` (root is a trusted user, so the flag overrides the daemon's
-  `max-jobs = 0`), or temporarily set `nix.settings.max-jobs = 4` in
-  `hosts/alderlake-thinkpad/default.nix`. Without an override, `nixos-rebuild`
-  fails outright because local builds are disabled.
-- Hosts *without* a build machine can still append `--max-jobs 1` to keep
-  builds light on limited-RAM targets; the whole flake evaluates all ~20 hosts
-  either way.
+- **zen3-nixos (192.168.49.50) is the fleet's build server for every machine
+  in this flake**: `common/build-client.nix` (imported via `common/system.nix`
+  by all hosts and directly by grafton-router) sets `nix.distributedBuilds` +
+  one ssh-ng `nix.buildMachines` entry (root@zen3, 16 jobs, `speedFactor 4`)
+  and keeps `nix.settings.max-jobs = mkDefault 1` — **one local build slot as
+  a fallback**: when zen3 is unreachable nix marks it unavailable and builds
+  locally instead of failing. Raise the fallback with `--max-jobs N` (root is
+  a trusted user); passing it when zen3 is up is harmless but pointless.
+  The module self-disables on zen3, which builds locally (`max-jobs = 16`)
+  and dispatches aarch64-linux to the MacBookAir via its own entry.
+- **Onboarding a build client**: on the client
+  `sudo ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ''`, add the printed
+  public key to `users.users.root.openssh.authorizedKeys.keys` in
+  `hosts/zen3-nixos/default.nix`, rebuild zen3, then rebuild the client. A
+  client whose key is not authorized silently falls back to local builds —
+  that's the symptom, not a bug in the module. Authorized 2026-10-17:
+  alderlake-thinkpad, macbook-pro-2009, grafton-router, N100/GEN8/N40L-NAS;
+  still outstanding: rocketlakelatitude, 3d-printer-server, legacy
+  `machines/*` (offline when the keys were collected).
 - Always follow with `sudo nixos-confirm` on hosts that enable autoRollback
   (see above).
 - **Local `path:` flake inputs freeze at the `narHash` in `flake.lock`.** The

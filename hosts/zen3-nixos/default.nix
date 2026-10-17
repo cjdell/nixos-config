@@ -123,15 +123,25 @@
       ];
     };
 
-    # Let other hosts use this machine as a remote Nix build machine (matches
-    # the sshKey configured in hosts/alderlake-thinkpad/default.nix and
-    # machines/macbook-pro-2009/default.nix).
+    # The fleet's build server role: every other machine in this flake
+    # declares zen3 as its remote builder via common/build-client.nix
+    # (ssh-ng as root, key /root/.ssh/id_ed25519 on each client). Authorize
+    # each client's root PUBLIC key here; to onboard a new/reinstalled host:
+    #   sudo ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ''   # on the client
+    #   # add the printed .pub here, then nixos-rebuild switch on zen3
+    # Hosts whose key is missing simply fall back to local builds (max-jobs 1).
+    # Still outstanding: rocketlakelatitude, 3d-printer-server (offline when
+    # this was written) and the legacy machines/* boxes.
     users.users.root.openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICx2X9y6tglYE8dnTPW1j28iSmv8wftzaVhpUulB5fez root@alderlake-thinkpad (nix builder)"
       # The 2-core/7 GiB MacBook Pro 2009 offloads everything here (its pctv320cx
       # kernel module needs a full nixpkgs kernel + Rust bindings built; see
       # machines/macbook-pro-2009/default.nix).
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPNeoqpYHVpKyITDcHn9ncm7XBNv9zLwg9+yPhDMGcMu root@macbook-pro-2009-nixos (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMgcSOWkLYRHDyS5TslrqjrZ8vf0wcVwgqv7ak68Ku8K root@grafton-router (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCaae9Avcy78n81Xep1/JabO8SnfNHzQXSj6FJYOqUk root@N100-NAS (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeugl6bwVy9n/4FX3xuUDs6bMrQifWZROJwv3TK/zSw root@GEN8-NAS (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEm2NQfhWPdGkDsDQQDx/yJTeNceNWgqQMStW4ESixib root@N40L-NAS (nix builder)"
     ];
 
     boot.kernel.sysctl = {

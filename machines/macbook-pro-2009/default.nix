@@ -8,43 +8,14 @@
 
   networking.hostName = "macbook-pro-2009-nixos"; # Define your hostname.
 
-  # Remote Nix build machine: zen3-nixos (192.168.49.50, 16 cores).
-  #
-  # This box is a 2-core Core 2 Duo T9800 with 7 GiB RAM.  Building the
-  # pctv320cx module (pctv-linux/, hardware.pctv320cx below) means building
-  # nixpkgs' whole kernel build tree + generating the Rust bindings against it
-  # - hours here, minutes on zen3, and it stays cached there so further driver
-  # iterations are seconds.  Same setup as hosts/alderlake-thinkpad: ssh-ng as
-  # root, key authorized in hosts/zen3-nixos/default.nix.
-  nix.distributedBuilds = true;
-  # Build exclusively on the builder: max-jobs = 0 disables local builds, so
-  # every derivation goes to zen3 (16 parallel jobs there).  Don't pass
-  # --max-jobs to nixos-rebuild - it overrides this and serializes remote
-  # builds to one at a time.  If zen3 is down, override to build locally:
-  # `sudo nixos-rebuild ... --max-jobs 1` (root is a trusted user).
-  nix.settings.max-jobs = 0;
-  nix.buildMachines = [
-    {
-      hostName = "192.168.49.50";
-      protocol = "ssh-ng";
-      sshUser = "root";
-      sshKey = "/root/.ssh/id_ed25519";
-      system = "x86_64-linux";
-      maxJobs = 16;
-      speedFactor = 4;
-      supportedFeatures = [
-        "nixos-test"
-        "benchmark"
-        "big-parallel"
-      ];
-    }
-  ];
-  # Pin the builder's SSH host key so ssh-ng connects without a prompt.
-  programs.ssh.knownHosts."192.168.49.50" = {
-    hostNames = [ "192.168.49.50" ];
-    publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFdeRHV02KmEdG3YoH2aq1++9PqeTwGlWUsG0XKzUE27";
-  };
-
+  # Remote Nix builds: zen3-nixos via common/build-client.nix (imported
+  # through common/system.nix); root key authorized in
+  # hosts/zen3-nixos/default.nix.  This box is a 2-core Core 2 Duo T9800 with
+  # 7 GiB RAM, and building the pctv320cx driver used to mean building
+  # nixpkgs' whole kernel tree + Rust bindings here - hours locally, minutes
+  # on zen3, cached there for further iterations.  max-jobs = 1 in the client
+  # module keeps local builds as a fallback when zen3 is down (raise it with
+  # `nixos-rebuild ... --max-jobs N` if zen3 stays down).
   # Pinnacle PCTV 320cx (2304:022e) in the ExpressCard slot.
   #
   # The card's analog side used to be Windows-only, and was captured by

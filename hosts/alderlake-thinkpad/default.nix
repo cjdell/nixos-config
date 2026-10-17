@@ -18,35 +18,10 @@
       ./hardware-configuration.nix
     ];
 
-    # Use the Zen 3 workstation (zen3-nixos, 192.168.49.50) as a remote Nix
-    # build machine, so heavy derivations build there instead of on this laptop.
-    nix.distributedBuilds = true;
-    # Build exclusively on the build machine: max-jobs = 0 disables local
-    # builds, so every derivation goes to the ssh-ng builder (16 parallel jobs
-    # there). Don't pass --max-jobs to nixos-rebuild — it overrides this and
-    # serializes remote builds to one at a time.
-    nix.settings.max-jobs = 0;
-    nix.buildMachines = [
-      {
-        hostName = "192.168.49.50";
-        protocol = "ssh-ng";
-        sshUser = "root";
-        sshKey = "/root/.ssh/id_ed25519";
-        system = "x86_64-linux";
-        maxJobs = 16;
-        speedFactor = 4;
-        supportedFeatures = [
-          "nixos-test"
-          "benchmark"
-          "big-parallel"
-        ];
-      }
-    ];
-    # Pin the builder's SSH host key so ssh-ng connects without a prompt.
-    programs.ssh.knownHosts."192.168.49.50" = {
-      hostNames = [ "192.168.49.50" ];
-      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFdeRHV02KmEdG3YoH2aq1++9PqeTwGlWUsG0XKzUE27";
-    };
+    # Remote Nix builds: zen3-nixos via common/build-client.nix (imported
+    # through common/system.nix); root key authorized in
+    # hosts/zen3-nixos/default.nix. max-jobs = 1 there keeps local builds as
+    # a fallback when zen3 is down.
 
     services.fprintd.enable = true;
 
