@@ -386,6 +386,22 @@
         "type": "gitlab"
       }
     },
+    "home-assistant-rust": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792279270,
+        "narHash": "sha256-oq/C2bddzrFr6dX/n0+RN+FKHezJ7xEizWkfSVU0/6o=",
+        "ref": "refs/heads/main",
+        "rev": "317683a22fb5c416b3a5f03d113ab82723304a32",
+        "revCount": 4,
+        "type": "git",
+        "url": "file:///home/cjdell/nixos-config/crates/home-assistant-rust"
+      },
+      "original": {
+        "type": "git",
+        "url": "file:///home/cjdell/nixos-config/crates/home-assistant-rust"
+      }
+    },
     "home-manager": {
       "inputs": {
         "nixpkgs": [
@@ -706,6 +722,7 @@
         "frigate-monitor": "frigate-monitor",
         "frigate-whisper": "frigate-whisper",
         "gc-rust-node": "gc-rust-node",
+        "home-assistant-rust": "home-assistant-rust",
         "home-manager": "home-manager",
         "llama-cpp": "llama-cpp",
         "microvm": "microvm",

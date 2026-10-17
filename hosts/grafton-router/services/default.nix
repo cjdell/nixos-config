@@ -13,6 +13,7 @@
     ./headscale.nix
     ./health.nix
     ./home-assistant.nix
+    ./hass-rs.nix
     ./http-dump.nix
     ./immich.nix
     ./influxdb.nix

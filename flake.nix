@@ -43,6 +43,24 @@
     crane = {
       url = "github:ipetkov/crane";
     };
+    # hass-rs — the shadow Home Assistant hub (crates/home-assistant-rust).
+    # The crate is a git submodule, and Nix's git fetcher deliberately omits
+    # submodule contents from *this* flake's source, so the infra flake
+    # consumes the submodule's own checkout as a git+file input instead.
+    # `flake = false`: the crate's own flake is a development convenience;
+    # hosts/grafton-router/services/hass-rs.nix callPackages nix/package.nix
+    # directly (same contract as meter-relay-rs).
+    #
+    # git+file (not path:) on purpose: it includes only committed, tracked
+    # files, so a local cargo `target/` never ends up in the lock. The input
+    # is frozen at the locked commit, so after editing the submodule:
+    #   git -C crates/home-assistant-rust add -A && git -C crates/home-assistant-rust commit
+    #   nix flake update home-assistant-rust
+    # and on a fresh checkout: git submodule update --init crates/home-assistant-rust
+    home-assistant-rust = {
+      url = "git+file:///home/cjdell/nixos-config/crates/home-assistant-rust";
+      flake = false;
+    };
     # The Raspberry Pi 5 netboot flake (Pi NixOS config + the gc-node worker it
     # runs). hosts/zen3-nixos/pi5-netboot.nix bind-mounts its pi5-netboot
     # package at /etc/tftp/e9cf02dc. A `path:` input freezes at the locked
@@ -122,6 +140,7 @@
       frigate-monitor,
       gc-rust-node,
       crane,
+      home-assistant-rust,
       deepseek-harness,
       sops-nix,
       home-manager,

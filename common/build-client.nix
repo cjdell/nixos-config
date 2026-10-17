@@ -27,7 +27,13 @@
 let
   inherit (lib) mkDefault mkIf;
   isBuilder = config.networking.hostName == "zen3-nixos";
-  builderHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFdeRHV02KmEdG3YoH2aq1++9PqeTwGlWUsG0XKzUE27";
+  # Nix 2.34's machine-spec parser expects the *bare* Base64 key body in
+  # `publicHostKey`. With the usual "ssh-ed25519 <base64>" form it splits on
+  # the space, tries to Base64-decode the empty remainder and fails every
+  # build with "invalid character in Base64 string: ''". The known_hosts line
+  # below keeps the algorithm prefix, as ssh(1) requires.
+  builderHostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIFdeRHV02KmEdG3YoH2aq1++9PqeTwGlWUsG0XKzUE27";
+  builderHostKeyLine = "ssh-ed25519 ${builderHostKey}";
 in
 {
   config = mkIf (!isBuilder) {
@@ -49,6 +55,7 @@ in
         ];
         # Pin the builder's host key in the machines entry itself, so ssh-ng
         # never depends on /etc/ssh/ssh_known_hosts being present yet.
+        # Bare Base64, no "ssh-ed25519 " prefix — see builderHostKey above.
         publicHostKey = builderHostKey;
       }
     ];
@@ -59,7 +66,7 @@ in
         "zen3-nixos"
         "zen3-nixos.grafton.tailscale"
       ];
-      publicKey = builderHostKey;
+      publicKey = builderHostKeyLine;
     };
   };
 }
