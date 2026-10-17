@@ -15,6 +15,14 @@
     age.keyFile = "/var/lib/sops-nix/key.txt";
     defaultSopsFile = ./secrets/secrets.yaml;
     secrets = {
+      # Brave Search API key for the brave-search MCP server in opencode
+      # (users/cjdell/opencode.nix); same secret as the shared secrets.yaml,
+      # but the router keeps its own sops file. 0440 root:wheel so the MCP
+      # server, run by cjdell (in wheel), can read it.
+      brave_api_key = {
+        group = "wheel";
+        mode = "0440";
+      };
       aws_access_key_secret = { };
       pppoe_password = { };
       wireguard_key = { };

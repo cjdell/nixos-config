@@ -6,6 +6,8 @@
 }:
 
 {
+  imports = [ ./opencode.nix ];
+
   home.stateVersion = "24.11";
 
   # Node.js lives in the user profile (home-manager), not in the system

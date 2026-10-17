@@ -1,6 +1,7 @@
 {
   nixos-utils,
   sops-nix,
+  home-manager,
   ...
 }:
 
@@ -14,6 +15,7 @@
   nixos-utils.nixosModules.health
 
   sops-nix.nixosModules.sops
+  home-manager.nixosModules.home-manager
 
   ./networking
   ./services
@@ -24,6 +26,9 @@
   # The forked DeepSeek Harness Web GUI (common/dsh-web-service.nix), served
   # on 192.168.49.1:3080 — see docs/dsh-fork/.
   ./dsh-harness.nix
+  # cjdell's home profile: just the fleet opencode config
+  # (users/cjdell/opencode.nix) — the router has no desktop home.nix.
+  ./home-manager.nix
   ./hardware-configuration.nix
   ./http.nix
   ./sops.nix
