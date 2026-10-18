@@ -87,7 +87,7 @@ All in `hosts/<name>` (directory name == host name == flake attribute), on the
 | **GEN8-NAS** | `.23` | Bulk file + snapshot host (ZFS `sas-24tb`: `ds-public`, `ds-cjdell`, `ds-backup`) | Samba + NFS shares, sanoid snapshots, syncoid → N40L-NAS, `backup-host` receiver (`backup` user, `/var/lib/backup`), Scrutiny, Prometheus exporters, Tailscale, `lsiutil`/`sasutils` (HBA) | no autoRollback. ZFS via disko. |
 | **N40L-NAS** | `.21` (`…:49::21`) | The backup **target** (ZFS `sas-16tb`) | Receives the GEN8 + N100 syncoid streams under `sas-16tb/ds-external-backups/…`, holds dbthr33's `ds-frigate-archive`, UniFi controller container, `zfs-status`, Scrutiny, Tailscale | `nfs.nix`, `samba.nix` and `backup.nix` exist in the directory but are **not imported** by `default.nix` — no shares and no offsite push from this box. no autoRollback. |
 | **3d-printer-server** | `.60` | Klipper 3-D-print server | prind stack as three rootful podman units (`podman-klipper/-moonraker/-mainsail`), Mainsail on nginx `:80`, `klipper-firmware-update` | no autoRollback; no GitHub creds (deploy via `git bundle`); read `docs/klipper-3d-printer.md` first. |
-| **pi5** | `.92` | aarch64 netboot node (Raspberry Pi 5, no SD) | NixOS on a tmpfs root with its store served by zen3 over NFS; its config lives in the `gc-rust-node` repo, **not** this flake | Deploy = `nixos-rebuild switch` on zen3 + power-cycle (`scripts/pi5-powercycle.sh`); host keys regenerate every boot. |
+| **pi5** | `.92` | aarch64 netboot node (Raspberry Pi 5, no SD) — **currently off**: netboot imports commented out of `hosts/zen3-nixos/default.nix` since `dc54f4a`, no answer at `.92` | NixOS on a tmpfs root with its store served by zen3 over NFS; its config lives in the `gc-rust-node` repo, **not** this flake | Deploy = `nixos-rebuild switch` on zen3 + power-cycle (`scripts/pi5-powercycle.sh`); host keys regenerate every boot. |
 
 Load-bearing hosts **not** in this flake: **dbthr33-server** (offsite backup
 target — `backup@10.47.35.20:dbthr33/ds-external-backups/grafton` from N100-NAS;
@@ -248,15 +248,28 @@ sudo nixos-rebuild switch --flake .
   (see above).
 - **Local `path:` flake inputs freeze at the `narHash` in `flake.lock`.** The
   repo consumes several checkouts that live outside it by path
-  (`gc-rust-node`, `frigate-monitor`, the `llama.cpp` forks, …). Editing such a
-  checkout changes *nothing* until `nix flake update <name>`
+  (`frigate-monitor`, `frigate-whisper`, the `llama.cpp` forks, …). Editing such
+  a checkout changes *nothing* until `nix flake update <name>`
   (the old `nix flake lock --update-input <name>`, now deprecated) rewrites that
   lock entry — a plain `nixos-rebuild switch` then redeploys the previous build
   without any warning. (The Rust crates now live under `crates/` and are built
   from this repo — no path input, no re-lock.)
+  **A `path:` input also copies the WHOLE directory into the store — `target/`
+  and `.git` included — and its `lastModified` therefore follows build
+  artifacts, not your commits.** `gc-rust-node` cost 4.8 GB per re-lock and left
+  four copies in zen3's store (33 GB; the largest was 18.5 GB, all but 1 MB of
+  it `target/`); it is `git+file://` since 38c9a7c for exactly that reason, as
+  `home-assistant-rust` already was. Prefer `git+file://` for any local input
+  with a build tree in it, and `du -sh` the directory before adding a `path:`
+  one. (`frigate-monitor`/`frigate-whisper` are the same shape — worth checking
+  on the router, where they live.)
   In a flake's *own* checkout Nix reads the git tree instead, so a new file must
   be at least staged (`git add`) or it is invisible to the build (both failure
-  modes, with the exact symptoms, are written up under "meter-relay-rs").
+  modes, with the exact symptoms, are written up under "meter-relay-rs"). A
+  *dirty* working tree is still only the tracked tree: verified on nix 2.34.8,
+  the dirty-checkout copy contains git-tracked files alone, so `--flake .` costs
+  this repo's 5.5 MB of source and not the 18 GB of `target/` + `llama-logs/`
+  lying next to it.
 - Avoid running `nix build`/`nixos-rebuild` for heavy jobs unless the task
   calls for it; the user often deploys manually.
 - **`hosts/grafton-router/secrets/` looks ignored but is tracked.** The root
@@ -352,14 +365,25 @@ The repo lives here (`192.168.49.50`) as on other hosts (e.g. N100-NAS) — chec
     the LLM endpoints (`/recallium-llm/`, `llm.ai.chrisdell.info`) — on the
     public internet.
 
-## Pi 5 netboot (aarch64, live)
+## Pi 5 netboot (aarch64) — currently switched OFF
 
 A headless Raspberry Pi 5 (MAC `98:fe:54:18:17:e9`, no SD card) network-boots
 NixOS from zen3. Full journey + gotchas: `pi5-blog.md`; status: `pi5-progress.md`.
 
+⚠️ **None of this is deployed at the moment** (verified 2026-10-18): `dc54f4a`
+"Temporarily remove un-needed things" (2026-09-28) commented `./netboot.nix`,
+`./pi5-netboot.nix` and `./pi5-deploy.nix` out of
+`hosts/zen3-nixos/default.nix`. The running system therefore declares no tftpd
+unit and no `/etc/tftp/e9cf02dc` / `/exports/nix-store` bind mounts — what is in
+`/etc/tftp` is a plain August directory, nothing is mounted over it, and the Pi
+does not answer a ping at `.92`. Everything below describes the setup as it
+should come back (uncomment the three imports, `nixos-rebuild switch`), not the
+current system. It also means `gc-rust-node` is a locked-but-unused input while
+these stay commented out.
+
 - **The Pi's boot files are part of this system now** (`hosts/zen3-nixos/pi5-netboot.nix`):
-  the `gc-rust-node` flake input (path input, refresh with
-  `nix flake lock --update-input gc-rust-node`) builds the complete eeprom boot
+  the `gc-rust-node` flake input (`git+file://` — commit in that repo first,
+  then `nix flake update gc-rust-node`) builds the complete eeprom boot
   dir — `config.txt`, `dtb`, `armstub8-2712.bin` (TF-A rpi5), `Image`,
   `initrd`, `cmdline.txt` (derived from `boot.kernelParams`) **plus the Pi's
   Nix store snapshot** (`nixStore/`, the full toplevel closure +
