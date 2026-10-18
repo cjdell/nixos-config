@@ -63,13 +63,22 @@
     };
     # The Raspberry Pi 5 netboot flake (Pi NixOS config + the gc-node worker it
     # runs). hosts/zen3-nixos/pi5-netboot.nix bind-mounts its pi5-netboot
-    # package at /etc/tftp/e9cf02dc. A `path:` input freezes at the locked
-    # narHash — after editing that repo, refresh with:
-    #   nix flake lock --update-input gc-rust-node
+    # package at /etc/tftp/e9cf02dc. The input freezes at the locked commit, so
+    # after editing that repo: commit there first, then refresh with:
+    #   nix flake update gc-rust-node
+    #
+    # git+file (not path:) on purpose — same reasoning as home-assistant-rust
+    # above. The path fetcher copies the WHOLE directory, `target/` and `.git`
+    # included, so every re-lock hashed and copied 4.8 GB of build tree: four
+    # such copies were sitting in zen3's store (33 GB of them unreachable, the
+    # largest 18.5 GB and all but 1 MB of it `target/`).
+    # git+file takes only committed, tracked files, and follows the checkout's
+    # HEAD branch (`cjdell`) — so an uncommitted edit there is invisible until
+    # it is committed, which is the point.
     # NB: does NOT follow this flake's nixpkgs — the Pi keeps its own tested
     # pin (gc-rust-node/flake.lock), and zen3 just references the built drv.
     gc-rust-node = {
-      url = "path:/home/cjdell/Projects/gc-business/gc-rust-node";
+      url = "git+file:///home/cjdell/Projects/gc-business/gc-rust-node";
     };
     # The DeepSeek Harness fork (trusted-authority-surface branch) serving the
     # forked Web GUI as a service (common/dsh-web-service.nix). The GitHub
