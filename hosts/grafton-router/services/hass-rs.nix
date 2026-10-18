@@ -126,8 +126,9 @@ in
         allow ${net.LAN_IPV6_PREFIX}/64;
         deny all;
 
-        # Server-sent events carry per-entity state changes; do not buffer
-        # them or the browser updates arrive in bursts.
+        # The Topcoat runtime keeps a WebSocket open per dashboard tab for
+        # live-region updates (proxyWebsockets above carries the upgrade);
+        # long timeouts so idle connections are not cut, no buffering.
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 24h;
