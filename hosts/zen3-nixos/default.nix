@@ -13,6 +13,8 @@
   ../../common/folding-at-home-sops.nix
 
   ./ai
+  # Dev PostgreSQL (loopback-only, trust) for hass-rs's persistence layer.
+  ./postgres.nix
   # Base nginx (services.nginx.enable + temp/spill dirs). Lives here, NOT in
   # ./netboot.nix: nginx fronts every AI/TLS vhost on this host, so disabling
   # the Pi 5 netboot module must not take the whole HTTP surface down.
