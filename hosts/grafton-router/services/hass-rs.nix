@@ -7,6 +7,11 @@
 # HA-compatible API is loopback-only on :8126 (8124 is zigbee2mqtt's web UI);
 # nginx fronts the dashboard on :8125 at hass-rs.home.chrisdell.info.
 #
+# Its own PostgreSQL database (below) carries what hass-rs *owns*: registry
+# edits, the state snapshot (so entities show their last known values across
+# a restart instead of going unavailable) and the state history behind the
+# dashboard's history modal.
+#
 # The crate is a git submodule consumed as the `home-assistant-rust` flake
 # path input. If this host is rebuilt after editing the submodule, refresh the
 # lock first:  nix flake update home-assistant-rust
@@ -70,14 +75,33 @@ in
     description = "hass-rs shadow Home Assistant hub";
   };
 
+  # --- PostgreSQL (owned registry rows, state snapshot, state history) ------
+  # Equivalent to: CREATE USER hass_rs; CREATE DATABASE hass_rs
+  # OWNER hass_rs; — the service connects over the unix socket, which
+  # services/postgres.nix trusts locally, so no password is involved.
+  services.postgresql = {
+    ensureDatabases = [ "hass_rs" ];
+    ensureUsers = [
+      {
+        name = "hass_rs";
+        ensureDBOwnership = true;
+      }
+    ];
+  };
+  services.postgresqlBackup.databases = [ "hass_rs" ];
+
   systemd.services.hass-rs = {
     description = "hass-rs shadow Home Assistant hub";
     wantedBy = [ "multi-user.target" ];
     after = [
       "network-online.target"
       "mosquitto.service"
+      "postgresql.service"
     ];
-    wants = [ "network-online.target" ];
+    wants = [
+      "network-online.target"
+      "postgresql.service"
+    ];
     serviceConfig = {
       ExecStart = lib.escapeShellArgs [
         "${hass-rs}/bin/hass-rs"
@@ -103,6 +127,9 @@ in
       ProtectHome = true;
     };
     environment.RUST_LOG = "info,hass_rs=info,hass_mqtt=info,hass_web=info";
+    # Unix-socket DSN: sqlx takes the socket *directory* percent-encoded as
+    # the host. Local trust (services/postgres.nix) authenticates it.
+    environment.HASS_DATABASE_URL = "postgres://hass_rs@%2Frun%2Fpostgresql/hass_rs";
   };
 
   services.nginx.virtualHosts."hass-rs.home.chrisdell.info" = {
