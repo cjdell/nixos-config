@@ -99,23 +99,23 @@ in
         "70:03:9f:68:b5:bd,plug-03                    ,192.168.49.43,1h"
         "c4:dd:57:21:12:28,plug-04                    ,192.168.49.44,1h"
 
-        "74:56:3c:6f:aa:17,zen3-nixos                 ,192.168.49.50,[2a02:8010:6680:49::50],1h"
-        "e0:d5:5e:27:c9:65,zen1-nixos                 ,192.168.49.51,1h"
-        "fc:aa:14:06:38:cc,haswellmatx-nixos          ,192.168.49.53,1h"
-        "10:7b:44:1a:97:fc,haswellatx-nixos           ,192.168.49.54,1h"
-        "1c:1b:0d:e6:ac:8a,kabylakeitx-nixos          ,192.168.49.55,1h"
-        "6c:4b:90:af:0c:f9,coffeelakelenovo-nixos     ,192.168.49.56,1h"
+        "zen3-nixos                                   ,192.168.49.50,[2a02:8010:6680:49::50],1h"
+        "zen1-nixos                                   ,192.168.49.51,1h"
+        "haswellmatx-nixos                            ,192.168.49.53,1h"
+        "haswellatx-nixos                             ,192.168.49.54,1h"
+        "kabylakeitx-nixos                            ,192.168.49.55,1h"
+        "coffeelakelenovo-nixos                       ,192.168.49.56,1h"
         "hp-elitedesk-ryzen-2400-nixos                ,192.168.49.57,1h"
         "lenovo-thinkcentre-core-11400-nixos          ,192.168.49.58,1h"
         "3d-printer-server                            ,192.168.49.60,1h"
-        "e4:54:e8:aa:d2:66,coffeelakedell-nixos       ,192.168.49.61,1h"
-        "8c:ec:4b:53:8a:bf,dell-vostro-kabylake-nixos ,192.168.49.62,1h"
+        "coffeelakedell-nixos                         ,192.168.49.61,1h"
+        "dell-vostro-kabylake-nixos                   ,192.168.49.62,1h"
         "asus-xeon-1270v5-nixos,                      ,192.168.49.63,1h"
         "lenovo-thinkcentre-core-8400-c-nixos         ,192.168.49.64,1h"
         "hp-z240-xeon-1240v6-nixos                    ,192.168.49.65,1h"
         "AirM5                                        ,192.168.49.66,1h"
-        "f0:77:c3:9f:4e:12,rocketlakelatitude-nixos   ,192.168.49.67,1h"
-        "7c:76:35:f8:e1:bb,precision-nixos            ,192.168.49.68,1h"
+        "rocketlakelatitude-nixos                     ,192.168.49.67,1h"
+        "precision-nixos                              ,192.168.49.68,1h"
         # MacBookAir-NixOS — the aarch64 Nix build machine zen3-nixos dispatches
         # the Pi 5 netboot bundle to (nix.buildMachines in
         # hosts/zen3-nixos/default.nix). The reservation must name the MAC it
@@ -127,7 +127,7 @@ in
         # macbookair-nixos.grafton.lan resolves. Wi-Fi (`wld0`) is down and
         # MAC-randomised — if it ever joins on Wi-Fi, add that MAC here too or
         # pin the MAC in NetworkManager, otherwise it gets a dynamic address.
-        "00:0e:c6:8e:b3:ff,MacBookAir-NixOS           ,192.168.49.69,1h"
+        "MacBookAir-NixOS                             ,192.168.49.69,1h"
 
         "d4:f5:47:2f:76:93,Small-Bedroom-Speaker      ,192.168.49.71,1h"
         "e4:f0:42:08:e3:1e,Front-Bedroom-Speaker      ,192.168.49.72,1h"
