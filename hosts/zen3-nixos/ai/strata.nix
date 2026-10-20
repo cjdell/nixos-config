@@ -287,9 +287,12 @@ let
       # process: `ENC <img> <out>` in, one SVE1 record of float32
       # [n_tokens][2560] out, which the engine splices in at the prompt's
       # `<|image_pad|>` rows with 2-D M-RoPE positions (generate.cpp:9682).
-      #   gpu = false is forced, not a preference: tools/vision's only GPU
-      # backend is STRATA_VISION_CUDA and docs/AMD_HIP.md:52/203 says images on
-      # HIP run through the CPU encoder. What that buys us is VRAM: `--vision`
+      #   gpu = false is forced, not a preference. 0.2.0 added an AMD GPU picture
+      # reader (tools/vision gained STRATA_VISION_HIP -> `strata-vision-hip`;
+      # R9700: 57 ms vs 3.13 s per picture) but it keeps ~1.4 GiB of VRAM, and
+      # the expert cache runs at 232 MiB free - so we ship the plain CPU
+      # `strata-vision` (STRATA_VISION_CUDA/HIP off, docs/AMD_HIP.md's CPU path)
+      # and keep gpu = false. What that buys us is VRAM: `--vision`
       # alone allocates only the (max_context+64)x3 int32 M-RoPE table
       # (generate.cpp:3201) = 4.5 MiB, and the 700 MiB `--vram-reserve-mib` the
       # serve layer adds is gated on gpu = true. The expert cache (232 MiB

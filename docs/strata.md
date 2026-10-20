@@ -257,6 +257,81 @@ script had the same latent break and is fixed the same way.
 switch`; both packs stay on disk, and the unit's `ConditionPathExists` still
 protects a pack that is not built.
 
+## 0.2.1.1 (2026-10-20)
+
+Pinned `9ae93f7b` (v0.2.1.1, the Windows-Terminal hotfix on 0.2.1 of the same day; 0.2.1 follows
+0.2.0-beta `3d1fb480` of 2026-10-19 and 0.1.45 `477ac13c` of 2026-10-17), built
+`/nix/store/k91dljvza0ksdr3m262nbqcbmglr0kw7-strata-0.2.1.1` (HIP/gfx1201; `strata-server
+--help` imports the whole serve layer, and the engine binary opens with `opened 2 GPU queues
+in a fixed order` — the new queue priming is live in the binary). **0.2.0 re-cut the repo into app + Terminal + engine** — the
+"engine package 0.1.46" of the release notes is the source in this tag (`project(strata VERSION
+0.1.46.1)`, `CMakeLists.txt:7`); the new `apps/`, `bin/`, `docker/`, `integrations/`,
+`packaging/` trees and `strata.py` are the app and the Terminal and are not built here.
+
+**One real breakage, fixed:** `serve/server.py` now imports the Terminal's Python packages at
+module scope — `from strata_control import engine_component, hipblaslt_tuning, vision_reader,
+draft_layer, user_args` (server.py:68-72) — and `strata_control` reaches `strata_cli`. Both are
+stdlib-only on that path (`strata_tokenizer` is `tools/strata_tokenizer.py`, reachable via
+server.py's own `sys.path.insert`), so `installPhase` now copies `strata_control/` and
+`strata_cli/` next to `serve/tools/data`; without them `python -m serve.server` dies with
+`ModuleNotFoundError`. Verified before building: `import serve.server` succeeds against exactly
+those five dirs plus the unchanged `serverPython`. No new *required* third-party import —
+jsonschema/referencing stay lazy+optional in `serve/structured.py` (absent → "one JSON object"
+checking only, same as today) and textual/requests/tqdm are Terminal/monitor-only.
+
+**The audit patch needed a real re-base** (the first since 0.1.40.3 that did not land by
+offset alone): 5 of 19 hunks were rejected by upstream context changes and were re-placed by
+hand — `verify.cpp`'s audit-alloc insert (a hand-off-counter block was added right after the
+arena `cudaMemset`), the per-window `lay_flags_` reset (a `keep_rows` line now follows `hrow0`),
+`audit_hit_rows` (a new `m_bal_` branch moved into the trailing context of the `hit_out`
+`grouped` call), and in `iq_kernels.cu` the definitions block (new `native_expert_set_expdec*`
+setters between `native_grouped_set_v1` and `native_expert_grouped`) and the stage-2 audit (the
+`sw_v1` branch grew `|| L.had_block > 0` and a `hadamard_rows` call). The other 14 landed with
+offsets up to +1159 — `iq_kernels.cu` gained ~1,100 lines (the S26/S27 v2/v2k expert paths; v2
+is `STRATA_EXPERT_V2=1` opt-in, v2k is default-on for Q4_K/Q5_K gate/up — neither matches our
+IQ4_XS geometry, so our model still runs the audited kernels). Regenerated from the patched
+tree: 19 hunks, 280 additions, 0 deletions, `patch -p1 --fuzz=0` and `git apply --check` both
+clean with **no offsets**, added lines byte-identical to the 0.1.44.1 file. `sampler.cu` is
+byte-identical to 0.1.44.1; the guard it rides on is untouched (the 1,560 changed lines of
+`server.py` touch no non-finite line).
+
+**Both int8-KV clamps still needed, still unique:** `kv_q8.cu:55` (that file only *added* a
+`STRATA_EXPERIMENTAL_SM60`-gated 8-wide gather below the shipped kernels) and
+`prefill/kernels.cu:2199` (was 1702; `hf_sat` now at :64). Both `installPhase` rewrites of
+`serve/server.py` matched (now 6743 and 6755). The ggml pin is unchanged
+(`setup.py:213 LLAMA_CPP_COMMIT = 3cf03257…`). Build surface unchanged: `add_executable(strata
+src/program/generate.cpp)` at `CMakeLists.txt:735`, every cmake flag we pass is still an option,
+`tools/vision` still builds `strata-vision` with `LLAMA_DIR`/`STRATA_VISION_CUDA`/
+`STRATA_PORTABLE` — it gained `STRATA_VISION_HIP` (the AMD GPU picture reader: 57 ms vs 3.13 s
+per picture, ~1.4 GiB VRAM; we keep the CPU encoder, the expert cache has 232 MiB free), and
+all 19 engine args in `strata.nix` are still parsed.
+
+**Behaviour changes to expect** (no config change; the A/B switches are in the `strata.nix`
+comments):
+
+| change | since | effect here | revert |
+| --- | --- | --- | --- |
+| Flash-Next answers | 0.1.45 | **byte-identical** to 0.1.44.1 on every machine upstream tested (HIP gfx1201 included) | — |
+| long-prompt top-k + exact scorer (#1749/#1943) | 0.1.45 | R9700 prompt reads: 131K +8.7 %, 230K +16 %, 500K +79 %, answers identical | — |
+| `STRATA_HIP_QUEUE_PRIME` | 0.2.0/2.1 | the two busiest GPU queues open in a fixed order at start: before, ~half of fresh MTP engines read prompts 8–14 % slower depending on which compute pipe the firmware gave them (10/32 slow starts before, 0/32 after); answers identical | `=0` |
+| `STRATA_FILE_TIER_PROBE` | 0.2.1 | start-up probe (96 × 1 MiB both ways, <2 s) picks file cache vs unbuffered for models read in place; cannot change answers | `=0` |
+
+Not applicable: the compute-only-card reserve drop (the probe cannot tell on AMD Linux, the
+safety default stays), hipBLASLt tuning tables (opt-in for R9700, and not bit-identical —
+first-token KL 0.016), Flash-Next `--parallel N` (0.1.45 added it; we stay at one slot,
+`docs/strata-batching.md`), `STRATA_IGPU_PROMPT_SET` (780M/760M), hybrid-CPU core counting, and
+the whole app/Terminal/Docker/`strata bench run` layer. The 0.1.43/0.1.44 RDNA4 defaults table
+above stays in force unchanged (HC_Q8, route-tail-skip, measured PCIe, 16384 chunk).
+
+**#879: closed, but not dead — and the fresh repro is our quant.** The maintainer closed it
+2026-10-13 as a stale-tracker sweep ("comment and we will reopen"); on 2026-10-19 a new
+reproduction landed (issue still closed): engine 0.1.45, RTX 3080, an 18,442-token agent prompt
+with 48 tool schemas → `non-finite logits (#879)` at the last window **every time**;
+`STRATA_PREFILL_MMQ=0` answers the same body; `STRATA_DBG_NAN` puts the birth in **layer 1's MoE
+gate/up on the MMQ prompt path, types 22/42 — IQ4_XS gate/up, our pack's family** (our build
+passes `-DSTRATA_PREFILL_MMQ=ON`). The audit stays the point of our patch; the ROCm 10.0.0
+runtime swap remains the thing that stopped our fires.
+
 ## 0.1.44 / 0.1.44.1 (2026-10-14)
 
 Pinned `296b59d2` (v0.1.44.1, the hotfix on 0.1.44 `ed4773eb` of 2026-10-13, which follows

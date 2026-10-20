@@ -950,10 +950,13 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.1.44.1** (`296b59d2f73c8f04a805df29c2fa97655adace78`, updated 2026-10-14 from
-0.1.43 `7695859a`; built `/nix/store/yrxmsd6ss59ni7874xcri0mn9rf2kr8b-strata-0.1.44.1`
-and **live since 2026-10-15 17:40:35** — `ExecStart` names that store path and
-`/v1/status` reports `"engine": "0.1.44.1"`):
+**0.2.1.1** (`9ae93f7b1fe989d04a8e404d32cddaeeff10505f`, updated 2026-10-20 from
+0.1.44.1 `296b59d2`). 0.2.0 split the repo into **app + Terminal + engine** — the
+engine source in this tag is version 0.1.46.1, and `serve/server.py` now imports the
+Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
+therefore ships too (without them the service dies at import). Built + patch-validated
+2026-10-20; **the running system stays 0.1.44.1 until the next `nixos-rebuild switch`**
+— verify with `systemctl show strata -p ExecStart` and `/v1/status` `"engine"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -1007,11 +1010,11 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
   `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
   the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
-  `prefill/kernels.cu:1702` (was 1691 in 0.1.43, 1340 in 0.1.42) — both live here because we
-  run `--kv int8`. Still unclamped on 0.1.44.1: `kv_q8.cu` is byte-identical to 0.1.43 and
-  0.1.44's 27 changed lines in `prefill/kernels.cu` are NVFP4 `row_sd` + a gfx1103 WMMA case,
-  so both `postPatch` clamps are still needed and both `--replace-fail` targets are still
-  unique.
+  `prefill/kernels.cu:2199` (was 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
+  live here because we run `--kv int8`. Still unclamped on 0.2.1.1: `kv_q8.cu` only added a
+  `STRATA_EXPERIMENTAL_SM60`-gated gather below the shipped kernels, and `prefill/kernels.cu`'s
+  769 changed lines are the Qwen3.6 prompt path + NVFP4 work, so both `postPatch` clamps are
+  still needed and both `--replace-fail` targets are still unique.
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
 - **The recurring strata "core dumps" are not crashes — they are the engine's hang
@@ -1038,16 +1041,20 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   MoE path plus a dump in `Verifier::run` that rides on upstream's `nf_mask_` and prints
   *every* fire. It is allocated and launched **only** with `STRATA_KERNEL_AUDIT=1` (set in
   `strata.nix`) because each probe is an extra node in the captured verify graph. Re-based
-  onto 0.1.44.1 on 2026-10-14: **no site moved** — the 280 added lines are byte-identical to
-  the 0.1.43 file and only the hunk line numbers changed (+11 verify.hpp, +4 iq_kernels.hpp,
-  +22/+35/+134 verify.cpp, +190/+206 iq_kernels.cu); 19 hunks, 280 additions, 0 deletions,
+  onto 0.2.1.1 on 2026-10-20 — the first re-base since 0.1.40.3 that needed real work:
+  **5 of 19 hunks were rejected** by upstream context changes (verify.cpp's audit-alloc
+  insert, the per-window reset, `audit_hit_rows`, and both `iq_kernels.cu` hunks — the file
+  gained ~1,100 lines of S26/S27 v2/v2k expert paths, neither matching our IQ4_XS geometry)
+  and were re-placed by hand; the other 14 landed with offsets up to +1159. Regenerated from
+  the patched tree: 19 hunks, 280 additions, 0 deletions, byte-identical added lines,
   `--fuzz=0` with **no offsets** (`patch -p1 --fuzz=0` and `git apply --check` both clean).
-  Its two anchors are intact: upstream's `nf_mask_` (`Verifier::note_nonfinite`,
-  `verify.cpp:3311`) and the `hits_in_combine` gate the routed-total probe checks
-  (`verify.cpp:1624/1677/1680/1692`).
-  **#879 is still open upstream** (0.1.44 and 0.1.44.1 do not touch the routed-expert data
-  path — 0.1.44's 300 changed lines in `iq_kernels.cu` are route-resident work and NVFP4
-  dequant), so the audit stays needed.
+  Its two anchors are intact: upstream's `nf_mask_` (`Verifier::note_nonfinite` in
+  `verify.cpp`) and the `hits_in_combine` gate the routed-total probe checks.
+  **#879 is closed but not dead** — closed 2026-10-13 as a stale-tracker sweep, and on
+  2026-10-19 a fresh repro landed (engine 0.1.45, RTX 3080, an 18,442-token agent prompt with
+  48 tools → fires every time; `STRATA_PREFILL_MMQ=0` answers the same body; birth in
+  layer 1's MoE gate/up on the MMQ prompt path, types 22/42 = IQ4_XS gate/up — our pack's
+  family; we build with `-DSTRATA_PREFILL_MMQ=ON`), so the audit stays needed.
   **Never re-apply an old file with fuzz** — `--fuzz=3`
   "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
   inside the PLE `try` block.
