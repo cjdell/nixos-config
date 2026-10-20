@@ -954,9 +954,9 @@ The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
 0.1.44.1 `296b59d2`). 0.2.0 split the repo into **app + Terminal + engine** — the
 engine source in this tag is version 0.1.46.1, and `serve/server.py` now imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
-therefore ships too (without them the service dies at import). Built + patch-validated
-2026-10-20; **the running system stays 0.1.44.1 until the next `nixos-rebuild switch`**
-— verify with `systemctl show strata -p ExecStart` and `/v1/status` `"engine"`):
+therefore ships too (without them the service dies at import). Built and **live since
+2026-10-20 15:38** — `ExecStart` names `/nix/store/k91dljvza0ksdr3m262nbqcbmglr0kw7-strata-0.2.1.1`
+and `/v1/status` reports `"engine": "0.1.46.1"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
