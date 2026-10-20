@@ -12,15 +12,9 @@ let
   RENDER_GID = "303";
 in
 {
-  # services.foldingathome = {
-  #   enable = true;
-  #   user = "cjdell";
-  #   team = 236565;
-  #   extraArgs = [
-  #     "--http-addresses=0.0.0.0:7396"
-  #     "--allow=0/0"
-  #   ];
-  # };
+  # NOTE: nixpkgs has no `services.foldingathome` module — the native v8
+  # client lives in common/folding-at-home-native.nix instead (it also folds
+  # on AMD GPUs, which this image cannot see: it ships Intel/NVIDIA ICDs only).
 
   users.users.fah = {
     uid = FAH_UID;
@@ -48,7 +42,9 @@ in
   virtualisation.oci-containers.containers = {
     fah = {
       hostname = "fah";
-      image = "linuxserver/foldingathome";
+      # Fully qualified: podman on these hosts defines no unqualified-search
+      # registries, so the short name fails with "did not resolve to an alias".
+      image = "docker.io/linuxserver/foldingathome";
       autoStart = true;
       ports = [
         "7396:7396"

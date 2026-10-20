@@ -6,7 +6,8 @@
 
 [
   ../../common/desktop.nix
-  ((import ../../common/folding-at-home.nix) "amd")
+  # folding@home space heater (native v8 client, CPU + RX 5700 XT OpenCL)
+  ./folding-heater.nix
   ../../common/nfs.nix
   ../../common/nosleep.nix
   ../../common/sunshine.nix
