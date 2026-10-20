@@ -472,24 +472,6 @@
             specialArgs = { inherit inputs; };
           };
 
-          zen1-nixos = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "amd")
-              ./common/nfs.nix
-              ./common/nosleep.nix
-              ./common/sunshine.nix
-              ./common/system.nix
-              ./common/wine.nix
-              ./machines/zen1
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           precision-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
