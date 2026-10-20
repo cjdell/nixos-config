@@ -125,9 +125,16 @@ in
           # mDNS between internal networks
           iifname ${internalIfaces} udp dport ${toString c.MDNS_PORT} accept comment "mdns from trusted networks"
 
-          # MSS clamping (avoids MTU issues over PPPoE)
+          # MSS clamping (avoids MTU issues over PPPoE).
+          # Must clamp BOTH directions: matching only bare SYN (excluding
+          # SYN-ACK) leaves the LAN client unaware of the smaller path MTU,
+          # so client segments > PPPoE MTU get IP-fragmented on egress and
+          # are dropped upstream (breaks Chrome's split post-quantum
+          # ClientHello, showing up as ERR_CONNECTION_RESET).
           tcp flags syn / fin,syn,rst,ack tcp option maxseg size set 1400 comment "Clamp TCP MSS to avoid MTU issues"
+          tcp flags syn,ack tcp option maxseg size set 1400 comment "Clamp TCP MSS (SYN-ACK)"
           tcp flags syn / fin,syn,rst,ack ip6 daddr != fe80::/10 tcp option maxseg size set 1400 comment "Clamp TCP MSS for IPv6"
+          tcp flags syn,ack ip6 daddr != fe80::/10 tcp option maxseg size set 1400 comment "Clamp TCP MSS IPv6 (SYN-ACK)"
 
           # No internet egress to RFC1918 addresses
           oifname ${c.WAN_INTERFACE} ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } reject with icmp type net-unreachable comment "outbound rfc1918 not permitted"
