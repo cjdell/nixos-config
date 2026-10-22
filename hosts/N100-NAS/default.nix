@@ -1,7 +1,8 @@
-{ sops-nix, ... }:
+{ sops-nix, disko-zfs, ... }:
 
 [
   sops-nix.nixosModules.sops
+  disko-zfs.nixosModules.default
 
   ((import ../../common/folding-at-home.nix) "none")
   ../../common/folding-at-home-sops.nix
@@ -10,6 +11,7 @@
   ../../common/sops.nix
 
   ./backup.nix
+  ./christcentralpreston.nix
   ./container-ui.nix
   ./containers.nix
   ./filebrowser.nix

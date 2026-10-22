@@ -26,6 +26,15 @@
         sendOptions = "w c";
         extraArgs = [ "--sshoption=StrictHostKeyChecking=off" ];
       };
+      # christcentralpreston.co.uk site tree (its own dataset, see
+      # christcentralpreston.nix); syncoid creates the target dataset.
+      "ds-christcentralpreston" = {
+        sshKey = "/var/lib/syncoid/backup.key";
+        source = "samsung-4tb/ds-christcentralpreston";
+        target = "backup@n40l-nas.grafton.tailscale:sas-16tb/ds-external-backups/ds-samsung-4tb/ds-christcentralpreston";
+        sendOptions = "w c";
+        extraArgs = [ "--sshoption=StrictHostKeyChecking=off" ];
+      };
     };
     localSourceAllow = options.services.syncoid.localSourceAllow.default ++ [
       "mount"
