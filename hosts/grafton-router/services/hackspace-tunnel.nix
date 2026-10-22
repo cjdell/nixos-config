@@ -103,9 +103,19 @@ let
           # identical.
           backend=$(vmcmd 'tailscale status --json' | ${pkgs.gnugrep}/bin/grep -o '"BackendState": "[A-Za-z]*"' | ${pkgs.coreutils}/bin/cut -d'"' -f4)
           inner=$(vmcmd "ping -c2 -W2 $HACKSPACE_IP >/dev/null 2>&1 && echo up || echo down")
+          # Is the pre-auth key even visible in the VM? If the session is down AND
+          # the key is missing, the re-join timer cannot possibly work and the key
+          # is not the suspect: the guest's /run/secrets is a virtiofs share whose
+          # directory virtiofsd opened at VM start, so an empty share means the
+          # host republished it after the VM booted. On 2026-10-21 the alert blamed
+          # "the pre-auth key may need replacing" for 3.5 h while the actual fault
+          # was a stale share; the key was fine and was never the problem.
+          key=$(vmcmd 'test -s ${config.sops.secrets.leigh_hackspace_tailscale_pre_auth_key.path} && echo present || echo missing')
 
           if [ -z "$backend" ]; then
             where="VM is up but ssh into it failed (tailscaled not even reachable?)"
+          elif [ "$backend" != Running ] && [ "$key" = missing ]; then
+            where="VM's tailscale BackendState=$backend and its pre-auth key is NOT VISIBLE in the guest (/run/secrets is empty) — the secrets virtiofs share is stale, not the key. Fix from the host: systemctl restart microvm@grafton-hackspace-client (the node key is on a disk, so this costs no re-registration unless the session is already gone)"
           elif [ "$backend" != Running ]; then
             # Usually self-healing now: hackspace-tailscale-ensure.service (in
             # the VM) re-registers within a minute of the session dropping. So
@@ -114,7 +124,7 @@ let
             # unused-at-boot. Cause seen 2026-10-16: their headscale deleted the
             # node (`404: node not found`), which logs the client out on its
             # own; check `journalctl -u tailscaled` in the VM for the reason.
-            where="VM's tailscale BackendState=$backend and the 1-min re-join timer is not fixing it - check 'journalctl -u tailscaled -u hackspace-tailscale-ensure' in the VM; a 404 'node not found' means the hackspace's headscale deleted this node and the pre-auth key may need replacing"
+            where="VM's tailscale BackendState=$backend and the 1-min re-join timer is not fixing it, although the pre-auth key IS visible in the guest - read the reason: journalctl -u tailscaled -u hackspace-tailscale-ensure in the VM (a 404 'node not found' means the hackspace's headscale deleted this node; the key is reusable)"
           elif [ "$inner" = up ]; then
             # This is the sneaky one, and what actually broke things on
             # 2026-10-14: the VM reaches the hackspace fine, but the return path
@@ -148,8 +158,10 @@ let
 
     Diagnose: sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh
     In the VM: ssh root@$VM_IP 'tailscale status; journalctl -u tailscaled -u hackspace-tailscale-ensure --since -1h'
-    The VM re-joins by itself now; if it stays down the pre-auth key is spent or
-    rejected - see docs/leighhack-tailscale.md before restarting anything"
+    The VM re-joins by itself now, so a tunnel that stays down means the re-join
+    itself is failing: read hackspace-tailscale-ensure's output in the VM before
+    touching the key — it exits 1 naming the reason (missing key vs rejected).
+    See docs/leighhack-tailscale.md before restarting anything"
           ${pkgs.coreutils}/bin/echo "$now" > "$STATE_DIR/last-alert"
           ${pkgs.coreutils}/bin/echo "alert sent"
         fi

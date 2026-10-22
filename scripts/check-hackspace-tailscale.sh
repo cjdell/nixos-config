@@ -164,7 +164,7 @@ else
   bad "VM does not answer ping on $VM_IP"
 fi
 
-hdr "3. the VM's tailscale session (the usual culprit)"
+hdr "3. the VM's tailscale session (historically the usual culprit)"
 if vmrun true; then
   backend=$(vmrun 'tailscale status --json' | grep -o '"BackendState": "[A-Za-z]*"' | cut -d'"' -f4)
   case "$backend" in
@@ -180,6 +180,18 @@ if vmrun true; then
              vmrun "journalctl -u tailscaled --no-pager -o short-iso 2>/dev/null | grep -E 'Switching ipn state|active login|node not found|LocalAPI' | tail -3" | sed 's/^/       /'
              ;;
   esac
+  # Is the key even visible in there? A session that cannot re-register because
+  # the secret is unreadable looks identical to a rejected secret, and the two
+  # have opposite fixes. /run/secrets in the guest is a virtiofs share and
+  # virtiofsd only ever serves the directory it opened at VM start, so an empty
+  # share means the host republished it after the VM booted (2026-10-21: this
+  # sat for 3.5 h with the alert blaming a perfectly good reusable key).
+  if [ "$(vmrun 'test -s /run/secrets/leigh_hackspace_tailscale_pre_auth_key && echo present || echo missing')" = present ]; then
+    ok "pre-auth key is readable in the guest (secrets share is live)"
+  else
+    bad "pre-auth key NOT readable in the guest — /run/secrets is empty, i.e. virtiofsd serves a stale directory. The key is fine; 'systemctl restart microvm@$VM' is the fix"
+    note "host-side truth: systemctl status grafton-hackspace-client-secrets; ls -l /run/vm-secrets/$VM"
+  fi
   [ "$(vmrun 'systemctl is-failed tailscaled-autoconnect')" = failed ] \
     && bad "tailscaled-autoconnect.service is failed (it exits on a rejected auth key and is never retried)"
   note "in-VM default route (a tailscale default route + a dead tunnel self-locks the VM):"
@@ -257,10 +269,14 @@ cat <<'EOF'
     route    systemctl restart grafton-hackspace-client-routes
     vm       systemctl status microvm@grafton-hackspace-client
     session  the VM re-joins itself (hackspace-tailscale-ensure, 1 min). If it is
-             still NeedsLogin the pre-auth key is spent/rejected/expired: read the
-             reason above, put a new REUSABLE key in sops
-             (leigh_hackspace_tailscale_pre_auth_key) and rebuild. Restarting the
-             VM is not the fix and costs a fresh node on their headscale.
+             still NeedsLogin the re-join itself is failing, and the unit now says
+             why: 'missing or empty key' means the guest cannot SEE the secret
+             (stale virtiofs share — restart the VM), while a key that is present
+             and rejected means it really is spent/expired: read the reason, put a
+             new REUSABLE key in sops (leigh_hackspace_tailscale_pre_auth_key) and
+             rebuild. Restarting the VM does not spend anything now that the node
+             key lives on tailscale-state.img, but it is only the fix for the
+             first of those two.
     tunnel   the VM is logged in but has no path — check the hackspace side
              (their headscale / DERP) before touching this host.
 EOF

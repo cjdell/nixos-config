@@ -1,8 +1,12 @@
 # The leighhack tailscale bridge (grafton-hackspace-client)
 
-**Status: resolved 2026-10-16.** Outage 2026-10-09 → 2026-10-14 (5 days), then a
-second 3-hour outage on 2026-10-16 caused by the **hackspace's headscale deleting
-our node** — see [2026-10-16: logged out by the control plane](#2026-10-16-logged-out-by-the-control-plane).
+**Status: resolved 2026-10-21.** Three outages: 2026-10-09 → 2026-10-14 (5 days),
+a 3-hour one on 2026-10-16 caused by the **hackspace's headscale deleting our
+node** — see [2026-10-16: logged out by the control plane](#2026-10-16-logged-out-by-the-control-plane)
+— and 3.5 hours on 2026-10-21, where the same server-side deletion happened
+again but the fix that was supposed to cover it **could not read its own auth
+key**, because the VM's secrets share had silently gone empty 27 h earlier. That
+last one was entirely ours: [2026-10-21: the secrets share evaporated](#2026-10-21-the-secrets-share-evaporated-under-a-live-vm).
 Diagnosed and fixed by giving the VM persistent tailscale state, SSH access and
 diagnostic tools, plus a health timer that alerts, and (2026-10-16) an in-guest
 timer that re-joins the tailnet by itself. One dependency stays outside our
@@ -307,15 +311,103 @@ end-to-end 10.3.1.1 replies at ~12:40 BST). Auto-approving the route in their
 ACLs would remove that window too — worth asking for, since re-registrations are
 now automatic and can happen while nobody is watching.
 
+## 2026-10-21: the secrets share evaporated under a live VM
+
+Symptom, for the third time: `BackendState=NeedsLogin`, tunnel dead, VM healthy,
+`*.int.leighhack.org` not resolving. The trigger was identical to 2026-10-16 —
+their headscale answered `404: node not found` at 17:02:30 UTC — but this time
+`hackspace-tailscale-ensure`, the auto-rejoin built for that incident, was
+running on schedule and achieving nothing for **3.5 hours and 110 consecutive
+failing checks**:
+
+```
+leighhack session is 'NeedsLogin' — re-registering with the pre-auth key
+cat: /run/secrets/leigh_hackspace_tailscale_pre_auth_key: No such file or directory
+tailscale up --auth-key "" ... To authenticate, visit:
+        https://tailscale.leighhack.org/register/hskey-authreq-AnqL8...
+<timed out after 2min, SIGTERM, repeat every 2 min forever>
+```
+
+Two independent defects, one per sentence of that log.
+
+### 1. `tailscale up --auth-key ""` does not fail
+
+An empty auth key is not an error: `tailscale` concludes nobody has given it a
+way to authenticate and starts an **interactive login**, printing a register URL
+and blocking. So a missing secret is indistinguishable from a hung login, the
+unit's `TimeoutStartSec` kills it, the timer tries again, and nothing is ever
+said about the actual cause. Fixed in `leighEnsure`: it now checks
+`[ -s "$KEY" ]` and exits 1 naming the secrets share, and after `up` it judges
+the outcome by `BackendState` instead of the exit code (which is 0 even for an
+interactive login that completed nothing).
+
+### 2. Why the key was gone: virtiofsd serves a directory, not a path
+
+The guest's `/run/secrets` is a virtiofs share of the host's
+`/run/secrets-vm`, which the host used to keep pointed at the current sops
+generation with an **activation script** doing `umount` + `mount --bind` (it
+cannot hand virtiofsd the `/run/secrets` symlink directly — its sandbox uses
+`move_mount(..., MOVE_MOUNT_F_EMPTY_PATH)`, which returns EINVAL on a symlink).
+
+**virtiofsd opens `--shared-dir` once, at VM start, and serves that directory
+inode for the life of the process.** Re-mounting over the path on the host does
+not move the guest's view; it *detaches* it. An activation script runs on every
+`nixos-rebuild switch`, so every switch ever made was silently emptying the
+VM's `/run/secrets`. This one did, at 15:06:35 on Oct 20, four minutes after the
+VM had started at 15:02:00:
+
+| | |
+| --- | --- |
+| guest `/run/secrets` inode | 168579720, **0 entries**, still mounted, no error |
+| host `/run/secrets-vm` inode | 168619890, 22 entries |
+| `readlink /proc/<virtiofsd>/cwd` | `/ (deleted)` |
+
+Nothing could notice for 27 hours because the tailscale session was alive on its
+state disk and the key is only read when *registering*. It became visible only
+when their headscale deleted the node — i.e. the second defect was armed by the
+first switch after it was deployed, and fired on the next server-side deletion,
+which is a thing this tailnet does to us at least monthly.
+
+**Fix:** no mount at all. The share is now a plain directory on `/run`'s tmpfs
+(`/run/vm-secrets/grafton-hackspace-client`) and the host *copies the two files
+the VM needs into it* (`systemd.services.grafton-hackspace-client-secrets` + an
+activation script, because a service has no cheap way to know a secret changed:
+`startIfChanged = "${config.system.build.toplevel}"` — the obvious trick — dies
+with `infinite recursion encountered`, since every unit is part of the toplevel).
+Replacing files is fine; only the shared *directory* must never move. The unit is
+wired with `requiredBy`/`before` on `microvm-virtiofsd@grafton-hackspace-client`,
+so even a bare restart of the VM's virtiofsd repopulates the share first. Side
+benefit: the VM used to be handed read access to all 22 host secrets; it now gets
+the pre-auth key and its ssh host key.
+
+**Alerting was actively wrong here.** `hackspace-tunnel-check` said *"the
+pre-auth key may need replacing"* 110 times while the key was fine, reusable and
+untouched — because from the router, "logged out and cannot re-register" has one
+symptom and three causes. It now probes `test -s /run/secrets/<key>` inside the
+VM first and reports a missing key as a stale share, and
+`check-hackspace-tailscale.sh` gained the same check as its own PASS/FAIL line.
+
+**Correction to the advice further down this file:** "restarting the VM is not
+the fix and costs a fresh node on their headscale" was true while state was
+ephemeral and is now wrong twice over. The node key lives on
+`tailscale-state.img`, so a restart does not re-register anything unless the
+session is already gone — and for a stale share, restarting the VM is the *only*
+fix, since virtiofsd cannot be told to re-open its shared directory. It was
+deployed 2026-10-21 21:33 and the tailnet was back in ~60 s, end to end, with no
+one-way window (the node was re-registered while their side already had the
+subnet route enabled for us; do not count on that — see
+[Return path is their decision](#return-path-is-their-decision)).
+
 ## Diagnosing it
 
 ```sh
 sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh
 ```
 
-Reports, per layer: route installed → VM active/answering → **VM has no disk**
-→ VM's `tailscale` BackendState → `10.3.1.1` reachable → coordination server
-reachable → `int.leighhack.org` resolves.
+Reports, per layer: route installed → VM active/answering → VM has tailscale
+state on disk → the VM's `tailscale` BackendState → **whether the guest can read
+the pre-auth key at all** → `10.3.1.1` reachable → coordination server reachable
+→ one-way test → `int.leighhack.org` resolves.
 
 Manual one-liners:
 
@@ -380,9 +472,13 @@ ssh root@192.168.49.15 'systemctl list-timers hackspace-tailscale-ensure; \
 
 Only if the VM is *still* `NeedsLogin` after the timer has run is the key
 involved — that means the re-registration itself is failing. Read the reason
-before touching the key: The
-deployed key **is** reusable (`headscale preauthkeys create --user <u> --reusable
---expiration 0`); if it ever has to be replaced, put the new value in sops as
+before touching the key: since 2026-10-21 `hackspace-tailscale-ensure` exits 1
+and says which half of "the key" it is. **Missing/empty key file** means the
+guest cannot see its secrets share (stale virtiofsd directory) and the fix is
+`systemctl restart microvm@grafton-hackspace-client`; a key that is present and
+rejected is the real expired/spent case. The deployed key **is** reusable
+(`headscale preauthkeys create --user <u> --reusable --expiration 0`); if it
+ever has to be replaced, put the new value in sops as
 `leigh_hackspace_tailscale_pre_auth_key` in
 `hosts/grafton-router/secrets/secrets.yaml` and rebuild — sops needs the file
 committed, see the `.gitignore` gotcha in `AGENTS.md`.
@@ -399,7 +495,9 @@ registered a fresh node key, so there are several dead ones.
 
 ## Related
 
-* `hosts/grafton-router/virtual-machines/grafton-hackspace-client.nix` — the VM
+* `hosts/grafton-router/virtual-machines/grafton-hackspace-client.nix` — the VM,
+  the secrets share (`grafton-hackspace-client-secrets.service`) and
+  `hackspace-tailscale-ensure`
 * `hosts/grafton-router/services/tailscale.nix` — the grafton tailnet + the
   commented-out `nixos-container` version of this same bridge (superseded by the VM)
 * `hosts/grafton-router/services/adguard.nix` — the `int.leighhack.org` DNS forward

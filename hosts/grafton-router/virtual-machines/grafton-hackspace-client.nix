@@ -8,6 +8,34 @@
 let
   constants = import ../constants.nix;
 
+  # The VM's secrets share, and the only host secrets it gets. `vmSecretNames`
+  # must match the guest's references (it reads them at the host's sops paths,
+  # which the guest sees through this share's mountPoint), and the share is a
+  # plain directory for the reasons spelled out on
+  # systemd.services.grafton-hackspace-client-secrets below.
+  vmSecretShare = "/run/vm-secrets/grafton-hackspace-client";
+  vmSecretNames = [
+    "leigh_hackspace_tailscale_pre_auth_key"
+    "vm_host_key"
+  ];
+
+  # The copy, shared by the activation script (refreshes the share on every
+  # switch, including a rotated secret, which keeps its path) and the oneshot
+  # below (guarantees the directory is populated before virtiofsd opens it).
+  # Idempotent, so running both is free.
+  #
+  # Note what this CANNOT be: `startIfChanged = "${config.system.build.toplevel}"`
+  # looks like the tidy way to re-run on every switch and dies with `error:
+  # infinite recursion encountered` — every unit is gathered into the toplevel,
+  # so a service that reads the toplevel to decide whether to run is cyclic. The
+  # activation script has no such problem because it runs unconditionally.
+  publishVmSecrets = ''
+    ${pkgs.coreutils}/bin/mkdir -p ${vmSecretShare}
+    ${lib.concatMapStringsSep "\n" (n: ''
+      ${pkgs.coreutils}/bin/install -m 0400 ${config.sops.secrets.${n}.path} ${vmSecretShare}/${n}
+    '') vmSecretNames}
+  '';
+
   # How we join the leighhack tailnet — single source of truth. nixpkgs'
   # tailscaled-autoconnect (via services.tailscale.extraUpFlags) and the
   # keep-it-joined reconciler below must never disagree, or a re-registration
@@ -50,6 +78,22 @@ let
     TS=${pkgs.tailscale}/bin/tailscale
     KEY=${config.sops.secrets.leigh_hackspace_tailscale_pre_auth_key.path}
 
+    # Read the key BEFORE asking tailscale to use it. `tailscale up --auth-key ""`
+    # does not fail on an empty key: it decides nobody has given it a way to
+    # authenticate and prints an interactive `To authenticate, visit:
+    # https://…/register/hskey-authreq-…` URL, then blocks until TimeoutStartSec
+    # kills it. So a missing secret looks like a hung login, forever, every 2
+    # minutes — which is what turned a deleted node into 3.5 hours of dead tunnel
+    # on 2026-10-21 (the secret was gone because the guest's virtiofs share had
+    # gone empty; see docs/leighhack-tailscale.md).
+    if [ ! -s "$KEY" ]; then
+      echo "FATAL: $KEY is missing or empty — this VM's secrets share is broken, not the key."
+      echo "virtiofsd only resolves the shared directory it opened at VM start, so an empty"
+      echo "share means the host republished it after the VM booted. Recovery from the host:"
+      echo "  systemctl restart microvm@grafton-hackspace-client"
+      exit 1
+    fi
+
     state=$($TS status --peers=false --json 2>/dev/null \
       | ${pkgs.gnugrep}/bin/grep -o '"BackendState": *"[A-Za-z]*"' \
       | ${pkgs.coreutils}/bin/cut -d'"' -f4)
@@ -65,6 +109,15 @@ let
         # pruning this node out of their headscale.
         echo "leighhack session is '$state' — re-registering with the pre-auth key"
         $TS up --auth-key "$(${pkgs.coreutils}/bin/cat "$KEY")" ${lib.escapeShellArgs leighUpFlags}
+        # `tailscale up` returns 0 even when it only started an interactive login,
+        # so judge the outcome by the state, not the exit code.
+        newstate=$($TS status --peers=false --json 2>/dev/null \
+          | ${pkgs.gnugrep}/bin/grep -o '"BackendState": *"[A-Za-z]*"' \
+          | ${pkgs.coreutils}/bin/cut -d'"' -f4)
+        if [ "$newstate" != Running ]; then
+          echo "FATAL: re-registration did not reach Running (got '$newstate') — check 'journalctl -u tailscaled' and whether $KEY is the right key"
+          exit 1
+        fi
         echo "re-registered: tailscale is now $($TS status --peers=false --json 2>/dev/null \
           | ${pkgs.gnugrep}/bin/grep -o '"BackendState": *"[A-Za-z]*"' \
           | ${pkgs.coreutils}/bin/cut -d'"' -f4)"
@@ -85,21 +138,57 @@ in
     allowedBridges = [ "lan" ];
   };
 
-  # sops-nix mounts secret generations under /run/secrets.d and makes
-  # /run/secrets a symlink to the current one. virtiofsd's sandbox bind-mounts
-  # the shared directory with move_mount(..., MOVE_MOUNT_F_EMPTY_PATH), which
-  # refuses a symlink target (EINVAL) -> virtiofsd-secrets crash-loops and the
-  # microVM never starts. Give the VM share a stable real (bind-mounted) path.
-  system.activationScripts.secrets-vm = lib.stringAfter [ "setupSecrets" ] ''
-    target="$(${pkgs.coreutils}/bin/readlink -f /run/secrets)"
-    if [ -n "$target" ] && [ -d "$target" ]; then
-      ${pkgs.coreutils}/bin/mkdir -p /run/secrets-vm
-      if ${pkgs.util-linux}/bin/mountpoint -q /run/secrets-vm; then
-        ${pkgs.util-linux}/bin/umount /run/secrets-vm || true
-      fi
-      ${pkgs.util-linux}/bin/mount --bind "$target" /run/secrets-vm
-    fi
-  '';
+  # This VM's secrets share: copy the two files it needs into a plain directory.
+  #
+  # Do NOT turn this back into a mount. virtiofsd opens `--shared-dir` once, at
+  # VM start, and serves that directory inode for the life of the process: the
+  # shared directory may never be mounted over, replaced or moved while a VM is
+  # running, or the guest keeps staring at the old one. Files inside it may
+  # change freely, because the guest re-resolves paths on every request.
+  #
+  # The previous version of this block bind-mounted the resolved sops generation
+  # dir (virtiofsd's sandbox refuses a symlink target: move_mount with
+  # MOVE_MOUNT_F_EMPTY_PATH returns EINVAL) from an *activation script* — which
+  # runs on every `nixos-rebuild switch`, so every switch umounted the directory
+  # out from under a live virtiofsd and left the guest's /run/secrets permanently
+  # empty. That is the 2026-10-21 outage: the switch at 15:06 yanked the bind
+  # from the VM that had started at 15:02, nothing noticed because the tailscale
+  # session was alive on its state disk, and 27 h later — when the hackspace's
+  # headscale deleted the node and the guest tried to re-register — there was no
+  # auth key to read. `check-hackspace-tailscale.sh` and the alert both blamed
+  # the pre-auth key, which was fine. Post-mortem: docs/leighhack-tailscale.md
+  #
+  # Copying only vmSecretNames is deliberate too: the old bind mount handed a VM
+  # whose entire job is talking to a third party's tailnet read access to every
+  # host secret (22 of them).
+  # Runs the copy on every switch and at boot, before any service starts; the
+  # oneshot service next to it is what puts the same work inside the VM unit's
+  # dependency graph.
+  system.activationScripts.publish-grafton-hackspace-client-secrets = lib.stringAfter [
+    "setupSecrets"
+  ] publishVmSecrets;
+
+  systemd.services.grafton-hackspace-client-secrets = {
+    description = "Publish grafton-hackspace-client's secrets into its virtiofs share";
+    wantedBy = [ "multi-user.target" ];
+
+    # Make the copy part of the VM's own dependency chain rather than something
+    # that merely happens to run earlier in a switch: `requiredBy` pulls this
+    # unit in even for a bare `systemctl restart
+    # microvm-virtiofsd@grafton-hackspace-client`, and `before` guarantees it has
+    # populated the directory before virtiofsd opens it. Ordering alone was never
+    # the point here — the old code was correct at boot and destroyed the share
+    # on the next switch.
+    requiredBy = [ "microvm-virtiofsd@grafton-hackspace-client.service" ];
+    before = [ "microvm-virtiofsd@grafton-hackspace-client.service" ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+
+    script = publishVmSecrets;
+  };
 
   # journalctl -u grafton-hackspace-client-routes -f
   systemd.services.grafton-hackspace-client-routes = {
@@ -222,10 +311,11 @@ in
               proto = "virtiofs";
             }
             {
-              # /run/secrets-vm is the resolved secrets dir, bind-mounted by
-              # the secrets-vm activation script above (see the comment there
-              # for why we can't hand virtiofsd the /run/secrets symlink).
-              source = "/run/secrets-vm";
+              # Populated by systemd.services.grafton-hackspace-client-secrets
+              # (host side) — a plain directory, never a mount, because virtiofsd
+              # keeps the directory inode it opened at VM start. See the comment
+              # on that service before changing anything here.
+              source = vmSecretShare;
               mountPoint = "/run/secrets";
               tag = "secrets";
               proto = "virtiofs";
