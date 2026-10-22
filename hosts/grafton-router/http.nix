@@ -48,6 +48,15 @@ in
       dnsPropagationCheck = true;
       email = "me@chrisdell.info"; # Your email for Let's Encrypt notifications
       # server = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+      # 26.11 lego checks propagation through recursive resolvers first; our
+      # Route53 zones have the default 86400s SOA negative-TTL, so a single
+      # premature lookup (TXT not yet visible, name never existed) pins
+      # NXDOMAIN on some resolver for a day and the order times out.
+      # Checking against the authoritative NSes (like acme-dns-01-cli used to
+      # pre-lego) is cache-free and sufficient: Route53 applies changes across
+      # its NS set in ~2s.
+      extraLegoFlags = [ "--dns.propagation.disable-rns" ];
     };
 
     # Certs stored in /var/lib/acme
