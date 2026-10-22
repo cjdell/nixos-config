@@ -71,6 +71,17 @@ in
           "*.jacksballard.com"
         ];
       };
+
+      # Restored on N100-NAS (hosts/N100-NAS/christcentralpreston.nix) from the
+      # 2026-10-21 web.chrisdell.info backup; zone lives in the same Route53
+      # account as the others above.
+      "christcentralpreston.co.uk" = {
+        environmentFile = route53Creds;
+        group = config.services.nginx.group;
+        extraDomainNames = [
+          "www.christcentralpreston.co.uk"
+        ];
+      };
     };
   };
 
@@ -161,6 +172,25 @@ in
 
           extraConfig = ''
             client_max_body_size 100M;
+          '';
+        };
+      };
+
+      # christcentralpreston.co.uk — Concrete CMS site on N100-NAS
+      # (hosts/N100-NAS/christcentralpreston.nix). The N100 vhost 301s the
+      # bare domain to www and honours X-Forwarded-Proto (set below via
+      # recommendedProxySettings) when talking to PHP-FPM.
+      "christcentralpreston.co.uk" = {
+        useACMEHost = "christcentralpreston.co.uk";
+        forceSSL = true;
+        serverAliases = [ "www.christcentralpreston.co.uk" ];
+
+        locations."/" = {
+          proxyPass = "http://192.168.49.22:80";
+          recommendedProxySettings = true;
+
+          extraConfig = ''
+            client_max_body_size 64M;
           '';
         };
       };
