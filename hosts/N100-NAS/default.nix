@@ -20,6 +20,7 @@
   ./immich-container.nix
   ./jellyfin.nix
   ./monitoring.nix
+  ./mysql.nix
   ./networking.nix
   ./nfs.nix
   ./postgres.nix

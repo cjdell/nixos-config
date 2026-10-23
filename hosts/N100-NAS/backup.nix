@@ -7,6 +7,18 @@
   # sudo systemctl start syncoid-ds-media
   # journalctl -u syncoid-ds-media -f
 
+  # sudo systemctl start syncoid-ds-db-backups
+  # journalctl -u syncoid-ds-db-backups -f
+
+  # SQL dumps from the database services (the immich pg_dump in postgres.nix
+  # and the christcentralpreston mysqldump in christcentralpreston.nix) live on
+  # their own dataset — ds-photos is for photos only — and ride this job to
+  # N40L-NAS alongside ds-media.
+  disko.zfs = {
+    enable = true;
+    settings.datasets."samsung-4tb/ds-db-backups" = { };
+  };
+
   services.syncoid = {
     enable = true;
     interval = "*:35"; # run this less often than sanoid (every hour at 35 mins)
@@ -23,6 +35,14 @@
         sshKey = "/var/lib/syncoid/backup.key";
         source = "samsung-4tb/ds-media";
         target = "backup@n40l-nas.grafton.tailscale:sas-16tb/ds-external-backups/ds-samsung-4tb/ds-media";
+        sendOptions = "w c";
+        extraArgs = [ "--sshoption=StrictHostKeyChecking=off" ];
+      };
+      # SQL dumps dataset (see above); syncoid creates the target dataset.
+      "ds-db-backups" = {
+        sshKey = "/var/lib/syncoid/backup.key";
+        source = "samsung-4tb/ds-db-backups";
+        target = "backup@n40l-nas.grafton.tailscale:sas-16tb/ds-external-backups/ds-samsung-4tb/ds-db-backups";
         sendOptions = "w c";
         extraArgs = [ "--sshoption=StrictHostKeyChecking=off" ];
       };

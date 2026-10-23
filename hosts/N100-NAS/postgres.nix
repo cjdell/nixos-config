@@ -69,11 +69,27 @@ in
     };
   };
 
+  # The module creates its dump location via a tmpfiles rule, but tmpfiles'
+  # safe_path check refuses to operate under this pool root (owned by cjdell —
+  # same reason the mysql dataDir rule never fired), so create it here instead.
+  systemd.services.postgresqlBackup-dirs = {
+    description = "postgresqlBackup: create dump directories";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "postgresqlBackup-immich.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = "install -d -m 0700 -o postgres -g postgres /samsung-4tb/ds-db-backups/postgres";
+  };
+
+  # Dumps go on ds-db-backups (its own dataset, syncoid'd to N40L-NAS — see
+  # backup.nix); ds-photos is for photos only.
   services.postgresqlBackup = {
     enable = true;
     startAt = "*-*-* 01:30:00";
     pgdumpOptions = "--no-owner";
-    location = "/samsung-4tb/ds-photos/postgres";
+    location = "/samsung-4tb/ds-db-backups/postgres";
     databases = [ "immich" ];
   };
 }
