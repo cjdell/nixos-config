@@ -217,6 +217,9 @@ in
         ExecStart = "${fahPackages.fah-client}/bin/fah-client";
         Restart = "always";
         RestartSec = 10;
+        # A startDelay's sleep runs inside ExecStartPre, which the default
+        # 90 s start timeout would otherwise kill before ExecStart.
+        TimeoutStartSec = 300;
         # SIGTERM the client only: it checkpoints work units, then exits.
         # Anything left behind gets the delayed SIGKILL.
         KillMode = "mixed";

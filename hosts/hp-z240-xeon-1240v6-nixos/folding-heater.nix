@@ -101,6 +101,27 @@
 
   systemd.services.fah-client.serviceConfig.CacheDirectory = "fah-client";
 
+  # Hardware power cap for the GTX 970 — NVML accepts -pl on this card
+  # (verified 2026-10-25: "set to 120.00 W from 200.00 W"), so the ceiling
+  # is real, not a duty-cycle like gpuUsage. Caps the CUDA-init spike too,
+  # which gpu-usage cannot reach. 120 W ≈ three quarters boost; it is not
+  # persisted by the driver, so re-apply every boot before fah starts.
+  # Raise/remove together with the gpuUsage derate in the block above.
+  systemd.services.nvidia-power-limit = {
+    description = "Cap GTX 970 power at 120 W (nvidia-smi -pl)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-modules-load.service" ];
+    before = [ "fah-client.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # The modules appear asynchronously; retry until NVML answers.
+      Restart = "on-failure";
+      RestartSec = "5s";
+      ExecStart = "${config.hardware.nvidia.package}/bin/nvidia-smi -pl 120";
+    };
+  };
+
   # A heater never sleeps; logind refuses suspend/hibernate requests
   # (PowerDevil's idle actions included).
   systemd.sleep.settings.Sleep = {
