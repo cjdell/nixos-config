@@ -1,7 +1,8 @@
 # hp-z240-xeon-1240v6-nixos as a folding@home space heater — CPU AND GPU.
+# (Currently deliberately DERATED — see the ⚠️ block in the config below.)
 #
 # CPU: the Xeon E3-1240 v6 is 4 Kaby Lake cores / 8 threads with AVX2
-# (80 W TDP); the client folds on all eight.
+# (80 W TDP).
 #
 # GPU: the GeForce GTX 970 (GM204/Maxwell, CC 5.2) folds through the
 # NVIDIA driver's own OpenCL ICD — the same ocl-icd mechanism the AMD
@@ -44,7 +45,21 @@
     enable = true;
     userName = "cjdell";
     teamNumber = 236565;
-    cpus = 8; # the whole E3-1240 v6, nothing reserved
+    # ⚠️ Throttled (was cpus = 8, full GPU) after 2026-10-25: with folding
+    # enabled the box HARD-RESETS ~2 s after the client spins up its slots
+    # during boot (journal ends at +20 s with no MCE/panic, three boots in
+    # a row; a boot without folding survives, and once up it folded
+    # full-tilt for 9.5 min without complaint). Load-step brownout (SATA ->
+    # PCIe powered 145 W GTX 970 on the SFF PSU) and Tjmax trip (package
+    # sits at 99-100 C under FAH) are the two suspects — see AGENTS.md row.
+    # The mitigation set, in order of effect: fewer CPU slots (biggest boot
+    # spike), GPU at 50 % duty, and start folding only after boot has
+    # settled. Raise back toward cpus = 8 / no gpuUsage once the power
+    # adapter is swapped for Molex and the cooler is sorted — and only test
+    # one step at a time across a few reboots before trusting it.
+    cpus = 4;
+    gpuUsage = 50;
+    startDelay = "90";
     httpAddresses = [ "0.0.0.0:7396" ];
     allowAddresses = [
       "127.0.0.1" # loopback — fah-provision and local fahctl connect here

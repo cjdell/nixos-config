@@ -56,6 +56,7 @@ let
         <allow>${lib.escapeXML (lib.concatStringsSep " " cfg.allowAddresses)}</allow>
     ''
     + lib.optionalString (cfg.cpus != null) "    <cpus>${toString cfg.cpus}</cpus>\n"
+    + lib.optionalString (cfg.gpuUsage != null) "    <gpu-usage>${toString cfg.gpuUsage}</gpu-usage>\n"
     + lib.optionalString (cfg.accountTokenFile != null) ''
       <account-token>@ACCOUNT_TOKEN@</account-token>
     ''
@@ -111,6 +112,32 @@ in
         Number of CPU threads to fold on. The client default reserves one
         core for the system; set it to the full thread count for a machine
         that exists to make heat.
+      '';
+    };
+
+    gpuUsage = lib.mkOption {
+      type = with lib.types; nullOr (ints.between 0 100);
+      default = null;
+      example = 50;
+      description = ''
+        Percent of the time the GPU slot folds (v8 "GPU usage" setting;
+        multiples of 25 are what the GUI offers). The core interleaves
+        idle windows, so it is a duty-cycle throttle on GPU wattage and
+        heat — the only power knob a GeForce card without NVML power
+        limits has. Null = the client default (100 %).
+      '';
+    };
+
+    startDelay = lib.mkOption {
+      type = with lib.types; nullOr str;
+      default = null;
+      example = "90";
+      description = ''
+        Shell sleep expression to wait before ExecStart, so the load step
+        of spinning up every slot does not collide with the rest of boot
+        (useful on boxes with marginal power supplies, where the combined
+        inrush trips a brownout reset). Null = start as soon as systemd
+        can.
       '';
     };
 
@@ -183,7 +210,9 @@ in
         ];
         StateDirectory = "fah-client";
         WorkingDirectory = "/var/lib/fah-client";
-        ExecStartPre = "+${installConfig}";
+        ExecStartPre =
+          [ "+${installConfig}" ]
+          ++ lib.optionals (cfg.startDelay != null) [ "+${pkgs.bash}/bin/bash -c 'sleep ${cfg.startDelay}'" ];
         # --config defaults to ./config.xml, which the ExecStartPre just wrote.
         ExecStart = "${fahPackages.fah-client}/bin/fah-client";
         Restart = "always";
