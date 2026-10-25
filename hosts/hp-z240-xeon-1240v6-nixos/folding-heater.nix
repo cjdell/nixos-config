@@ -42,6 +42,20 @@
   imports = [ ../../common/folding-at-home-native.nix ];
 
   services.folding-at-home-native = {
+    # ⚠️ HISTORY (2026-10-25): this box HARD-RESETS at folding's spin-up
+    # load step — three brownouts, one confirmed at +121 s (startDelay 90
+    # + core ramp) with the derated config. Key finding after the last one:
+    # nvidia-power-limit below pointed at the driver's DEFAULT output,
+    # which has no nvidia-smi (systemd status 203/EXEC), so every fah start
+    # so far ran the GPU at its 200 W default — the "derate" was only ever
+    # half-active. With the cap path fixed (120 W from boot, before fah),
+    # folding is re-enabled by operator decision at 17:5x. If it trips
+    # again: SATA->PCIe adapter -> Molex first, then treat the PSU as
+    # insufficient (a 240 W SFF unit has no margin for ~200 W transients)
+    # or set enable = false for a CPU-only heater.
+    # NOTE: on NixOS the enable state lives in the generated config, NOT in
+    # `systemctl disable` — /etc/systemd/system is a read-only symlink farm,
+    # so disable fails with EROFS and the unit comes back every boot.
     enable = true;
     userName = "cjdell";
     teamNumber = 236565;
@@ -85,7 +99,7 @@
 
   # Swap the module's ROCm OpenCL ICD (useless here — no AMD GPU) for the
   # NVIDIA driver's, and give the core the driver's own libraries.
-  systemd.services.fah-client.environment = {
+  systemd.services.fah-client.environment = lib.mkIf config.services.folding-at-home-native.enable {
     OCL_ICD_VENDORS = lib.mkForce "${config.hardware.nvidia.package}/etc/OpenCL/vendors";
     LD_LIBRARY_PATH = lib.mkForce (
       lib.makeLibraryPath [
@@ -127,7 +141,7 @@
       # The modules appear asynchronously; retry until NVML answers.
       Restart = "on-failure";
       RestartSec = "5s";
-      ExecStart = "${config.hardware.nvidia.package}/bin/nvidia-smi -pl 120";
+      ExecStart = "${config.hardware.nvidia.package.bin}/bin/nvidia-smi -pl 120";
     };
   };
 
@@ -161,7 +175,7 @@
         # the DC estimate is the closest software proxy (a multimeter or
         # an INA226 inline monitor on the GPU adapter line is the real
         # instrument).
-        ExecStart = "${panel}/bin/fah-panel --listen 0.0.0.0:7397 --nvidia-smi ${config.hardware.nvidia.package}/bin/nvidia-smi --budget 180";
+        ExecStart = "${panel}/bin/fah-panel --listen 0.0.0.0:7397 --nvidia-smi ${config.hardware.nvidia.package.bin}/bin/nvidia-smi --budget 180";
         Restart = "always";
         RestartSec = 5;
       };
