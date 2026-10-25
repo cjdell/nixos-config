@@ -7,6 +7,8 @@ const fmt = (v, unit, digits = 0) =>
 const hist = { util: [], power: [], temp: [], total: [] };
 let capRange = null; // [min, max] or null
 let budget = 0; // W; 0 = off (from --budget via /api/snapshot control)
+let cpuMaxGhz = null; // boost ceiling from static cpu info
+let ramSpeed = ""; // SMBIOS RAM bus speed from control
 
 function setPill(text, cls) {
   const p = $("status");
@@ -57,8 +59,15 @@ function renderSample(s) {
   t.className = `value ${tempClass(s.temp)}`;
   $("vram").textContent = s.mem_total ? `${fmt(s.mem_used, "")} MiB` : "–";
   $("vram-foot").textContent = s.mem_total ? `of ${fmt(s.mem_total / 1024, " GiB", 1)}` : "";
-  $("clocks").textContent = fmt(s.clock_gpu, " MHz");
-  $("clocks-foot").textContent = `mem ${fmt(s.clock_mem, " MHz")}`;
+  $("clk-gpu").textContent = fmt(s.clock_gpu, " MHz");
+  $("clk-gpu-foot").textContent = s.clock_gpu_max ? `max ${fmt(s.clock_gpu_max, " MHz")}` : "";
+  $("clk-vram").textContent = fmt(s.clock_mem, " MHz");
+  $("clk-vram-foot").textContent = s.clock_mem_max ? `max ${fmt(s.clock_mem_max, " MHz")}` : "";
+  $("clk-cpu").textContent = fmt(s.cpu_clk_max, " GHz", 2);
+  $("clk-cpu-foot").textContent =
+    `avg ${fmt(s.cpu_clk_avg, " GHz", 2)}` +
+    (cpuMaxGhz ? ` · boost ≤ ${fmt(cpuMaxGhz, " GHz", 2)}` : "");
+  $("clk-ram").textContent = ramSpeed || "–";
   $("fan").textContent = s.fan == null ? "auto" : fmt(s.fan, " %");
   const th = (s.throttle || []).filter((n) => n !== "gpu-idle");
   $("pstate-foot").textContent =
@@ -111,6 +120,7 @@ function setCapControls(ctl) {
 function renderCtl(ctl) {
   $("gpu-name").textContent = `${ctl.gpu} · driver ${ctl.driver}`;
   budget = ctl.budget || 0;
+  if (ctl.ram) ramSpeed = ctl.ram;
   setPill(ctl.ok ? "live" : "no data", ctl.ok ? "ok" : "bad");
   if (!sliderDragging) setCapControls(ctl);
 }
@@ -139,6 +149,7 @@ $("fah-link").href = `${location.protocol}//${location.hostname}:7396/`;
   try {
     const j = await (await fetch("/api/snapshot")).json();
     renderCtl(j.control);
+    cpuMaxGhz = j.cpu && j.cpu.max_ghz ? j.cpu.max_ghz : null;
     (j.history || []).forEach((s) => {
       hist.util.push(s.util ?? 0); hist.power.push(s.power ?? 0);
       hist.temp.push(s.temp ?? 0); hist.total.push(s.total ?? 0);

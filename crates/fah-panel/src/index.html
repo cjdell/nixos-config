@@ -21,7 +21,15 @@
     <div class="card"><div class="label">GPU power</div><div class="value" id="power">–</div><canvas id="spark-power"></canvas></div>
     <div class="card"><div class="label">GPU temp</div><div class="value" id="temp">–</div><canvas id="spark-temp"></canvas></div>
     <div class="card"><div class="label">VRAM</div><div class="value" id="vram">–</div><div class="foot" id="vram-foot"></div></div>
-    <div class="card"><div class="label">Clocks</div><div class="value" id="clocks">–</div><div class="foot" id="clocks-foot"></div></div>
+    <div class="card wide" id="clocks-card">
+      <div class="label">Clocks</div>
+      <div class="kv-grid">
+        <div><div class="label">GPU core</div><div class="value small" id="clk-gpu">–</div><div class="foot" id="clk-gpu-foot"></div></div>
+        <div><div class="label">GPU VRAM</div><div class="value small" id="clk-vram">–</div><div class="foot" id="clk-vram-foot"></div></div>
+        <div><div class="label">CPU (per-core)</div><div class="value small" id="clk-cpu">–</div><div class="foot" id="clk-cpu-foot"></div></div>
+        <div><div class="label">RAM bus</div><div class="value small" id="clk-ram">–</div><div class="foot" id="clk-ram-foot">from SMBIOS at startup</div></div>
+      </div>
+    </div>
     <div class="card"><div class="label">Fan</div><div class="value" id="fan">–</div><div class="foot" id="pstate-foot"></div></div>
     <div class="card cpu"><div class="label">CPU</div><div class="value" id="cpu-temp">–</div><div class="foot" id="cpu-foot"></div></div>
     <div class="card cpu"><div class="label">CPU power / clocks</div><div class="value" id="cpu-power">–</div><div class="foot" id="cpu-clk-foot"></div></div>

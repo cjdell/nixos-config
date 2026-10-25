@@ -32,6 +32,12 @@ main { padding: 10px 22px 28px; max-width: 1060px; margin: 0 auto; }
 }
 .card.cpu { border-color: #26324a; }
 .card.wide { grid-column: 1 / -1; }
+.kv-grid {
+  display: grid; gap: 10px 18px; margin-top: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.kv-grid .label { font-size: 11px; }
+.kv-grid .value { margin: 1px 0 0; }
 .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
 .value { font-size: 26px; font-weight: 600; margin: 2px 0 4px; font-variant-numeric: tabular-nums; }
 .value.small { font-size: 16px; }

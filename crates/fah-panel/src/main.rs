@@ -115,7 +115,7 @@ fn nvidia_smi(bin: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-const POLL_FIELDS: &str = "utilization.gpu,memory.used,memory.total,temperature.gpu,fan.speed,power.draw,power.limit,clocks.current.graphics,clocks.current.memory,pstate,clocks_throttle_reasons.active";
+const POLL_FIELDS: &str = "utilization.gpu,memory.used,memory.total,temperature.gpu,fan.speed,power.draw,power.limit,clocks.current.graphics,clocks.current.memory,pstate,clocks_throttle_reasons.active,clocks.max.graphics,clocks.max.memory";
 const POLL_QUERY: &str = "--format=csv,noheader,nounits";
 
 /// clocks_throttle_reasons.active is a bitmask; the names are what a user
@@ -149,6 +149,8 @@ struct Sample {
     power_limit: f64,
     clock_gpu: f64,
     clock_mem: f64,
+    clock_gpu_max: f64,
+    clock_mem_max: f64,
     pstate: String,
     throttle: Vec<&'static str>,
     /// CPU package (RAPL) + GPU board power (NVML) = what the +12 V rail is
@@ -167,6 +169,7 @@ impl Sample {
         format!(
             "{{\"ts\":{},\"util\":{},\"mem_used\":{},\"mem_total\":{},\"temp\":{},\
              \"fan\":{},\"power\":{},\"power_limit\":{},\"clock_gpu\":{},\"clock_mem\":{},\
+             \"clock_gpu_max\":{},\"clock_mem_max\":{},\
              \"pstate\":\"{}\",\"throttle\":[{}],\"cpu_temp\":{},\"cpu_power\":{},\"total\":{},\
              \"ok\":{},\"error\":\"{}\"}}",
             self.ts,
@@ -179,6 +182,8 @@ impl Sample {
             fnum(self.power_limit),
             fnum(self.clock_gpu),
             fnum(self.clock_mem),
+            fnum_pos(self.clock_gpu_max),
+            fnum_pos(self.clock_mem_max),
             json_escape(&self.pstate),
             self.throttle.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(","),
             fnum_pos(self.cpu_temp),
@@ -197,7 +202,7 @@ fn take_sample(bin: &str) -> Sample {
             // One line (first GPU wins); fields as above.
             let line = out.lines().next().unwrap_or("").to_string();
             let f: Vec<&str> = line.split(',').map(|c| c.trim()).collect();
-            if f.len() < 11 {
+            if f.len() < 13 {
                 s.error = format!("unexpected nvidia-smi output: {line}");
                 return s;
             }
@@ -214,12 +219,58 @@ fn take_sample(bin: &str) -> Sample {
             s.throttle = throttle_names(
                 u64::from_str_radix(f[10].trim().trim_start_matches("0x"), 16).unwrap_or(0),
             );
+            s.clock_gpu_max = csv_f64(f[11]);
+            s.clock_mem_max = csv_f64(f[12]);
             s.ok = true;
         }
         Err(e) => s.error = e,
     }
     s.ts = now_ms();
     s
+}
+
+/// SMBIOS-configured memory bus speed (e.g. "2400 MT/s"), read once at
+/// startup — it never changes live. Needs root (the service runs as root);
+/// dmidecode 3.x says "Configured Memory Speed", older builds say
+/// "Configured Clock Speed". Empty string when unknown/no dmidecode given.
+fn ram_speed(dmi: &str) -> String {
+    if dmi.is_empty() {
+        return String::new();
+    }
+    let collect = |args: &[&str], speeds: &mut Vec<String>| {
+        let Ok(out) = Command::new(dmi)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+        else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let t = line.trim();
+            let Some(v) = t
+                .strip_prefix("Configured Memory Speed:")
+                .or_else(|| t.strip_prefix("Configured Clock Speed:"))
+            else {
+                continue;
+            };
+            let v = v.trim().to_string();
+            if v.is_empty() || v.starts_with("Unknown") {
+                continue;
+            }
+            if !speeds.contains(&v) {
+                speeds.push(v);
+            }
+        }
+    };
+    // Type 17 (memory devices) carries per-DIMM configured speed; type 12
+    // (system memory) is the board-level answer but does not exist in the
+    // SMBIOS 2.7 tables of boards like this one. Collect both, in order.
+    let mut speeds: Vec<String> = Vec::new();
+    collect(&["-t", "memory"], &mut speeds);
+    if speeds.is_empty() {
+        collect(&["-t", "12"], &mut speeds);
+    }
+    speeds.join(" / ")
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +467,8 @@ struct Shared {
     cap_max: f64,
     /// Estimated DC-load budget in watts for the UI to flag against; 0 = off.
     budget: f64,
+    /// SMBIOS RAM bus speed (static), empty = unknown.
+    ram: String,
     seq: AtomicU64,
     cur: Mutex<String>,
     history: Mutex<VecDeque<String>>,
@@ -433,7 +486,7 @@ impl Shared {
         }
         format!(
             "{{\"ok\":{},\"cap\":{},\"cap_min\":{},\"cap_max\":{},\"budget\":{},\
-             \"gpu\":\"{}\",\"driver\":\"{}\"}}",
+             \"gpu\":\"{}\",\"driver\":\"{}\",\"ram\":\"{}\"}}",
             cur.contains("\"ok\":true"),
             fnum(cap),
             fnum(self.cap_min),
@@ -441,6 +494,7 @@ impl Shared {
             fnum(self.budget),
             json_escape(&self.gpu_name),
             json_escape(&self.driver),
+            json_escape(&self.ram),
         )
     }
 }
@@ -612,11 +666,12 @@ fn main() {
     let mut smi = String::new();
     let mut interval_ms: u64 = 2000;
     let mut budget: f64 = 0.0;
+    let mut dmi = String::new();
 
     let mut i = 1;
     while i < args.len() {
         let flag = args[i].clone();
-        if flag == "--listen" || flag == "--nvidia-smi" || flag == "--interval" || flag == "--budget" {
+        if flag == "--listen" || flag == "--nvidia-smi" || flag == "--interval" || flag == "--budget" || flag == "--dmidecode" {
             i += 1;
             let v = args.get(i).cloned().unwrap_or_default();
             match flag.as_str() {
@@ -624,15 +679,17 @@ fn main() {
                 "--nvidia-smi" => smi = v,
                 "--interval" => interval_ms = v.parse().unwrap_or(2000).clamp(500, 60_000),
                 "--budget" => budget = v.parse().unwrap_or(0.0),
+                "--dmidecode" => dmi = v,
                 _ => unreachable!(),
             }
         } else if flag == "--help" || flag == "-h" {
             println!(
                 "usage: fah-panel [--listen ADDR:PORT] --nvidia-smi PATH [--interval MS]\n\
-                 [--budget W]\n\
+                 [--budget W] [--dmidecode PATH]\n\
                  The power cap is live state: whatever nvidia-smi reports is truth, and\n\
                  a boot-time systemd unit (not this panel) owns setting it at startup.\n\
-                 --budget flags the CPU+GPU DC-load estimate above W (brownout margin)."
+                 --budget flags the CPU+GPU DC-load estimate above W (brownout margin);\n\
+                 --dmidecode reads the SMBIOS RAM bus speed once at startup (root)."
             );
             return;
         } else {
@@ -679,12 +736,17 @@ fn main() {
         cap_min,
         cap_max,
         budget,
+        ram: ram_speed(&dmi),
         seq: AtomicU64::new(0),
         cur: Mutex::new(Sample::default().to_json()),
         history: Mutex::new(VecDeque::with_capacity(601)),
         cpu_info: cpu_info_json(&cpu),
     });
-    log(&format!("fah-panel: gpu={gpu_name} caps=({cap_min},{cap_max}) listen={listen} cpu={} threads={}", cpu.cur_freq.len(), cpu.cur_freq.len()));
+    log(&format!(
+        "fah-panel: gpu={gpu_name} caps=({cap_min},{cap_max}) ram=\"{}\" listen={listen} cpu_threads={}",
+        sh.ram,
+        cpu.cur_freq.len()
+    ));
 
     // Sampler: nvidia-smi poll + CPU sysfs; the CPU numbers ride along in a
     // side JSON so the stream carries everything one sample needs.

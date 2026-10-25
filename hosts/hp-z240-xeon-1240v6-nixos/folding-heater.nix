@@ -42,17 +42,26 @@
   imports = [ ../../common/folding-at-home-native.nix ];
 
   services.folding-at-home-native = {
-    # ⚠️ HISTORY (2026-10-25): this box HARD-RESETS at folding's spin-up
-    # load step — three brownouts, one confirmed at +121 s (startDelay 90
-    # + core ramp) with the derated config. Key finding after the last one:
-    # nvidia-power-limit below pointed at the driver's DEFAULT output,
-    # which has no nvidia-smi (systemd status 203/EXEC), so every fah start
-    # so far ran the GPU at its 200 W default — the "derate" was only ever
-    # half-active. With the cap path fixed (120 W from boot, before fah),
-    # folding is re-enabled by operator decision at 17:5x. If it trips
-    # again: SATA->PCIe adapter -> Molex first, then treat the PSU as
-    # insufficient (a 240 W SFF unit has no margin for ~200 W transients)
-    # or set enable = false for a CPU-only heater.
+    # ⚠️ HISTORY (2026-10-25): this box HARD-RESETS under folding load.
+    # Failure 1-3: at spin-up (+90..121 s). Root fix: the power cap had been
+    # failing 203/EXEC since day one (wrong driver output path), so every
+    # fah start ran the GPU at its 200 W default. With a REAL 120 W ceiling
+    # the spin-up survived — but failure 4 came 7 min into folding, 38 s
+    # after a WU step boundary (GPU at 111-120 W, 87-98 % util), i.e. the
+    # later transients also exceed what the 240 W SFF PSU / SATA->PCIe
+    # adapter can hold. Operator dropped the cap to 100 W on the panel at
+    # 18:00; the nvidia-power-limit unit below now encodes 100 W. Testing
+    # that at the time of writing.
+    # NOTE: config.xml only SEEDS the client — its SQLite DB keeps prior
+    # settings, and this client was first started with cpus=8. Observed
+    # after re-deploy: FahCore_a8 still runs -np 7 and the 50 % gpu duty
+    # cycle is not applied; the cpus/gpuUsage below take effect only after
+    # the DB forgets (Web Control / fahctl change it live, or wipe
+    # /var/lib/fah-client/db.sql.fah + state). It survived anyway, so the
+    # values are kept as the intended re-seed; the 120 W cap is the lever
+    # that actually holds. If it trips again: Molex adapter first, then
+    # treat the 240 W SFF PSU as insufficient (or enable = false for a
+    # CPU-only heater).
     # NOTE: on NixOS the enable state lives in the generated config, NOT in
     # `systemctl disable` — /etc/systemd/system is a read-only symlink farm,
     # so disable fails with EROFS and the unit comes back every boot.
@@ -121,17 +130,18 @@
   # Hardware power cap for the GTX 970 — NVML accepts -pl on this card
   # (verified 2026-10-25: "set to 120.00 W from 200.00 W"), so the ceiling
   # is real, not a duty-cycle like gpuUsage. Caps the CUDA-init spike too,
-  # which gpu-usage cannot reach. 120 W ≈ three quarters boost; it is not
-  # persisted by the driver, so re-apply every boot before fah starts.
-  # Raise/remove together with the gpuUsage derate in the block above.
-  # Hardware power cap for the GTX 970 — NVML accepts -pl on this card
-  # (verified 2026-10-25: "set to 120.00 W from 200.00 W"), so the ceiling
-  # is real, not a duty-cycle like gpuUsage. Caps the CUDA-init spike too,
-  # which gpu-usage cannot reach. 120 W ≈ three quarters boost; it is not
-  # persisted by the driver, so re-apply every boot before fah starts.
-  # Raise/remove together with the gpuUsage derate in the block above.
+  # which gpu-usage cannot reach. It is not persisted by the driver, so
+  # re-apply every boot before fah starts.
+  # 100 W (was 120) since 2026-10-25 18:00: at a REAL 120 W cap the spin-up
+  # survived but the box still hard-reset ~7 min into folding, 38 s after a
+  # WU step boundary (journal: "Completed 700000/5000000 steps" then dead)
+  # — i.e. the later transients, not just the boot ramp, exceed the 240 W
+  # SFF PSU (or the SATA->PCIe adapter sags under sustained ~10 A). The
+  # operator set 100 W on the panel slider; this unit encodes it so the
+  # choice survives reboots. Escalation if it still trips: Molex adapter
+  # swap first, then the PSU is the diagnosis.
   systemd.services.nvidia-power-limit = {
-    description = "Cap GTX 970 power at 120 W (nvidia-smi -pl)";
+    description = "Cap GTX 970 power at 100 W (nvidia-smi -pl)";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-modules-load.service" ];
     before = [ "fah-client.service" ];
@@ -141,7 +151,7 @@
       # The modules appear asynchronously; retry until NVML answers.
       Restart = "on-failure";
       RestartSec = "5s";
-      ExecStart = "${config.hardware.nvidia.package.bin}/bin/nvidia-smi -pl 120";
+      ExecStart = "${config.hardware.nvidia.package.bin}/bin/nvidia-smi -pl 100";
     };
   };
 
@@ -163,7 +173,10 @@
     {
       description = "Folding heater telemetry panel (GTX 970 + CPU)";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" "nvidia-power-limit.service" ];
+      after = [
+        "network.target"
+        "nvidia-power-limit.service"
+      ];
       serviceConfig = {
         # Runs as root: RAPL energy_uj is mode 0400 and the panel's
         # nvidia-smi -pl control needs root too. --budget 180 W flags the
@@ -175,7 +188,7 @@
         # the DC estimate is the closest software proxy (a multimeter or
         # an INA226 inline monitor on the GPU adapter line is the real
         # instrument).
-        ExecStart = "${panel}/bin/fah-panel --listen 0.0.0.0:7397 --nvidia-smi ${config.hardware.nvidia.package.bin}/bin/nvidia-smi --budget 180";
+        ExecStart = "${panel}/bin/fah-panel --listen 0.0.0.0:7397 --nvidia-smi ${config.hardware.nvidia.package.bin}/bin/nvidia-smi --dmidecode ${pkgs.dmidecode}/bin/dmidecode --budget 180";
         Restart = "always";
         RestartSec = 5;
       };
