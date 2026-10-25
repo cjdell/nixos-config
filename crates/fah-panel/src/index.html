@@ -44,12 +44,20 @@
       <button id="cap-apply">apply</button>
     </div>
     <div class="foot" id="cap-foot"></div>
+    <div class="label ctl-gap">CPU max temperature (auto-throttle)</div>
+    <div id="cpu-row">
+      <input type="range" id="cpu-slider" min="0" max="100" step="1">
+      <span id="cpu-value" class="value small">–</span>
+      <button id="cpu-apply">apply</button>
+    </div>
+    <div class="foot" id="cpu-ctl-foot"></div>
   </section>
 
   <section class="card" id="about">
     <div class="foot">folding@home: <a id="fah-link" href="#" target="_blank" rel="noopener">web control</a>
       · donors <code>cjdell</code> team <code>236565</code>
-      · the startup cap lives in the host's boot-time systemd unit; this slider only changes the live setting</div>
+      · the startup cap lives in the host's boot-time systemd unit; both sliders only change live state —
+      a panel restart releases any CPU ceiling it set</div>
   </section>
 </main>
 

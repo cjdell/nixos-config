@@ -81,7 +81,8 @@ function renderSample(s) {
   $("cpu-foot").textContent = s.cpu_hot != null ? `hottest core ${fmt(s.cpu_hot, " °C")}` : "";
   $("cpu-power").textContent = fmt(s.cpu_power, " W", 1);
   $("cpu-clk-foot").textContent =
-    `avg ${fmt(s.cpu_clk_avg, " GHz", 2)} · max ${fmt(s.cpu_clk_max, " GHz", 2)}`;
+    `avg ${fmt(s.cpu_clk_avg, " GHz", 2)} · max ${fmt(s.cpu_clk_max, " GHz", 2)}` +
+    (s.cpu_cap ? ` · ceiling ${fmt(s.cpu_cap, " GHz", 2)}` : "");
   const tot = $("total");
   tot.textContent = fmt(s.total, " W", 1);
   const over = budget > 0 && s.total >= budget;
@@ -128,6 +129,23 @@ function renderCtl(ctl) {
   if (ctl.ram) ramSpeed = ctl.ram;
   setPill(ctl.ok ? "live" : "no data", ctl.ok ? "ok" : "bad");
   if (!sliderDragging) setCapControls(ctl);
+  if (!cpuDragging) setCpuControls(ctl);
+}
+
+function setCpuControls(ctl) {
+  const slider = $("cpu-slider"), btn = $("cpu-apply");
+  if (!ctl.cpu_throttle) {
+    slider.disabled = btn.disabled = true;
+    $("cpu-value").textContent = "–";
+    $("cpu-ctl-foot").textContent = "no writable cpufreq interface on this host";
+    return;
+  }
+  slider.disabled = btn.disabled = false;
+  slider.value = Math.round(ctl.cpu_target || 0);
+  $("cpu-value").textContent = ctl.cpu_target > 0 ? `${Math.round(ctl.cpu_target)} °C` : "off";
+  $("cpu-ctl-foot").textContent =
+    `ceiling ${ctl.cpu_min_ghz.toFixed(2)}–${ctl.cpu_max_ghz.toFixed(2)} GHz · ` +
+    (ctl.cpu_cap ? `currently throttled to ≤ ${ctl.cpu_cap.toFixed(2)} GHz` : "currently no limit");
 }
 
 let sliderDragging = false;
@@ -145,6 +163,25 @@ $("cap-apply").addEventListener("click", async () => {
   const j = await r.json();
   $("cap-foot").textContent = j.ok ? j.message : `error: ${j.error}`;
   if (j.ok) { setCapControls(j.control); }
+});
+
+let cpuDragging = false;
+$("cpu-slider").addEventListener("input", () => {
+  const v = Number($("cpu-slider").value);
+  $("cpu-value").textContent = v === 0 ? "off" : `${v} °C`;
+  cpuDragging = true;
+});
+$("cpu-slider").addEventListener("change", () => { cpuDragging = false; });
+$("cpu-apply").addEventListener("click", async () => {
+  let v = Number($("cpu-slider").value);
+  if (v > 0 && v < 40) { v = 40; $("cpu-slider").value = 40; } // 0 or >= 40 °C
+  const r = await fetch("/api/cpu-target", {
+    method: "POST",
+    body: JSON.stringify({ target: v }),
+  });
+  const j = await r.json();
+  $("cpu-ctl-foot").textContent = j.ok ? j.message : `error: ${j.error}`;
+  if (j.ok) { setCpuControls(j.control); }
 });
 
 $("fah-link").href = `${location.protocol}//${location.hostname}:7396/`;

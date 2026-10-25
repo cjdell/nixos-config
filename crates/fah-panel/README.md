@@ -67,10 +67,28 @@ browser ──HTTP/SSE──> fah-panel ─┬─ nvidia: nvidia-smi --query-gpu
 | GET | `/api/stream` | SSE, one JSON sample per tick (2 s default) |
 | GET | `/api/health` | liveness + backend/gpu/driver/cap-range info |
 | POST | `/api/power` | `{"cap": 120}` — range-checked against the backend's cap min/max |
+| POST | `/api/cpu-target` | `{"target": 75}` — CPU max-temperature slider; `0` = off |
 
 `control` in the snapshot/health responses carries `backend` (`nvidia` /
 `amd`), `gpu`, `driver`, `host`, `ram`, `cap`, `cap_min`/`cap_max`,
-`cap_default` (0/absent → omitted by the UI) and `budget`.
+`cap_default` (0/absent → omitted by the UI), `budget`, and the CPU
+auto-throttle state: `cpu_throttle` (a writable `scaling_max_freq` exists),
+`cpu_target`, the applied `cpu_cap` (GHz, null = no limit) and its
+`cpu_min_ghz`/`cpu_max_ghz` bounds.
+
+## CPU max-temperature auto-throttle
+
+The CPU sibling of the GPU cap slider: set a target temperature and the
+sampler proportionally walks every cpufreq `scaling_max_freq` ceiling
+(k10temp `Tctl` / coretemp `Package` as the sensor) — 12 MHz per °C of
+error, clamped to ±40 MHz per 2 s tick and a ±0.5 °C deadband, between
+`cpuinfo_min_freq` and `cpuinfo_max_freq`. Below the target the ceiling
+drifts back up on its own. Like the GPU cap it is **live state only**, and a
+panel start releases any ceiling from a previous run, so a stuck cap cannot
+outlive the process. (The kernel's own thermal shutdown at ~105 °C stays the
+last line of defence; this is about keeping the chip and its neighbours
+cooler — on the hp-z240 it doubles as a brownout knob, since it is the CPU
+half of the +12 V load.)
 
 ## Deployment
 

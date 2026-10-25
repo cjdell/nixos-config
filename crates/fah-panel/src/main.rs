@@ -32,7 +32,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -850,6 +850,106 @@ fn cpu_info_json(cpu: &Cpu) -> String {
     )
 }
 
+// --- CPU max-temperature auto-throttle (the CPU-side sibling of the cap slider)
+//
+// A target temperature plus a proportional loop in the sampler: the loop
+// walks every cpufreq `scaling_max_freq` ceiling down when the package sensor
+// is above the target and lets it drift back to `cpuinfo_max_freq` below it
+// (deadband ±0.5 °C, gain 12 MHz/°C, max 40 MHz per tick so a hot chip ramps
+// down over ~1 min, not in one jump). On kernels ≥6.9 `policy*/` devices
+// exist for every driver — one policy per logical core is normal here
+// (amd-pstate-epp on zen3, acpi-cpufreq on zen1, intel_pstate on the z240),
+// so every file gets the same ceiling; on older kernels fall back to the
+// per-core files. The panel is the single writer, live state only: at startup
+// it releases any ceiling left by a previous run, and target → off restores
+// the ceiling immediately. (The kernel's own k10temp/coretemp shutdown at
+// ~105 °C stays the last line of defence; this slider is about keeping the
+// chip — and the PSU next to it — below a chosen temperature.)
+
+struct CpuThrottle {
+    files: Vec<String>,
+    min_khz: u64,
+    max_khz: u64,
+}
+
+fn detect_cpu_throttle() -> CpuThrottle {
+    let mut files = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu/cpufreq") {
+        for e in rd.flatten() {
+            let f = format!(
+                "/sys/devices/system/cpu/cpufreq/{}/scaling_max_freq",
+                e.file_name().to_string_lossy()
+            );
+            if std::path::Path::new(&f).exists() {
+                files.push(f);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        let mut found: Vec<(usize, String)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu") {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                let Some(rest) = name.strip_prefix("cpu") else { continue };
+                if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+                    continue;
+                }
+                let f = format!("/sys/devices/system/cpu/{name}/cpufreq/scaling_max_freq");
+                if std::path::Path::new(&f).exists() {
+                    found.push((rest.parse().unwrap_or(usize::MAX), f));
+                }
+            }
+        }
+        found.sort_by_key(|(i, _)| *i);
+        files = found.into_iter().map(|(_, p)| p).collect();
+    }
+    let cpu0 = "/sys/devices/system/cpu/cpu0/cpufreq";
+    CpuThrottle {
+        files,
+        min_khz: read_u64(&format!("{cpu0}/cpuinfo_min_freq")).unwrap_or(0),
+        max_khz: read_u64(&format!("{cpu0}/cpuinfo_max_freq")).unwrap_or(0),
+    }
+}
+
+impl CpuThrottle {
+    fn available(&self) -> bool {
+        !self.files.is_empty() && self.min_khz > 0 && self.max_khz >= self.min_khz
+    }
+
+    fn apply(&self, khz: u64) -> Result<String, String> {
+        let mut err = String::new();
+        for f in &self.files {
+            if let Err(e) = std::fs::write(f, khz.to_string()) {
+                if err.is_empty() {
+                    err = format!("{f}: {e}");
+                }
+            }
+        }
+        if err.is_empty() {
+            Ok(format!("cpu ceiling set to {:.2} GHz", khz as f64 / 1e6))
+        } else {
+            Err(err)
+        }
+    }
+}
+
+/// One proportional step of the ceiling (kHz) toward keeping `temp` at or
+/// below `target` (°C): gain 12 MHz/°C clamped to ±40 MHz per tick, a ±0.5 °C
+/// deadband, and hard clamped into [min, max]. Returns `cap` unchanged when
+/// the sensors/target are unusable.
+fn step_cap(cap_khz: u64, temp: f64, target: f64, lo: u64, hi: u64) -> u64 {
+    if !temp.is_finite() || temp <= 0.0 || !target.is_finite() || target <= 0.0 {
+        return cap_khz;
+    }
+    let err = target - temp;
+    if err.abs() <= 0.5 {
+        return cap_khz;
+    }
+    let step_khz = (err * 12.0).clamp(-40.0, 40.0) * 1000.0;
+    (cap_khz as i64 + step_khz.round() as i64).clamp(lo as i64, hi as i64) as u64
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -862,6 +962,12 @@ struct Shared {
     ram: String,
     /// Machine name, so several heater panels on the network are told apart.
     host: String,
+    /// CPU max-temperature auto-throttle: cpufreq plumbing (static), the
+    /// target (°C×100, 0 = off — written by the HTTP thread) and the applied
+    /// ceiling in kHz (0 = unmanaged), both owned by the sampler.
+    cpu_throttle: Arc<CpuThrottle>,
+    cpu_target: AtomicI64,
+    cpu_cap_khz: AtomicU64,
     seq: AtomicU64,
     cur: Mutex<String>,
     history: Mutex<VecDeque<String>>,
@@ -878,8 +984,12 @@ impl Shared {
             cap = rest[..end].parse().unwrap_or(0.0);
         }
         let gi = self.backend.info();
+        let th = self.cpu_throttle.available();
+        let target = self.cpu_target.load(Ordering::SeqCst) as f64 / 100.0;
+        let cpu_cap = if th { self.cpu_cap_khz.load(Ordering::SeqCst) as f64 / 1e6 } else { 0.0 };
         format!(
             "{{\"ok\":{},\"cap\":{},\"cap_min\":{},\"cap_max\":{},\"cap_default\":{},\"budget\":{},\
+             \"cpu_throttle\":{},\"cpu_target\":{},\"cpu_cap\":{},\"cpu_min_ghz\":{},\"cpu_max_ghz\":{},\
              \"gpu\":\"{}\",\"driver\":\"{}\",\"ram\":\"{}\",\"backend\":\"{}\",\"host\":\"{}\"}}",
             cur.contains("\"ok\":true"),
             fnum(cap),
@@ -887,6 +997,11 @@ impl Shared {
             fnum(gi.cap_max),
             fnum_pos(gi.cap_default),
             fnum(self.budget),
+            th,
+            fnum(target),
+            fnum_pos(cpu_cap),
+            fnum(self.cpu_throttle.min_khz as f64 / 1e6),
+            fnum(self.cpu_throttle.max_khz as f64 / 1e6),
             json_escape(&gi.name),
             json_escape(&gi.driver),
             json_escape(&self.ram),
@@ -990,10 +1105,10 @@ fn sse_stream(mut s: TcpStream, sh: Arc<Shared>) {
     }
 }
 
-/// Pull `"cap": <number>` out of the flat POST body.
-fn body_cap(body: &str) -> Option<f64> {
-    let i = body.find("\"cap\"")?;
-    let rest = body[i + 5..].trim_start();
+/// Pull `"<key>": <number>` out of the flat POST body.
+fn body_num(body: &str, key: &str) -> Option<f64> {
+    let i = body.find(&format!("\"{key}\""))?;
+    let rest = body[i + key.len() + 2..].trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     let end = rest.find([',', '}', ' ']).unwrap_or(rest.len());
     rest[..end].parse().ok()
@@ -1021,7 +1136,7 @@ fn handle(mut s: TcpStream, sh: Arc<Shared>) {
 
     if req.method == "POST" && path == "/api/power" {
         let gi = sh.backend.info();
-        match body_cap(&req.body) {
+        match body_num(&req.body, "cap") {
             Some(w) if gi.cap_max > 0.0 && w >= gi.cap_min && w <= gi.cap_max => {
                 match sh.backend.set_cap(w) {
                     Ok(msg) => {
@@ -1037,6 +1152,36 @@ fn handle(mut s: TcpStream, sh: Arc<Shared>) {
             }
             Some(_) => send_json(&mut s, "400 Bad Request", &format!("{{\"ok\":false,\"error\":\"cap out of range {:.0}–{:.0} W\"}}", gi.cap_min, gi.cap_max)),
             None => send_json(&mut s, "400 Bad Request", "{\"ok\":false,\"error\":\"no numeric cap in body\"}"),
+        }
+        return;
+    }
+
+    if req.method == "POST" && path == "/api/cpu-target" {
+        // (ok, message-or-error); 0 = off, otherwise a 30–110 °C target.
+        let (ok, msg) = match body_num(&req.body, "target") {
+            Some(t) if sh.cpu_throttle.available() && (t == 0.0 || (30.0..=110.0).contains(&t)) => {
+                sh.cpu_target.store((t * 100.0).round() as i64, Ordering::SeqCst);
+                (
+                    true,
+                    if t == 0.0 {
+                        "CPU auto-throttle off — ceiling released".to_string()
+                    } else {
+                        format!("CPU auto-throttle target {t:.0} °C")
+                    },
+                )
+            }
+            Some(_) if sh.cpu_throttle.available() => {
+                (false, "bad target — use 0 (off) or 30–110 °C".into())
+            }
+            Some(_) => (false, "no writable cpufreq interface on this host".into()),
+            None => (false, "no numeric target in body".into()),
+        };
+        log(&msg);
+        if ok {
+            let cur = sh.cur.lock().unwrap().clone();
+            send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg), sh.control_json(&cur)));
+        } else {
+            send_json(&mut s, "400 Bad Request", &format!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(&msg)));
         }
         return;
     }
@@ -1105,6 +1250,9 @@ fn main() {
                  as root.\n\
                  The power cap is live state: whatever the backend reports is truth, and\n\
                  a boot-time systemd unit (not this panel) owns setting it at startup.\n\
+                 The CPU max-temperature slider (POST /api/cpu-target) is live state too:\n\
+                 the sampler moves cpufreq scaling_max_freq to hold the package below the\n\
+                 target, and a panel start always releases any ceiling from a prior run.\n\
                  --budget flags the CPU+GPU DC-load estimate above W (brownout margin);\n\
                  --dmidecode reads the SMBIOS RAM bus speed once at startup (root)."
             );
@@ -1139,6 +1287,16 @@ fn main() {
     };
 
     let cpu = detect_cpu();
+    let throttle = Arc::new(detect_cpu_throttle());
+    // Live state only: whatever the last run (or LACT/whoever) left behind is
+    // released at startup, so a ceiling can never outlive the panel that set
+    // it and go unobserved.
+    if throttle.available() {
+        match throttle.apply(throttle.max_khz) {
+            Ok(m) => log(&format!("fah-panel: {m} (released any stale ceiling)")),
+            Err(e) => log(&format!("fah-panel: cpu ceiling unusable: {e}")),
+        }
+    }
     let host =
         read_trim("/proc/sys/kernel/hostname").unwrap_or_else(|| "heater".to_string());
     let sh = Arc::new(Shared {
@@ -1146,6 +1304,9 @@ fn main() {
         budget,
         ram: ram_speed(&dmi),
         host: host.clone(),
+        cpu_throttle: Arc::clone(&throttle),
+        cpu_target: AtomicI64::new(0),
+        cpu_cap_khz: AtomicU64::new(0),
         seq: AtomicU64::new(0),
         cur: Mutex::new(Sample::default().to_json()),
         history: Mutex::new(VecDeque::with_capacity(601)),
@@ -1153,21 +1314,26 @@ fn main() {
     });
     let gi = backend.info();
     log(&format!(
-        "fah-panel: host={host} backend={} gpu={} driver={} caps=({},{}) ram=\"{}\" listen={listen} cpu_threads={}",
+        "fah-panel: host={host} backend={} gpu={} driver={} caps=({},{}) ram=\"{}\" listen={listen} cpu_threads={} cpu_throttle={}",
         gi.kind,
         gi.name,
         gi.driver,
         gi.cap_min,
         gi.cap_max,
         sh.ram,
-        cpu.cur_freq.len()
+        cpu.cur_freq.len(),
+        throttle.available(),
     ));
     if gi.cap_max == 0.0 {
         log("fah-panel: warning: no power-cap range right now (device not up yet? the slider stays hidden until /api/health sees one)");
     }
 
     // Sampler: GPU backend poll + CPU sysfs; the CPU numbers ride along in a
-    // side JSON so the stream carries everything one sample needs.
+    // side JSON so the stream carries everything one sample needs. The
+    // sampler is also the ONLY writer of the cpufreq ceilings — the HTTP
+    // thread just moves the target, like gpu-panel's fan thread owning the
+    // fan outright.
+    let throttle = Arc::clone(&sh.cpu_throttle);
     let sh2 = Arc::clone(&sh);
     thread::Builder::new()
         .name("sampler".into())
@@ -1180,14 +1346,48 @@ fn main() {
                 let (clk_avg, clk_max) = cpu_clocks(&cpu);
                 s.cpu_power = cpu_power(&cpu, &mut rapl);
                 s.total = s.power + s.cpu_power;
+
+                // CPU max-temperature auto-throttle step (see CpuThrottle).
+                let mut cap_json = 0.0f64;
+                if throttle.available() {
+                    let target = sh2.cpu_target.load(Ordering::SeqCst) as f64 / 100.0;
+                    let cap = sh2.cpu_cap_khz.load(Ordering::SeqCst);
+                    if target <= 0.0 {
+                        if cap != 0 {
+                            match throttle.apply(throttle.max_khz) {
+                                Ok(m) => {
+                                    sh2.cpu_cap_khz.store(0, Ordering::SeqCst);
+                                    log(&format!("cpu-throttle: {m}"));
+                                }
+                                Err(e) => log(&format!("cpu-throttle restore failed: {e}")),
+                            }
+                        }
+                    } else if s.cpu_temp > 0.0 {
+                        let base = if cap == 0 { throttle.max_khz } else { cap };
+                        let next =
+                            step_cap(base, s.cpu_temp, target, throttle.min_khz, throttle.max_khz);
+                        if next != cap {
+                            match throttle.apply(next) {
+                                Ok(m) => {
+                                    sh2.cpu_cap_khz.store(next, Ordering::SeqCst);
+                                    log(&format!("cpu-throttle: {m}"));
+                                }
+                                Err(e) => log(&format!("cpu-throttle failed: {e}")),
+                            }
+                        }
+                    }
+                    cap_json = sh2.cpu_cap_khz.load(Ordering::SeqCst) as f64 / 1e6;
+                }
+
                 let mut j = s.to_json();
                 // Splice the remaining CPU fields the sparklines do not need.
                 j.pop();
                 j.push_str(&format!(
-                    ",\"cpu_hot\":{},\"cpu_clk_avg\":{},\"cpu_clk_max\":{}}}",
+                    ",\"cpu_hot\":{},\"cpu_clk_avg\":{},\"cpu_clk_max\":{},\"cpu_cap\":{}}}",
                     fnum_pos(hot),
                     fnum(clk_avg),
                     fnum(clk_max),
+                    fnum_pos(cap_json),
                 ));
                 *sh2.cur.lock().unwrap() = j.clone();
                 {
