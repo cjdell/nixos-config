@@ -647,24 +647,6 @@
             ];
           };
 
-          hp-z240-xeon-1240v6-nixos = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "nvidia")
-              ./common/nfs.nix
-              ./common/podman.nix
-              ./common/sunshine.nix
-              ./common/sunshine-nvidia.nix
-              ./common/system.nix
-              ./machines/hp-z240-xeon-1240v6
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           # N40L-NAS = nixpkgs.lib.nixosSystem {
           #   inherit system pkgs;
           #   modules = [

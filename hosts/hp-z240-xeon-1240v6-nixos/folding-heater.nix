@@ -1,0 +1,97 @@
+# hp-z240-xeon-1240v6-nixos as a folding@home space heater — CPU AND GPU.
+#
+# CPU: the Xeon E3-1240 v6 is 4 Kaby Lake cores / 8 threads with AVX2
+# (80 W TDP); the client folds on all eight.
+#
+# GPU: the GeForce GTX 970 (GM204/Maxwell, CC 5.2) folds through the
+# NVIDIA driver's own OpenCL ICD — the same ocl-icd mechanism the AMD
+# heaters use, just with the vendor ICD instead of the ROCm/Rusticl one:
+#
+#   * FAH v8 requires OpenCL >= 1.2 + fp64 + cl_khr_pci_bus_info from an
+#     OpenCL device (fah-client-bastet#239); the 580-branch ICD on GM204
+#     has all three, so the client flips its gpus.json entry for
+#     10de:13c2 (which is in the FAH database) to supported and
+#     fah-provision enables the slot.
+#   * Maxwell is EOL'd by the main driver branches (590+ dropped it), hence
+#     hardware.nvidia.package = legacy_580 in ./hardware-configuration.nix.
+#     The nvidia-x11 package installs its ICD registration at
+#     $out/etc/OpenCL/vendors/nvidia.icd (absolute store path inside), so
+#     pointing OCL_ICD_VENDORS at it is the whole wiring — same trick as
+#     haswellatx-nixos uses for Mesa's rusticl.icd.
+#   * libcuda.so.1 + libnvidia-ml.so.1 go on LD_LIBRARY_PATH from the same
+#     package dir: OpenMM prefers its CUDA plugin, and NVML is how the
+#     client reads utilisation for Web Control.
+#
+# Known rough edge: Maxwell GPU WUs are the older/smaller OpenMM ones —
+# slower per card than anyone's Pascal+ box, but ~10x the CPU slot's PPD
+# and the whole point of a heater. Watch the first WU in the log
+# (gpu_busy_percent via nvidia-smi should pin near 100).
+#
+# Web Control: http://192.168.49.65:7396/ ; the sops account token also links
+# the machine into the FAH account (see the accountTokenFile below).
+# Progress: `journalctl -u fah-client -f` or `tail /var/lib/fah-client/log.txt`.
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+{
+  imports = [ ../../common/folding-at-home-native.nix ];
+
+  services.folding-at-home-native = {
+    enable = true;
+    userName = "cjdell";
+    teamNumber = 236565;
+    cpus = 8; # the whole E3-1240 v6, nothing reserved
+    httpAddresses = [ "0.0.0.0:7396" ];
+    allowAddresses = [
+      "127.0.0.1" # loopback — fah-provision and local fahctl connect here
+      "::1"
+      "192.168.49.0/24" # LAN
+      "10.47.0.0/16" # WireGuard
+      "100.64.0.0/10" # tailnets
+    ];
+    # Links this machine to the FAH account (it then shows up in
+    # app.foldingathome.org next to zen1 and haswellatx). secrets/fah.yaml is
+    # encrypted to the shared fleet age key, i.e. the
+    # /var/lib/sops-nix/key.txt provisioned on every sops-enabled host.
+    accountTokenFile = config.sops.secrets.fah_account_token.path;
+  };
+
+  sops.secrets.fah_account_token = {
+    sopsFile = ../../secrets/fah.yaml;
+    restartUnits = [ "fah-client.service" ];
+  };
+
+  # Swap the module's ROCm OpenCL ICD (useless here — no AMD GPU) for the
+  # NVIDIA driver's, and give the core the driver's own libraries.
+  systemd.services.fah-client.environment = {
+    OCL_ICD_VENDORS = lib.mkForce "${config.hardware.nvidia.package}/etc/OpenCL/vendors";
+    LD_LIBRARY_PATH = lib.mkForce (
+      lib.makeLibraryPath [
+        pkgs.ocl-icd
+        pkgs.expat
+        pkgs.zlib
+        config.hardware.nvidia.package
+      ]
+    );
+    # The fah user's HOME is /var/empty (isSystemUser), and the NVIDIA
+    # userspace keeps its JIT'd compute-kernel cache under $HOME/.nv —
+    # point HOME into the CacheDirectory so kernels are not recompiled on
+    # every service restart.
+    HOME = "/var/cache/fah-client";
+  };
+
+  systemd.services.fah-client.serviceConfig.CacheDirectory = "fah-client";
+
+  # A heater never sleeps; logind refuses suspend/hibernate requests
+  # (PowerDevil's idle actions included).
+  systemd.sleep.settings.Sleep = {
+    AllowSuspend = "no";
+    AllowHibernation = "no";
+    AllowHybridSleep = "no";
+    AllowSuspendThenHibernate = "no";
+  };
+}
