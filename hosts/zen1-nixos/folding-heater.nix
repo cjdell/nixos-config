@@ -50,6 +50,12 @@
     # Navi 10 XT (RX 5700 XT). Id, not BDF — ids survive PCIe re-enumeration.
     amdPci = "1002:731f";
     gpuName = "Radeon RX 5700 XT";
+    # The 1800X sits pinned at Tjmax (Tctl ~95 °C) while folding all 16
+    # threads, so hold it at 80 °C: the panel ramps scaling_max_freq down
+    # until Tctl sits there (~3.2-3.4 GHz in practice) and back up when the
+    # chip cools. Startup target = this option (survives restarts/reboots);
+    # the panel slider overrides it live for the running service.
+    cpuTempTarget = 80;
   };
 
   # A heater never sleeps; logind refuses suspend/hibernate requests

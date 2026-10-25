@@ -1225,6 +1225,7 @@ fn main() {
     let mut interval_ms: u64 = 2000;
     let mut budget: f64 = 0.0;
     let mut dmi = String::new();
+    let mut cpu_target: f64 = 0.0;
 
     let mut i = 1;
     while i < args.len() {
@@ -1237,6 +1238,7 @@ fn main() {
             || flag == "--interval"
             || flag == "--budget"
             || flag == "--dmidecode"
+            || flag == "--cpu-target"
         {
             i += 1;
             let v = args.get(i).cloned().unwrap_or_default();
@@ -1249,6 +1251,7 @@ fn main() {
                 "--interval" => interval_ms = v.parse().unwrap_or(2000).clamp(500, 60_000),
                 "--budget" => budget = v.parse().unwrap_or(0.0),
                 "--dmidecode" => dmi = v,
+                "--cpu-target" => cpu_target = v.parse().unwrap_or(0.0),
                 _ => unreachable!(),
             }
         } else if flag == "--help" || flag == "-h" {
@@ -1264,7 +1267,10 @@ fn main() {
                  a boot-time systemd unit (not this panel) owns setting it at startup.\n\
                  The CPU max-temperature slider (POST /api/cpu-target) is live state too:\n\
                  the sampler moves cpufreq scaling_max_freq to hold the package below the\n\
-                 target, and a panel start always releases any ceiling from a prior run.\n\
+                 target, and a panel start releases any ceiling from a prior run. The\n\
+                 STARTUP target belongs to the host config (--cpu-target, the\n\
+                 services.fah-panel.cpuTempTarget option); the slider only overrides it\n\
+                 for the running service.\n\
                  --budget flags the CPU+GPU DC-load estimate above W (brownout margin);\n\
                  --dmidecode reads the SMBIOS RAM bus speed once at startup (root)."
             );
@@ -1274,6 +1280,11 @@ fn main() {
             std::process::exit(2);
         }
         i += 1;
+    }
+
+    if cpu_target != 0.0 && !(30.0..=110.0).contains(&cpu_target) {
+        eprintln!("fah-panel: --cpu-target must be 0 (off) or 30–110 °C");
+        std::process::exit(2);
     }
 
     let backend: Arc<dyn GpuBackend> = match gpu.as_str() {
@@ -1305,7 +1316,10 @@ fn main() {
     // it and go unobserved.
     if throttle.available() {
         match throttle.apply(throttle.max_khz) {
-            Ok(m) => log(&format!("fah-panel: {m} (released any stale ceiling)")),
+            Ok(m) => log(&format!(
+                "fah-panel: {m} (released any stale ceiling; startup target: {})",
+                if cpu_target == 0.0 { "off".to_string() } else { format!("{cpu_target:.0} °C") }
+            )),
             Err(e) => log(&format!("fah-panel: cpu ceiling unusable: {e}")),
         }
     }
@@ -1317,7 +1331,7 @@ fn main() {
         ram: ram_speed(&dmi),
         host: host.clone(),
         cpu_throttle: Arc::clone(&throttle),
-        cpu_target: AtomicI64::new(0),
+        cpu_target: AtomicI64::new((cpu_target * 100.0).round() as i64),
         cpu_cap_khz: AtomicU64::new(0),
         seq: AtomicU64::new(0),
         cur: Mutex::new(Sample::default().to_json()),

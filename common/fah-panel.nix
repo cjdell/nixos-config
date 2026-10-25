@@ -76,6 +76,20 @@
         0 hides the budget marker.
       '';
     };
+
+    cpuTempTarget = lib.mkOption {
+      type = lib.types.ints.between 0 110;
+      default = 0;
+      example = 80;
+      description = ''
+        Startup CPU max-temperature target in °C (0 = off). The panel holds
+        the package below it by moving every cpufreq `scaling_max_freq`
+        ceiling; being ExecStart state this persists across panel restarts
+        AND reboots. The panel's slider overrides the target live, per
+        session — changing it here is what makes it permanent (same split
+        as nvidia-power-limit.service vs the GPU cap slider on the hp-z240).
+      '';
+    };
   };
 
   config =
@@ -110,6 +124,10 @@
       ++ lib.optionals (cfg.budget > 0) [
         "--budget"
         (toString cfg.budget)
+      ]
+      ++ lib.optionals (cfg.cpuTempTarget > 0) [
+        "--cpu-target"
+        (toString cfg.cpuTempTarget)
       ];
     in
     lib.mkIf cfg.enable {

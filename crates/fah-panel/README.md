@@ -83,12 +83,15 @@ sampler proportionally walks every cpufreq `scaling_max_freq` ceiling
 (k10temp `Tctl` / coretemp `Package` as the sensor) — 12 MHz per °C of
 error, clamped to ±40 MHz per 2 s tick and a ±0.5 °C deadband, between
 `cpuinfo_min_freq` and `cpuinfo_max_freq`. Below the target the ceiling
-drifts back up on its own. Like the GPU cap it is **live state only**, and a
-panel start releases any ceiling from a previous run, so a stuck cap cannot
-outlive the process. (The kernel's own thermal shutdown at ~105 °C stays the
-last line of defence; this is about keeping the chip and its neighbours
-cooler — on the hp-z240 it doubles as a brownout knob, since it is the CPU
-half of the +12 V load.)
+drifts back up on its own. The slider itself is live state (a panel restart
+releases the ceiling it set), so the STARTUP target is a host config value:
+`services.fah-panel.cpuTempTarget` → `--cpu-target` on the ExecStart — that
+is the one that persists across restarts and reboots (zen1 runs 80 °C;
+the 1800X otherwise sits pinned at Tjmax folding). Like the GPU cap, the
+kernel's own ~105 °C shutdown stays the last line of defence; this is about
+keeping the chip and its neighbours cooler. (On acpi-cpufreq/AMD the kernel
+clamps writes to `_PSS` entries — zen1's table tops out at 3.6 GHz, so the
+panel reports the read-back ceiling, not its request.)
 
 ## Deployment
 
