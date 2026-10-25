@@ -81,7 +81,9 @@ auto-throttle state: `cpu_throttle` (a writable `scaling_max_freq` exists),
 The CPU sibling of the GPU cap slider: set a target temperature and the
 sampler proportionally walks every cpufreq `scaling_max_freq` ceiling
 (k10temp `Tctl` / coretemp `Package` as the sensor) — 12 MHz per °C of
-error, clamped to ±40 MHz per 2 s tick and a ±0.5 °C deadband, between
+error, rate-limited asymmetrically (30 MHz down / 8 MHz up per 2 s tick;
+temperature lags clock changes, symmetric ramps ring) with a ±1 °C
+deadband, between
 `cpuinfo_min_freq` and `cpuinfo_max_freq`. Below the target the ceiling
 drifts back up on its own. The slider itself is live state (a panel restart
 releases the ceiling it set), so the STARTUP target is a host config value:

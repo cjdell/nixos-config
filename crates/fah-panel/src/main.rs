@@ -942,18 +942,23 @@ impl CpuThrottle {
 }
 
 /// One proportional step of the ceiling (kHz) toward keeping `temp` at or
-/// below `target` (°C): gain 12 MHz/°C clamped to ±40 MHz per tick, a ±0.5 °C
-/// deadband, and hard clamped into [min, max]. Returns `cap` unchanged when
-/// the sensors/target are unusable.
+/// below `target` (°C): gain 12 MHz/°C with a ±1 °C deadband and hard
+/// clamped into [min, max], and **asymmetric** rate limits — down up to
+/// 30 MHz/tick, up only 8 MHz/tick. The asymmetry is the stability knob:
+/// package temperature lags a clock change by tens of seconds, so a
+/// symmetric ±40 MHz ramp rings (zen1 oscillated a full GHz between its
+/// floor and 3.2 GHz before this). A hot chip still ramps down fast
+/// (≈ 900 MHz/min); backing off is deliberately patient. Returns `cap`
+/// unchanged when the sensors/target are unusable.
 fn step_cap(cap_khz: u64, temp: f64, target: f64, lo: u64, hi: u64) -> u64 {
     if !temp.is_finite() || temp <= 0.0 || !target.is_finite() || target <= 0.0 {
         return cap_khz;
     }
     let err = target - temp;
-    if err.abs() <= 0.5 {
+    if err.abs() <= 1.0 {
         return cap_khz;
     }
-    let step_khz = (err * 12.0).clamp(-40.0, 40.0) * 1000.0;
+    let step_khz = (err * 12.0).clamp(-30.0, 8.0) * 1000.0;
     (cap_khz as i64 + step_khz.round() as i64).clamp(lo as i64, hi as i64) as u64
 }
 
