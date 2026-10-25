@@ -34,17 +34,20 @@
   # purpose — this box mostly runs folded flat as a heater (the GTX 970 is
   # also its only display output; see ./hardware-configuration.nix).
   {
-    # HP Z240 firmware quirk: the BIOS's own xHCI stack (which still drives
-    # the keyboard in setup/bootloader) hands the controller over already
-    # RUNNING, and the kernel then times out on its CNR handshake —
-    # `xhci_hcd 0000:00:14.0: can't setup: -110`, probe fails, no USB
-    # devices ever enumerate in Linux (verified on 6.16.7 and 6.18.57; a PCI
-    # remove+rescan does not recover it — controller is dead, not busy).
-    # quirk bit 16 = XHCI_RESET_TO_DEFAULT: halt + reset the host before
-    # start, i.e. undo whatever the firmware left behind. (quirks is read
-    # only at module init, so it must be a boot parameter, not a
-    # /sys/module write.) If this ever regresses, the other remedy is a
-    # COLD power cycle — the controller only misbehaves across warm reboots.
+    # HP Z240 hardware fault (diagnosed 2026-10-25): the PCH xHCI
+    # controller enumerates and is driven fine by UEFI DXI (keyboard/boot
+    # work in BIOS), but never answers MMIO once an OS owns it —
+    # `xhci_hcd 0000:00:14.0: can't setup: -110` after the internal-reset
+    # 17 s timeout, probe fails, zero USB devices in Linux (6.16 and 6.18).
+    # RULED OUT: the XHCI_RESET_TO_DEFAULT quirk (bit 16, below — confirmed
+    # live on /proc/cmdline, no effect), warm-boot firmware handoff (a true
+    # cold boot fails identically), driver state (unbind/rebind: same -110),
+    # device power state (setpci D3hot->D0: writes don't even stick —
+    # PMCSR reads back unchanged), and a dead ME (mei0 probes clean).
+    # Config space answers, MMIO is catatonic => board-level: suspect a
+    # hung ME/xHCI mux that only a full standby-rail drain clears —
+    # unplug/PSU-switch for 60 s once (this also re-arms WOL, which needs
+    # the ME). Fallback: a PCIe USB card bypasses the PCH entirely.
     boot.kernelParams = [ "xhci_hcd.quirks=65536" ];
 
     networking.networkmanager.enable = true;
