@@ -487,24 +487,6 @@
             ];
           };
 
-          haswellatx-nixos = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "none")
-              ./common/nfs.nix
-              ./common/nosleep.nix
-              ./common/sunshine.nix
-              ./common/system.nix
-              ./common/wine.nix
-              ./machines/haswellatx
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           haswellmatx-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [

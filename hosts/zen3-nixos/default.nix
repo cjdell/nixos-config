@@ -145,6 +145,7 @@
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeugl6bwVy9n/4FX3xuUDs6bMrQifWZROJwv3TK/zSw root@GEN8-NAS (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEm2NQfhWPdGkDsDQQDx/yJTeNceNWgqQMStW4ESixib root@N40L-NAS (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEqKYLh/zb6s1MWILerRlIQ2AiqJHJHNbTt7CTze/5zX root@gatling-services (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKRvbzK5uAlww+wmGRk8Y6Tfe0As7Z3FUDo9/16tPT11 root@haswellatx-nixos (nix builder)"
     ];
 
     boot.kernel.sysctl = {
