@@ -84,7 +84,13 @@
     OCL_ICD_VENDORS = lib.mkForce "${pkgs.mesa.opencl}/etc/OpenCL/vendors";
     RUSTICL_ENABLE = "radeonsi";
     RUSTICL_FEATURES = "fp64";
+    # The fah user's HOME is /var/empty (isSystemUser), so Mesa's disk cache
+    # — the LLVM-compiled OpenMM kernels, dozens per WU start — would be
+    # rebuilt from scratch on every service restart. Give it a writable home.
+    XDG_CACHE_HOME = "/var/cache/fah-client";
   };
+
+  systemd.services.fah-client.serviceConfig.CacheDirectory = "fah-client";
 
   # A heater never sleeps; logind refuses suspend/hibernate requests
   # (PowerDevil's idle actions included).
