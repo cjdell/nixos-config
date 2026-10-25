@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>heater panel</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div id="title">
+    <h1>⚡ heater panel</h1>
+    <div id="gpu-name" class="sub">connecting…</div>
+  </div>
+  <div id="status" class="pill">…</div>
+</header>
+
+<main>
+  <section id="cards">
+    <div class="card"><div class="label">GPU load</div><div class="value" id="util">–</div><canvas id="spark-util"></canvas></div>
+    <div class="card"><div class="label">GPU power</div><div class="value" id="power">–</div><canvas id="spark-power"></canvas></div>
+    <div class="card"><div class="label">GPU temp</div><div class="value" id="temp">–</div><canvas id="spark-temp"></canvas></div>
+    <div class="card"><div class="label">VRAM</div><div class="value" id="vram">–</div><div class="foot" id="vram-foot"></div></div>
+    <div class="card"><div class="label">Clocks</div><div class="value" id="clocks">–</div><div class="foot" id="clocks-foot"></div></div>
+    <div class="card"><div class="label">Fan</div><div class="value" id="fan">–</div><div class="foot" id="pstate-foot"></div></div>
+    <div class="card cpu"><div class="label">CPU</div><div class="value" id="cpu-temp">–</div><div class="foot" id="cpu-foot"></div></div>
+    <div class="card cpu"><div class="label">CPU power / clocks</div><div class="value" id="cpu-power">–</div><div class="foot" id="cpu-clk-foot"></div></div>
+    <div class="card wide"><div class="label">DC load estimate (CPU package + GPU board)</div><div class="value" id="total">–</div><div class="foot" id="total-foot">rail sensors are not wired on this board — this sum is the brownout monitor</div><canvas id="spark-total"></canvas></div>
+  </section>
+
+  <section class="card" id="control">
+    <div class="label">GPU power cap</div>
+    <div id="cap-row">
+      <input type="range" id="cap-slider" min="0" max="200" step="1">
+      <span id="cap-value" class="value small">–</span>
+      <button id="cap-apply">apply</button>
+    </div>
+    <div class="foot" id="cap-foot"></div>
+  </section>
+
+  <section class="card" id="about">
+    <div class="foot">folding@home: <a id="fah-link" href="#" target="_blank" rel="noopener">web control</a>
+      · donors <code>cjdell</code> team <code>236565</code>
+      · cap policy lives in <code>nvidia-power-limit.service</code>, this slider only changes the live setting</div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

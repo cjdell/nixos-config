@@ -48,15 +48,18 @@
     # ⚠️ Throttled (was cpus = 8, full GPU) after 2026-10-25: with folding
     # enabled the box HARD-RESETS ~2 s after the client spins up its slots
     # during boot (journal ends at +20 s with no MCE/panic, three boots in
-    # a row; a boot without folding survives, and once up it folded
-    # full-tilt for 9.5 min without complaint). Load-step brownout (SATA ->
-    # PCIe powered 145 W GTX 970 on the SFF PSU) and Tjmax trip (package
-    # sits at 99-100 C under FAH) are the two suspects — see AGENTS.md row.
-    # The mitigation set, in order of effect: fewer CPU slots (biggest boot
+    # a row; a boot without folding survives, and once up it had folded
+    # full-tilt for 9.5 min without complaint). Root cause confirmed by
+    # measurement: the SFF PSU browns out on the combined CPU+GPU load step
+    # — made worse than it looks by a loose CPU heatsink (found + reseated
+    # 2026-10-25; with it seated the CPU finally draws its real power,
+    # which is what pushes the rail over the edge — the 99-100 C readings
+    # were the loose mount, not the cooler being insufficient). The 120 W
+    # nvidia-power-limit unit below is the hard ceiling; this derate keeps
+    # the boot-time step itself survivable: fewer CPU slots (biggest boot
     # spike), GPU at 50 % duty, and start folding only after boot has
-    # settled. Raise back toward cpus = 8 / no gpuUsage once the power
-    # adapter is swapped for Molex and the cooler is sorted — and only test
-    # one step at a time across a few reboots before trusting it.
+    # settled. Re-ramp one step at a time across a few reboots — and until
+    # the SATA->PCIe adapter is swapped for Molex, do not trust full power.
     cpus = 4;
     gpuUsage = 50;
     startDelay = "90";
@@ -107,6 +110,12 @@
   # which gpu-usage cannot reach. 120 W ≈ three quarters boost; it is not
   # persisted by the driver, so re-apply every boot before fah starts.
   # Raise/remove together with the gpuUsage derate in the block above.
+  # Hardware power cap for the GTX 970 — NVML accepts -pl on this card
+  # (verified 2026-10-25: "set to 120.00 W from 200.00 W"), so the ceiling
+  # is real, not a duty-cycle like gpuUsage. Caps the CUDA-init spike too,
+  # which gpu-usage cannot reach. 120 W ≈ three quarters boost; it is not
+  # persisted by the driver, so re-apply every boot before fah starts.
+  # Raise/remove together with the gpuUsage derate in the block above.
   systemd.services.nvidia-power-limit = {
     description = "Cap GTX 970 power at 120 W (nvidia-smi -pl)";
     wantedBy = [ "multi-user.target" ];
@@ -121,6 +130,42 @@
       ExecStart = "${config.hardware.nvidia.package}/bin/nvidia-smi -pl 120";
     };
   };
+
+  # fah-panel — the folding box's sibling of zen3's gpu-panel (see
+  # crates/fah-panel): live GPU (nvidia-smi) + CPU (sysfs) telemetry with a
+  # power-cap slider, the dashboard for "is it folding and is it brownout-
+  # adjacent". Unauthenticated LAN UI at http://192.168.49.65:7397/ —
+  # matching how the FAH Web Control on :7396 is exposed here.
+  systemd.services.fah-panel =
+    let
+      panel = pkgs.rustPlatform.buildRustPackage {
+        pname = "fah-panel";
+        version = "0.1.0";
+        src = ../../crates/fah-panel;
+        cargoLock.lockFile = ../../crates/fah-panel/Cargo.lock;
+        doCheck = false;
+      };
+    in
+    {
+      description = "Folding heater telemetry panel (GTX 970 + CPU)";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "nvidia-power-limit.service" ];
+      serviceConfig = {
+        # Runs as root: RAPL energy_uj is mode 0400 and the panel's
+        # nvidia-smi -pl control needs root too. --budget 180 W flags the
+        # CPU+GPU DC estimate against this box's reality: the PSU adds
+        # ~30-40 W of board/SSD/fans on top of what the panel sums, the
+        # derated steady state lands ~150 W, and the brownout trips came
+        # from steps toward ~230 W. Rail voltages are NOT readable here:
+        # the HP Super-I/O exposes only a dead pwm1 and there is no BMC —
+        # the DC estimate is the closest software proxy (a multimeter or
+        # an INA226 inline monitor on the GPU adapter line is the real
+        # instrument).
+        ExecStart = "${panel}/bin/fah-panel --listen 0.0.0.0:7397 --nvidia-smi ${config.hardware.nvidia.package}/bin/nvidia-smi --budget 180";
+        Restart = "always";
+        RestartSec = 5;
+      };
+    };
 
   # A heater never sleeps; logind refuses suspend/hibernate requests
   # (PowerDevil's idle actions included).

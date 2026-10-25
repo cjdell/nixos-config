@@ -1,0 +1,11 @@
+[package]
+name = "fah-panel"
+version = "0.1.0"
+edition = "2021"
+description = "Folding heater telemetry panel: NVIDIA GPU (via nvidia-smi) + CPU (sysfs) web UI"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

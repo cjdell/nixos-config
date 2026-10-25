@@ -1,0 +1,52 @@
+/* fah-panel — dark, compact, same family as gpu-panel. */
+:root {
+  --bg: #12161f; --card: #1a2030; --ink: #e6ebf4; --dim: #8a94a8;
+  --green: #4ade80; --cyan: #38bdf8; --amber: #fbbf24; --red: #f87171;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 22px 6px;
+}
+h1 { margin: 0; font-size: 19px; }
+.sub { color: var(--dim); font-size: 13px; }
+.pill {
+  padding: 3px 12px; border-radius: 999px; font-size: 13px;
+  background: #2a3145; color: var(--dim);
+}
+.pill.ok { background: #14341f; color: var(--green); }
+.pill.bad { background: #3a1c1c; color: var(--red); }
+main { padding: 10px 22px 28px; max-width: 1060px; margin: 0 auto; }
+#cards {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-bottom: 12px;
+}
+.card {
+  background: var(--card); border-radius: 10px; padding: 12px 14px;
+  border: 1px solid #232b3f;
+}
+.card.cpu { border-color: #26324a; }
+.card.wide { grid-column: 1 / -1; }
+.label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+.value { font-size: 26px; font-weight: 600; margin: 2px 0 4px; font-variant-numeric: tabular-nums; }
+.value.small { font-size: 16px; }
+.foot { font-size: 12px; color: var(--dim); }
+canvas { width: 100%; height: 46px; display: block; }
+#control { margin-bottom: 12px; }
+#cap-row { display: flex; align-items: center; gap: 12px; margin: 6px 0; }
+#cap-slider { flex: 1; accent-color: var(--cyan); }
+#cap-apply {
+  background: var(--cyan); color: #06202e; border: 0; border-radius: 6px;
+  padding: 6px 14px; font-weight: 600; cursor: pointer;
+}
+#cap-apply:disabled { opacity: .4; cursor: default; }
+.hot { color: var(--red); }
+.warm { color: var(--amber); }
+.ok-ink { color: var(--green); }
+a { color: var(--cyan); }
+code { background: #232b3f; padding: 0 4px; border-radius: 4px; }
