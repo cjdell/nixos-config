@@ -1,21 +1,31 @@
 //! fah-panel — folding@home heater telemetry web panel.
 //!
-//! The folding-box sibling of gpu-panel (which drives AMD GPUs through
-//! sysfs overdrive). On these machines the GPU is an NVIDIA card with the
-//! proprietary driver — no hwmon, no overdrive sysfs — so telemetry comes
-//! from `nvidia-smi --query-gpu` polling and the single control the panel
-//! exposes is the NVML power cap (`nvidia-smi -pl`), the one wattage knob
-//! that works on a GeForce. The CPU columns reuse gpu-panel's cross-vendor
-//! sysfs reads (coretemp/k10temp hwmon, per-core cpufreq, RAPL package
-//! power), because the whole point of these boxes is that CPU and GPU are
-//! fighting over the same small PSU.
+//! One app for every space heater in the fleet. The folding-box sibling of
+//! gpu-panel (which drives zen3's R9700 through sysfs overdrive): the heater
+//! boxes differ in what their GPU exposes, so the panel has a GPU backend per
+//! vendor behind one Sample schema, and the frontend/HTTP/SSE half is shared.
+//!
+//! * `--gpu nvidia` — GTX 970 (hp-z240): the proprietary driver exposes no
+//!   sysfs, so telemetry comes from `nvidia-smi --query-gpu` polling and the
+//!   control is `nvidia-smi -pl` (NVML power cap).
+//! * `--gpu amd` — RX 5700 XT (zen1): amdgpu exposes everything natively in
+//!   sysfs (gpu_busy_percent, hwmon temps/power, pp_dpm clock tables); the
+//!   control is a write to `hwmon/power1_cap` (microwatts), which works with
+//!   the default ppfeaturemask on Navi 10 (verified on zen1).
+//! * `--gpu auto` (default) — nvidia when `--nvidia-smi` is given, otherwise
+//!   the first PCI device whose hwmon exports `power1_average` (amdgpu).
+//!
+//! The CPU columns are cross-vendor sysfs reads (coretemp/k10temp hwmon,
+//! per-core cpufreq, RAPL package power), because the whole point of these
+//! boxes is that CPU and GPU are fighting over the same small PSU.
 //!
 //! Zero dependencies: std only, frontend embedded via include_str!.
 //!
 //! ```text
-//! browser ──HTTP/SSE──> fah-panel ──poll──> nvidia-smi (GPU util/power/temp/clocks)
-//!                           │       └──> nvidia-smi -pl (power cap)
-//!                           └────────> /sys: coretemp hwmon, cpufreq, RAPL
+//!                     ┌─ nvidia: nvidia-smi --query-gpu / -pl
+//! browser ──HTTP/SSE──> fah-panel ─┤
+//!                     └─ amd:      /sys/bus/pci/devices/*/{gpu_busy_percent,pp_dpm_*,hwmon}
+//!                           └────> /sys: coretemp|k10temp hwmon, cpufreq, RAPL
 //! ```
 
 use std::collections::VecDeque;
@@ -93,8 +103,38 @@ fn csv_f64(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(0.0)
 }
 
+/// Lowercased sysfs id file (`vendor` / `device`) of a PCI device dir.
+fn id_of(dir: &str, which: &str) -> String {
+    read_trim(&format!("{dir}/{which}")).map(|s| s.to_ascii_lowercase()).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
-// nvidia-smi
+// Backend trait
+// ---------------------------------------------------------------------------
+
+/// Static-ish identity + power-cap range shown in the panel header/control.
+struct GpuInfo {
+    kind: &'static str,
+    name: String,
+    driver: String,
+    /// Power-cap range; (0,0) = unsupported and the UI hides the slider.
+    cap_min: f64,
+    cap_max: f64,
+    /// Hardware default cap; 0 = unknown (then the UI omits it).
+    cap_default: f64,
+}
+
+/// One GPU vendor backend: produce the shared Sample schema and set the one
+/// wattage knob the card exposes. Implementations must be cheap to call from
+/// both the sampler thread and HTTP handler threads.
+trait GpuBackend: Send + Sync {
+    fn info(&self) -> GpuInfo;
+    fn sample(&self) -> Sample;
+    fn set_cap(&self, w: f64) -> Result<String, String>;
+}
+
+// ---------------------------------------------------------------------------
+// NVIDIA backend (nvidia-smi)
 // ---------------------------------------------------------------------------
 
 /// Run nvidia-smi with the given args, returning trimmed stdout. Failure is
@@ -134,6 +174,90 @@ fn throttle_names(bits: u64) -> Vec<&'static str> {
     NAMED.iter().filter(|(b, _)| bits & b != 0).map(|(_, n)| *n).collect()
 }
 
+struct Nvidia {
+    smi: String,
+    name: String,
+    driver: String,
+    /// Power-cap range from power.min_limit/max_limit; (0,0) = unsupported.
+    cap_min: f64,
+    cap_max: f64,
+}
+
+impl Nvidia {
+    /// Startup identity queries (non-fatal: nvidia-smi may answer only a
+    /// moment later; every error just shows up as `no data` in the UI).
+    fn new(smi: &str, name_override: &str) -> Nvidia {
+        let name = nvidia_smi(smi, &["--query-gpu=name", "--format=csv,noheader"])
+            .unwrap_or_else(|e| {
+                eprintln!("fah-panel: nvidia-smi not usable yet: {e}");
+                "NVIDIA GPU".into()
+            })
+            .lines()
+            .next()
+            .unwrap_or("NVIDIA GPU")
+            .to_string();
+        let driver = nvidia_smi(smi, &["--query-gpu=driver_version", "--format=csv,noheader"])
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        // Power-cap range; "N/A" fields (no support) become (0, 0) -> slider hidden.
+        let (cap_min, cap_max) = match nvidia_smi(
+            smi,
+            &["--query-gpu=power.min_limit,power.max_limit", "--format=csv,noheader,nounits"],
+        ) {
+            Ok(line) => {
+                let f: Vec<&str> =
+                    line.lines().next().unwrap_or("").split(',').map(|c| c.trim()).collect();
+                (
+                    f.first().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                    f.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                )
+            }
+            Err(_) => (0.0, 0.0),
+        };
+        Nvidia {
+            smi: smi.to_string(),
+            name: pick_name(name_override, name),
+            driver,
+            cap_min,
+            cap_max,
+        }
+    }
+}
+
+/// `--gpu-name` override if non-empty, else the backend's own discovery.
+fn pick_name(override_name: &str, discovered: String) -> String {
+    if override_name.trim().is_empty() {
+        discovered
+    } else {
+        override_name.trim().to_string()
+    }
+}
+
+impl GpuBackend for Nvidia {
+    fn info(&self) -> GpuInfo {
+        GpuInfo {
+            kind: "nvidia",
+            name: self.name.clone(),
+            driver: self.driver.clone(),
+            cap_min: self.cap_min,
+            cap_max: self.cap_max,
+            // The legacy 580 branch has no default_power_limit query field.
+            cap_default: 0.0,
+        }
+    }
+
+    fn sample(&self) -> Sample {
+        take_sample(&self.smi)
+    }
+
+    fn set_cap(&self, w: f64) -> Result<String, String> {
+        nvidia_smi(&self.smi, &["-pl", &w.to_string()]).map(|m| m.replace('\n', " "))
+    }
+}
+
 /// One GPU sample. nvidia-smi semantics: unavailable values come back as
 /// 0/"N/A"; we keep 0 and let the UI print "–" for the few that matter
 /// (fan on auto is reported as 0 -> null by fnum_pos).
@@ -152,11 +276,14 @@ struct Sample {
     clock_gpu_max: f64,
     clock_mem_max: f64,
     pstate: String,
+    /// amdgpu performance level ("auto"/"peak"/…); empty on nvidia.
+    perf: String,
     throttle: Vec<&'static str>,
-    /// CPU package (RAPL) + GPU board power (NVML) = what the +12 V rail is
-    /// being asked to supply. There are no real rail sensors on this board
-    /// (the HP Super-I/O hwmon exposes nothing but a dead pwm1; no BMC), so
-    /// this estimate plus the boot-time behaviour is the brownout monitor.
+    /// CPU package (RAPL) + GPU board power (NVML/amdgpu) = what the +12 V
+    /// rail is being asked to supply. There are no real rail sensors on these
+    /// boards (the HP Super-I/O hwmon exposes nothing but a dead pwm1; no
+    /// BMC), so this estimate plus the boot-time behaviour is the brownout
+    /// monitor.
     total: f64,
     cpu_temp: f64,
     cpu_power: f64,
@@ -170,7 +297,7 @@ impl Sample {
             "{{\"ts\":{},\"util\":{},\"mem_used\":{},\"mem_total\":{},\"temp\":{},\
              \"fan\":{},\"power\":{},\"power_limit\":{},\"clock_gpu\":{},\"clock_mem\":{},\
              \"clock_gpu_max\":{},\"clock_mem_max\":{},\
-             \"pstate\":\"{}\",\"throttle\":[{}],\"cpu_temp\":{},\"cpu_power\":{},\"total\":{},\
+             \"pstate\":\"{}\",\"perf\":\"{}\",\"throttle\":[{}],\"cpu_temp\":{},\"cpu_power\":{},\"total\":{},\
              \"ok\":{},\"error\":\"{}\"}}",
             self.ts,
             fnum(self.util),
@@ -185,6 +312,7 @@ impl Sample {
             fnum_pos(self.clock_gpu_max),
             fnum_pos(self.clock_mem_max),
             json_escape(&self.pstate),
+            json_escape(&self.perf),
             self.throttle.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(","),
             fnum_pos(self.cpu_temp),
             fnum(self.cpu_power),
@@ -238,11 +366,7 @@ fn ram_speed(dmi: &str) -> String {
         return String::new();
     }
     let collect = |args: &[&str], speeds: &mut Vec<String>| {
-        let Ok(out) = Command::new(dmi)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-        else {
+        let Ok(out) = Command::new(dmi).args(args).stdin(Stdio::null()).output() else {
             return;
         };
         for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -271,6 +395,278 @@ fn ram_speed(dmi: &str) -> String {
         collect(&["-t", "12"], &mut speeds);
     }
     speeds.join(" / ")
+}
+
+// ---------------------------------------------------------------------------
+// AMD backend (amdgpu sysfs)
+// ---------------------------------------------------------------------------
+//
+// Everything the panel shows is a native amdgpu sysfs read (same sources as
+// gpu-panel on zen3): gpu_busy_percent, mem_info_vram_*, hwmon temps labelled
+// edge/junction/mem, power1_average/power1_cap in microwatts, pwm1 0..255,
+// and the current+max clocks out of the pp_dpm_sclk/pp_dpm_mclk tables. The
+// control is a write to power1_cap — verified on the RX 5700 XT (Navi 10)
+// with the *default* ppfeaturemask: no overdrive bits needed for the cap.
+
+#[derive(Clone)]
+struct AmdPaths {
+    dev: String,
+    hwmon: String,
+    /// hwmon temperature inputs keyed by their label ("edge"/"junction"/"mem").
+    temps: Vec<(String, String)>,
+}
+
+/// The sysfs PCI device dirs `spec` names: empty spec = every device that
+/// exports an hwmon (amdgpu is the only driver exporting power1_average
+/// there); `vendor:device` = every match sorted by BDF (deterministic);
+/// a full BDF = that one device. (Same resolution model as gpu-panel —
+/// DRM card numbers and BDFs shuffle between boots, ids do not.)
+fn amd_candidates(spec: &str) -> Result<Vec<String>, String> {
+    let s = spec.trim().to_ascii_lowercase();
+    let mut out = Vec::new();
+    if s.is_empty() {
+        if let Ok(rd) = std::fs::read_dir("/sys/bus/pci/devices") {
+            for e in rd.flatten() {
+                let dir = format!("/sys/bus/pci/devices/{}", e.file_name().to_string_lossy());
+                if std::path::Path::new(&format!("{dir}/hwmon")).exists() {
+                    out.push(dir);
+                }
+            }
+        }
+        out.sort();
+        if out.is_empty() {
+            return Err("no PCI device exports an hwmon (amdgpu not loaded?)".into());
+        }
+        return Ok(out);
+    }
+    if s.matches(':').count() == 3 {
+        return Ok(vec![format!("/sys/bus/pci/devices/{s}")]);
+    }
+    let (vendor, device) = s.split_once(':').ok_or_else(|| {
+        format!("expected a PCI BDF (0000:0c:00.0) or a vendor:device id (1002:731f), got {spec}")
+    })?;
+    let want = (format!("0x{vendor}"), format!("0x{device}"));
+    if let Ok(rd) = std::fs::read_dir("/sys/bus/pci/devices") {
+        for e in rd.flatten() {
+            let dir = format!("/sys/bus/pci/devices/{}", e.file_name().to_string_lossy());
+            if (id_of(&dir, "vendor"), id_of(&dir, "device")) == want {
+                out.push(dir);
+            }
+        }
+    }
+    out.sort();
+    if out.is_empty() {
+        return Err(format!("no PCI device with id {s}"));
+    }
+    Ok(out)
+}
+
+/// The amdgpu hwmon directory under `dev` (the one exporting power1_average).
+fn find_hwmon(dev: &str) -> Result<String, String> {
+    if !std::path::Path::new(dev).exists() {
+        return Err(format!("no such PCI device: {dev}"));
+    }
+    std::fs::read_dir(format!("{dev}/hwmon"))
+        .map_err(|e| format!("{dev}/hwmon: {e}"))?
+        .flatten()
+        .map(|e| format!("{dev}/hwmon/{}", e.file_name().to_string_lossy()))
+        .find(|p| std::path::Path::new(&format!("{p}/power1_average")).exists())
+        .ok_or_else(|| format!("no amdgpu hwmon (power1_average) under {dev}"))
+}
+
+fn resolve_amd(spec: &str) -> Result<AmdPaths, String> {
+    let mut errs = Vec::new();
+    for dev in amd_candidates(spec)? {
+        match find_hwmon(&dev) {
+            Ok(hwmon) => {
+                let mut temps = Vec::new();
+                if let Ok(rd) = std::fs::read_dir(&hwmon) {
+                    for e in rd.flatten() {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if let Some(prefix) = name.strip_suffix("_label") {
+                            if !prefix.starts_with("temp") {
+                                continue;
+                            }
+                            let input = format!("{hwmon}/{prefix}_input");
+                            if std::path::Path::new(&input).exists() {
+                                if let Some(label) = read_trim(&format!("{hwmon}/{name}")) {
+                                    temps.push((label, input));
+                                }
+                            }
+                        }
+                    }
+                }
+                temps.sort();
+                return Ok(AmdPaths { dev, hwmon, temps });
+            }
+            Err(e) => errs.push(e),
+        }
+    }
+    Err(errs.join("; "))
+}
+
+/// Parse a `pp_dpm_*` table: (current MHz — the `*`-marked line — and the
+/// table maximum, e.g. "0: 300Mhz\n1: 1650Mhz *").
+fn dpm_clocks(path: &str) -> (f64, f64) {
+    let Some(text) = read_trim(path) else {
+        return (0.0, 0.0);
+    };
+    let (mut cur, mut max) = (0.0, 0.0);
+    for line in text.lines() {
+        let after = line.split(':').nth(1).unwrap_or("");
+        let digits: String = after.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(mhz) = digits.parse::<f64>() else { continue };
+        if mhz > max {
+            max = mhz;
+        }
+        if line.contains('*') {
+            cur = mhz;
+        }
+    }
+    (cur, max)
+}
+
+fn amd_temp_by(p: &AmdPaths, label: &str) -> f64 {
+    p.temps
+        .iter()
+        .find(|(l, _)| l == label)
+        .and_then(|(_, path)| read_f64(path))
+        .map(|v| v / 1000.0)
+        .unwrap_or(0.0)
+}
+
+fn amd_temp_hottest(p: &AmdPaths) -> f64 {
+    p.temps
+        .iter()
+        .filter_map(|(_, path)| read_f64(path))
+        .map(|v| v / 1000.0)
+        .fold(0.0f64, f64::max)
+}
+
+struct Amd {
+    spec: String,
+    name: String,
+    driver: String,
+    paths: Mutex<Option<AmdPaths>>,
+}
+
+impl Amd {
+    fn new(spec: &str, name_override: &str) -> Amd {
+        let kernel =
+            read_trim("/proc/sys/kernel/osrelease").unwrap_or_else(|| "unknown".to_string());
+        // Resolve once at startup for the log line and the id fallback name;
+        // failure is not fatal (boot race, GPU init later — every sample
+        // re-resolves until it succeeds).
+        let resolved = resolve_amd(spec).ok();
+        let discovered = match &resolved {
+            Some(p) => {
+                format!("{}:{}", id_of(&p.dev, "vendor").trim_start_matches("0x"),
+                        id_of(&p.dev, "device").trim_start_matches("0x"))
+            }
+            None => "AMD GPU".to_string(),
+        };
+        Amd {
+            spec: spec.to_string(),
+            name: pick_name(name_override, discovered),
+            driver: format!("amdgpu (kernel {kernel})"),
+            paths: Mutex::new(resolved),
+        }
+    }
+
+    /// Cached device paths, re-resolving when unknown or when the PCI device
+    /// vanished (re-enumeration, driver reload).
+    fn paths(&self) -> Result<AmdPaths, String> {
+        let mut g = self.paths.lock().unwrap();
+        if let Some(p) = g.as_ref() {
+            if std::path::Path::new(&p.dev).exists() {
+                return Ok(p.clone());
+            }
+        }
+        *g = None;
+        let p = resolve_amd(&self.spec)?;
+        *g = Some(p.clone());
+        Ok(p)
+    }
+}
+
+impl GpuBackend for Amd {
+    fn info(&self) -> GpuInfo {
+        // Read the cap range live: the files are static in practice, but
+        // reading them on every /api/health also covers a card whose paths
+        // resolved only after startup.
+        let (mut cmin, mut cmax, mut cdef) = (0.0, 0.0, 0.0);
+        if let Ok(p) = self.paths() {
+            cmin = read_f64(&format!("{}/power1_cap_min", p.hwmon)).unwrap_or(0.0) / 1e6;
+            cmax = read_f64(&format!("{}/power1_cap_max", p.hwmon)).unwrap_or(0.0) / 1e6;
+            cdef = read_f64(&format!("{}/power1_cap_default", p.hwmon)).unwrap_or(0.0) / 1e6;
+        }
+        GpuInfo {
+            kind: "amd",
+            name: self.name.clone(),
+            driver: self.driver.clone(),
+            cap_min: cmin,
+            cap_max: cmax,
+            cap_default: cdef,
+        }
+    }
+
+    fn sample(&self) -> Sample {
+        let mut s = Sample::default();
+        let p = match self.paths() {
+            Ok(p) => p,
+            Err(e) => {
+                s.error = e;
+                s.ts = now_ms();
+                return s;
+            }
+        };
+        s.util = read_u64(&format!("{}/gpu_busy_percent", p.dev)).unwrap_or(0) as f64;
+        // MiB, like the nvidia backend reports memory.used/total.
+        s.mem_used = read_u64(&format!("{}/mem_info_vram_used", p.dev)).unwrap_or(0) as f64
+            / 1_048_576.0;
+        s.mem_total = read_u64(&format!("{}/mem_info_vram_total", p.dev)).unwrap_or(0) as f64
+            / 1_048_576.0;
+        s.temp = {
+            let t = amd_temp_by(&p, "edge");
+            if t > 0.0 {
+                t
+            } else {
+                let j = amd_temp_by(&p, "junction");
+                if j > 0.0 {
+                    j
+                } else {
+                    amd_temp_hottest(&p)
+                }
+            }
+        };
+        // pwm1 is 0..255; the UI wants a percentage (and null -> "auto").
+        s.fan = read_u64(&format!("{}/pwm1", p.hwmon)).map(|v| v as f64 * 100.0 / 255.0).unwrap_or(0.0);
+        s.power = read_f64(&format!("{}/power1_average", p.hwmon)).unwrap_or(0.0) / 1e6;
+        s.power_limit = read_f64(&format!("{}/power1_cap", p.hwmon)).unwrap_or(0.0) / 1e6;
+        let (c, cmax) = dpm_clocks(&format!("{}/pp_dpm_sclk", p.dev));
+        s.clock_gpu = c;
+        s.clock_gpu_max = cmax;
+        let (m, mmax) = dpm_clocks(&format!("{}/pp_dpm_mclk", p.dev));
+        s.clock_mem = m;
+        s.clock_mem_max = mmax;
+        s.perf = read_trim(&format!("{}/power_dpm_force_performance_level", p.dev))
+            .unwrap_or_else(|| "auto".to_string());
+        s.ok = true;
+        s.ts = now_ms();
+        s
+    }
+
+    fn set_cap(&self, w: f64) -> Result<String, String> {
+        let p = self.paths()?;
+        let path = format!("{}/power1_cap", p.hwmon);
+        std::fs::write(&path, format!("{}", (w * 1e6).round() as u64))
+            .map_err(|e| format!("{path}: {e}"))?;
+        // The SMU accepts the nearest value it supports; echo what stuck.
+        match read_f64(&path) {
+            Some(v) => Ok(format!("power cap set to {:.0} W", v / 1e6)),
+            None => Ok(format!("power cap set to {w:.0} W")),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,16 +855,13 @@ fn cpu_info_json(cpu: &Cpu) -> String {
 // ---------------------------------------------------------------------------
 
 struct Shared {
-    smi: String,
-    gpu_name: String,
-    driver: String,
-    /// Power-cap range from power.min_limit/max_limit; (0,0) = unsupported.
-    cap_min: f64,
-    cap_max: f64,
+    backend: Arc<dyn GpuBackend>,
     /// Estimated DC-load budget in watts for the UI to flag against; 0 = off.
     budget: f64,
     /// SMBIOS RAM bus speed (static), empty = unknown.
     ram: String,
+    /// Machine name, so several heater panels on the network are told apart.
+    host: String,
     seq: AtomicU64,
     cur: Mutex<String>,
     history: Mutex<VecDeque<String>>,
@@ -484,17 +877,21 @@ impl Shared {
             let end = rest.find([',', '}']).unwrap_or(rest.len());
             cap = rest[..end].parse().unwrap_or(0.0);
         }
+        let gi = self.backend.info();
         format!(
-            "{{\"ok\":{},\"cap\":{},\"cap_min\":{},\"cap_max\":{},\"budget\":{},\
-             \"gpu\":\"{}\",\"driver\":\"{}\",\"ram\":\"{}\"}}",
+            "{{\"ok\":{},\"cap\":{},\"cap_min\":{},\"cap_max\":{},\"cap_default\":{},\"budget\":{},\
+             \"gpu\":\"{}\",\"driver\":\"{}\",\"ram\":\"{}\",\"backend\":\"{}\",\"host\":\"{}\"}}",
             cur.contains("\"ok\":true"),
             fnum(cap),
-            fnum(self.cap_min),
-            fnum(self.cap_max),
+            fnum(gi.cap_min),
+            fnum(gi.cap_max),
+            fnum_pos(gi.cap_default),
             fnum(self.budget),
-            json_escape(&self.gpu_name),
-            json_escape(&self.driver),
+            json_escape(&gi.name),
+            json_escape(&gi.driver),
             json_escape(&self.ram),
+            gi.kind,
+            json_escape(&self.host),
         )
     }
 }
@@ -623,13 +1020,14 @@ fn handle(mut s: TcpStream, sh: Arc<Shared>) {
     }
 
     if req.method == "POST" && path == "/api/power" {
+        let gi = sh.backend.info();
         match body_cap(&req.body) {
-            Some(w) if sh.cap_max > 0.0 && w >= sh.cap_min && w <= sh.cap_max => {
-                match nvidia_smi(&sh.smi, &["-pl", &w.to_string()]) {
+            Some(w) if gi.cap_max > 0.0 && w >= gi.cap_min && w <= gi.cap_max => {
+                match sh.backend.set_cap(w) {
                     Ok(msg) => {
-                        log(&format!("power cap set to {w} W: {}", msg.replace('\n', " ")));
+                        log(&format!("power cap set to {w} W: {msg}"));
                         let cur = sh.cur.lock().unwrap().clone();
-                        send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg.replace('\n', " ")), sh.control_json(&cur)));
+                        send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg), sh.control_json(&cur)));
                     }
                     Err(e) => {
                         log(&format!("power cap failed: {e}"));
@@ -637,7 +1035,7 @@ fn handle(mut s: TcpStream, sh: Arc<Shared>) {
                     }
                 }
             }
-            Some(_) => send_json(&mut s, "400 Bad Request", &format!("{{\"ok\":false,\"error\":\"cap out of range {:.0}–{:.0} W\"}}", sh.cap_min, sh.cap_max)),
+            Some(_) => send_json(&mut s, "400 Bad Request", &format!("{{\"ok\":false,\"error\":\"cap out of range {:.0}–{:.0} W\"}}", gi.cap_min, gi.cap_max)),
             None => send_json(&mut s, "400 Bad Request", "{\"ok\":false,\"error\":\"no numeric cap in body\"}"),
         }
         return;
@@ -662,8 +1060,11 @@ const STYLE_CSS: &str = include_str!("style.css");
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let mut listen = "0.0.0.0:7397".to_string();
+    let mut listen = "0.0.0.0:80".to_string();
+    let mut gpu = "auto".to_string();
     let mut smi = String::new();
+    let mut amd_pci = String::new();
+    let mut gpu_name = String::new();
     let mut interval_ms: u64 = 2000;
     let mut budget: f64 = 0.0;
     let mut dmi = String::new();
@@ -671,12 +1072,23 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         let flag = args[i].clone();
-        if flag == "--listen" || flag == "--nvidia-smi" || flag == "--interval" || flag == "--budget" || flag == "--dmidecode" {
+        if flag == "--listen"
+            || flag == "--gpu"
+            || flag == "--nvidia-smi"
+            || flag == "--amd-pci"
+            || flag == "--gpu-name"
+            || flag == "--interval"
+            || flag == "--budget"
+            || flag == "--dmidecode"
+        {
             i += 1;
             let v = args.get(i).cloned().unwrap_or_default();
             match flag.as_str() {
                 "--listen" => listen = v,
+                "--gpu" => gpu = v,
                 "--nvidia-smi" => smi = v,
+                "--amd-pci" => amd_pci = v,
+                "--gpu-name" => gpu_name = v,
                 "--interval" => interval_ms = v.parse().unwrap_or(2000).clamp(500, 60_000),
                 "--budget" => budget = v.parse().unwrap_or(0.0),
                 "--dmidecode" => dmi = v,
@@ -684,9 +1096,14 @@ fn main() {
             }
         } else if flag == "--help" || flag == "-h" {
             println!(
-                "usage: fah-panel [--listen ADDR:PORT] --nvidia-smi PATH [--interval MS]\n\
-                 [--budget W] [--dmidecode PATH]\n\
-                 The power cap is live state: whatever nvidia-smi reports is truth, and\n\
+                "usage: fah-panel [--listen ADDR:PORT] [--gpu auto|nvidia|amd]\n\
+                 [--nvidia-smi PATH] [--amd-pci VENDOR:DEVICE|BDF] [--gpu-name NAME]\n\
+                 [--interval MS] [--budget W] [--dmidecode PATH]\n\
+                 Backend auto = nvidia when --nvidia-smi is given, else the first PCI\n\
+                 device whose hwmon exports power1_average (amdgpu). Port 80 needs root,\n\
+                 as does RAPL energy_uj and both power-cap controls — the service runs\n\
+                 as root.\n\
+                 The power cap is live state: whatever the backend reports is truth, and\n\
                  a boot-time systemd unit (not this panel) owns setting it at startup.\n\
                  --budget flags the CPU+GPU DC-load estimate above W (brownout margin);\n\
                  --dmidecode reads the SMBIOS RAM bus speed once at startup (root)."
@@ -698,57 +1115,58 @@ fn main() {
         }
         i += 1;
     }
-    if smi.is_empty() {
-        eprintln!("fah-panel: --nvidia-smi PATH is required (absolute store path)");
-        std::process::exit(2);
-    }
 
-    let gpu_name = nvidia_smi(&smi, &["--query-gpu=name", "--format=csv,noheader"])
-        .unwrap_or_else(|e| {
-            eprintln!("fah-panel: nvidia-smi not usable yet: {e}");
-            "NVIDIA GPU".into()
-        })
-        .lines()
-        .next()
-        .unwrap_or("NVIDIA GPU")
-        .to_string();
-    let driver = nvidia_smi(&smi, &["--query-gpu=driver_version", "--format=csv,noheader"])
-        .unwrap_or_default()
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    // Power-cap range; "N/A" fields (no support) become (0, 0) -> slider hidden.
-    let (cap_min, cap_max) =
-        match nvidia_smi(&smi, &["--query-gpu=power.min_limit,power.max_limit", "--format=csv,noheader,nounits"]) {
-            Ok(line) => {
-                let f: Vec<&str> = line.lines().next().unwrap_or("").split(',').map(|c| c.trim()).collect();
-                (f.first().and_then(|v| v.parse().ok()).unwrap_or(0.0), f.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0))
+    let backend: Arc<dyn GpuBackend> = match gpu.as_str() {
+        "nvidia" => {
+            if smi.is_empty() {
+                eprintln!("fah-panel: --gpu nvidia requires --nvidia-smi PATH (absolute store path)");
+                std::process::exit(2);
             }
-            Err(_) => (0.0, 0.0),
-        };
+            Arc::new(Nvidia::new(&smi, &gpu_name))
+        }
+        "amd" => Arc::new(Amd::new(&amd_pci, &gpu_name)),
+        "auto" => {
+            if smi.is_empty() {
+                Arc::new(Amd::new(&amd_pci, &gpu_name))
+            } else {
+                Arc::new(Nvidia::new(&smi, &gpu_name))
+            }
+        }
+        other => {
+            eprintln!("fah-panel: --gpu must be auto, nvidia or amd (got {other})");
+            std::process::exit(2);
+        }
+    };
 
     let cpu = detect_cpu();
+    let host =
+        read_trim("/proc/sys/kernel/hostname").unwrap_or_else(|| "heater".to_string());
     let sh = Arc::new(Shared {
-        smi,
-        gpu_name: gpu_name.clone(),
-        driver,
-        cap_min,
-        cap_max,
+        backend: Arc::clone(&backend),
         budget,
         ram: ram_speed(&dmi),
+        host: host.clone(),
         seq: AtomicU64::new(0),
         cur: Mutex::new(Sample::default().to_json()),
         history: Mutex::new(VecDeque::with_capacity(601)),
         cpu_info: cpu_info_json(&cpu),
     });
+    let gi = backend.info();
     log(&format!(
-        "fah-panel: gpu={gpu_name} caps=({cap_min},{cap_max}) ram=\"{}\" listen={listen} cpu_threads={}",
+        "fah-panel: host={host} backend={} gpu={} driver={} caps=({},{}) ram=\"{}\" listen={listen} cpu_threads={}",
+        gi.kind,
+        gi.name,
+        gi.driver,
+        gi.cap_min,
+        gi.cap_max,
         sh.ram,
         cpu.cur_freq.len()
     ));
+    if gi.cap_max == 0.0 {
+        log("fah-panel: warning: no power-cap range right now (device not up yet? the slider stays hidden until /api/health sees one)");
+    }
 
-    // Sampler: nvidia-smi poll + CPU sysfs; the CPU numbers ride along in a
+    // Sampler: GPU backend poll + CPU sysfs; the CPU numbers ride along in a
     // side JSON so the stream carries everything one sample needs.
     let sh2 = Arc::clone(&sh);
     thread::Builder::new()
@@ -756,7 +1174,7 @@ fn main() {
         .spawn(move || {
             let mut rapl: Option<(i64, u64)> = None;
             loop {
-                let mut s = take_sample(&sh2.smi);
+                let mut s = sh2.backend.sample();
                 s.cpu_temp = cpu_pkg_temp(&cpu);
                 let hot = cpu_temp_by(&cpu, "Core");
                 let (clk_avg, clk_max) = cpu_clocks(&cpu);

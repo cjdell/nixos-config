@@ -2,7 +2,7 @@
 name = "fah-panel"
 version = "0.1.0"
 edition = "2021"
-description = "Folding heater telemetry panel: NVIDIA GPU (via nvidia-smi) + CPU (sysfs) web UI"
+description = "Folding heater telemetry panel: NVIDIA (nvidia-smi) or AMD (amdgpu sysfs) GPU + CPU (sysfs) web UI"
 
 [dependencies]
 

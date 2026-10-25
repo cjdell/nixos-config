@@ -39,7 +39,10 @@
 }:
 
 {
-  imports = [ ../../common/folding-at-home-native.nix ];
+  imports = [
+    ../../common/fah-panel.nix
+    ../../common/folding-at-home-native.nix
+  ];
 
   services.folding-at-home-native = {
     # ⚠️ HISTORY (2026-10-25): this box HARD-RESETS under folding load.
@@ -156,43 +159,28 @@
   };
 
   # fah-panel — the folding box's sibling of zen3's gpu-panel (see
-  # crates/fah-panel): live GPU (nvidia-smi) + CPU (sysfs) telemetry with a
-  # power-cap slider, the dashboard for "is it folding and is it brownout-
-  # adjacent". Unauthenticated LAN UI at http://192.168.49.65:7397/ —
-  # matching how the FAH Web Control on :7396 is exposed here.
-  systemd.services.fah-panel =
-    let
-      panel = pkgs.rustPlatform.buildRustPackage {
-        pname = "fah-panel";
-        version = "0.1.0";
-        src = ../../crates/fah-panel;
-        cargoLock.lockFile = ../../crates/fah-panel/Cargo.lock;
-        doCheck = false;
-      };
-    in
-    {
-      description = "Folding heater telemetry panel (GTX 970 + CPU)";
-      wantedBy = [ "multi-user.target" ];
-      after = [
-        "network.target"
-        "nvidia-power-limit.service"
-      ];
-      serviceConfig = {
-        # Runs as root: RAPL energy_uj is mode 0400 and the panel's
-        # nvidia-smi -pl control needs root too. --budget 180 W flags the
-        # CPU+GPU DC estimate against this box's reality: the PSU adds
-        # ~30-40 W of board/SSD/fans on top of what the panel sums, the
-        # derated steady state lands ~150 W, and the brownout trips came
-        # from steps toward ~230 W. Rail voltages are NOT readable here:
-        # the HP Super-I/O exposes only a dead pwm1 and there is no BMC —
-        # the DC estimate is the closest software proxy (a multimeter or
-        # an INA226 inline monitor on the GPU adapter line is the real
-        # instrument).
-        ExecStart = "${panel}/bin/fah-panel --listen 0.0.0.0:7397 --nvidia-smi ${config.hardware.nvidia.package.bin}/bin/nvidia-smi --dmidecode ${pkgs.dmidecode}/bin/dmidecode --budget 180";
-        Restart = "always";
-        RestartSec = 5;
-      };
-    };
+  # crates/fah-panel, service module common/fah-panel.nix): live GPU
+  # (nvidia-smi) + CPU (sysfs) telemetry with a power-cap slider, the
+  # dashboard for "is it folding and is it brownout-adjacent". Unauthenticated
+  # LAN UI on port 80 — http://192.168.49.65/ — matching how the FAH Web
+  # Control on :7396 is exposed here. (zen1 runs the same app with its
+  # --gpu amd backend.)
+  services.fah-panel = {
+    enable = true;
+    gpu = "nvidia";
+    nvidiaSmi = "${config.hardware.nvidia.package.bin}/bin/nvidia-smi";
+    # --budget 180 W flags the CPU+GPU DC estimate against this box's reality:
+    # the PSU adds ~30-40 W of board/SSD/fans on top of what the panel sums,
+    # the derated steady state lands ~150 W, and the brownout trips came from
+    # steps toward ~230 W. Rail voltages are NOT readable here: the HP
+    # Super-I/O exposes only a dead pwm1 and there is no BMC — the DC estimate
+    # is the closest software proxy (a multimeter or an INA226 inline monitor
+    # on the GPU adapter line is the real instrument).
+    budget = 180;
+  };
+
+  # The panel reads/pins the cap the boot-time unit owns, so start after it.
+  systemd.services.fah-panel.after = [ "nvidia-power-limit.service" ];
 
   # A heater never sleeps; logind refuses suspend/hibernate requests
   # (PowerDevil's idle actions included).

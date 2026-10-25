@@ -8,8 +8,17 @@
 # or via the Folding@home account this machine is linked to with the sops
 # account token. Progress: `journalctl -u fah-client -f` or
 # `tail /var/lib/fah-client/log.txt`.
+#
+# Heater panel: http://192.168.49.51/ (fah-panel, same app as the hp-z240's,
+# here with the amdgpu sysfs backend — gpu_busy_percent/hwmon/pp_dpm on the
+# RX 5700 XT and k10temp/RAPL on the 1800X, plus the live power-cap slider
+# writing hwmon power1_cap; the 75–150 W range this VBIOS exposes is read at
+# startup, verified writable on the default ppfeaturemask).
 {
-  imports = [ ../../common/folding-at-home-native.nix ];
+  imports = [
+    ../../common/fah-panel.nix
+    ../../common/folding-at-home-native.nix
+  ];
 
   services.folding-at-home-native = {
     enable = true;
@@ -30,6 +39,17 @@
   sops.secrets.fah_account_token = {
     sopsFile = ../../secrets/fah.yaml;
     restartUnits = [ "fah-client.service" ];
+  };
+
+  # Same panel binary as the hp-z240 heater, AMD backend (see crates/fah-panel).
+  # No --budget here: this is a proper AM4 desktop PSU, not the Z240's
+  # brownout-prone SFF one, so the DC-load card just reports without a marker.
+  services.fah-panel = {
+    enable = true;
+    gpu = "amd";
+    # Navi 10 XT (RX 5700 XT). Id, not BDF — ids survive PCIe re-enumeration.
+    amdPci = "1002:731f";
+    gpuName = "Radeon RX 5700 XT";
   };
 
   # A heater never sleeps; logind refuses suspend/hibernate requests

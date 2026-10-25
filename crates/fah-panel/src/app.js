@@ -69,9 +69,12 @@ function renderSample(s) {
     (cpuMaxGhz ? ` · boost ≤ ${fmt(cpuMaxGhz, " GHz", 2)}` : "");
   $("clk-ram").textContent = ramSpeed || "–";
   $("fan").textContent = s.fan == null ? "auto" : fmt(s.fan, " %");
-  const th = (s.throttle || []).filter((n) => n !== "gpu-idle");
-  $("pstate-foot").textContent =
-    `P-state ${s.pstate || "?"}` + (th.length ? ` · ${th.join(", ")}` : "");
+  // nvidia reports P-states + throttle reasons, amdgpu a DPM performance level.
+  const bits = [];
+  if (s.pstate) bits.push(`P-state ${s.pstate}`);
+  if (s.perf) bits.push(`profile ${s.perf}`);
+  bits.push(...(s.throttle || []).filter((n) => n !== "gpu-idle"));
+  $("pstate-foot").textContent = bits.join(" · ");
   const ct = $("cpu-temp");
   ct.textContent = fmt(s.cpu_temp, " °C");
   ct.className = `value ${tempClass(s.cpu_temp)}`;
@@ -110,7 +113,8 @@ function setCapControls(ctl) {
     $("cap-value").textContent = `${Math.round(ctl.cap)} W`;
     slider.disabled = false; btn.disabled = false;
     $("cap-foot").textContent =
-      `min ${ctl.cap_min.toFixed(0)} W · max ${ctl.cap_max.toFixed(0)} W · driver default 200 W`;
+      `min ${ctl.cap_min.toFixed(0)} W · max ${ctl.cap_max.toFixed(0)} W` +
+      (ctl.cap_default ? ` · hardware default ${ctl.cap_default.toFixed(0)} W` : "");
   } else {
     slider.disabled = btn.disabled = true;
     $("cap-foot").textContent = "this card/driver does not expose a power cap";
@@ -118,7 +122,8 @@ function setCapControls(ctl) {
 }
 
 function renderCtl(ctl) {
-  $("gpu-name").textContent = `${ctl.gpu} · driver ${ctl.driver}`;
+  $("gpu-name").textContent =
+    `${ctl.gpu} · driver ${ctl.driver}` + (ctl.host ? ` · ${ctl.host}` : "");
   budget = ctl.budget || 0;
   if (ctl.ram) ramSpeed = ctl.ram;
   setPill(ctl.ok ? "live" : "no data", ctl.ok ? "ok" : "bad");
