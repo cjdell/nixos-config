@@ -56,18 +56,20 @@
     # origBin/ copies in the order that works: rpath first, interpreter
     # second (as verified in the issue). Drop this once nixpkgs merges the
     # upstream fix.
-    package = (config.boot.kernelPackages.nvidiaPackages.legacy_580).overrideAttrs (final: prev: {
-      postInstall = ''
-        for b in nvidia-smi nvidia-cuda-mps-control nvidia-cuda-mps-server nvidia-debugdump nvidia-powerd; do
-          if [ -e "$bin/origBin/$b" ]; then
-            cp "$bin/origBin/$b" "$bin/bin/$b"
-            chmod +w "$bin/bin/$b"
-            patchelf --set-rpath "$out/lib:$libPath" "$bin/bin/$b"
-            patchelf --interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" "$bin/bin/$b"
-          fi
-        done
-      '';
-    });
+    package = (config.boot.kernelPackages.nvidiaPackages.legacy_580).overrideAttrs (
+      final: prev: {
+        postInstall = ''
+          for b in nvidia-smi nvidia-cuda-mps-control nvidia-cuda-mps-server nvidia-debugdump nvidia-powerd; do
+            if [ -e "$bin/origBin/$b" ]; then
+              cp "$bin/origBin/$b" "$bin/bin/$b"
+              chmod +w "$bin/bin/$b"
+              patchelf --set-rpath "$out/lib:$libPath" "$bin/bin/$b"
+              patchelf --interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" "$bin/bin/$b"
+            fi
+          done
+        '';
+      }
+    );
     # Open kernel modules support Turing and newer only.
     open = false;
     # nvidia-drm.modeset=1 — needed for Plasma Wayland / GBM.

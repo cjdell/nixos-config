@@ -18,16 +18,17 @@
 # The decoder/bridge firmware are taken uncompressed from
 # libreelec-dvb-firmware (the variant proven on the hardware); the NixOS
 # `*.fw.zst` files cannot be read by a userspace downloader.
-{ lib
-, stdenv
-, pkg-config
-, makeWrapper
-, libusb1
-, SDL2
-, alsa-lib
-, ffmpeg
-, libreelec-dvb-firmware
-, noSudo ? false
+{
+  lib,
+  stdenv,
+  pkg-config,
+  makeWrapper,
+  libusb1,
+  SDL2,
+  alsa-lib,
+  ffmpeg,
+  libreelec-dvb-firmware,
+  noSudo ? false,
 }:
 
 stdenv.mkDerivation {
@@ -36,11 +37,22 @@ stdenv.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./probe.c ./pctv-monitor.c ./font5x7.h ];
+    fileset = lib.fileset.unions [
+      ./probe.c
+      ./pctv-monitor.c
+      ./font5x7.h
+    ];
   };
 
-  nativeBuildInputs = [ pkg-config makeWrapper ];
-  buildInputs = [ libusb1 SDL2 alsa-lib ];
+  nativeBuildInputs = [
+    pkg-config
+    makeWrapper
+  ];
+  buildInputs = [
+    libusb1
+    SDL2
+    alsa-lib
+  ];
 
   dontConfigure = true;
 

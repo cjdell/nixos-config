@@ -210,9 +210,10 @@ in
         ];
         StateDirectory = "fah-client";
         WorkingDirectory = "/var/lib/fah-client";
-        ExecStartPre =
-          [ "+${installConfig}" ]
-          ++ lib.optionals (cfg.startDelay != null) [ "+${pkgs.bash}/bin/bash -c 'sleep ${cfg.startDelay}'" ];
+        ExecStartPre = [
+          "+${installConfig}"
+        ]
+        ++ lib.optionals (cfg.startDelay != null) [ "+${pkgs.bash}/bin/bash -c 'sleep ${cfg.startDelay}'" ];
         # --config defaults to ./config.xml, which the ExecStartPre just wrote.
         ExecStart = "${fahPackages.fah-client}/bin/fah-client";
         Restart = "always";

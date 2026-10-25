@@ -14,7 +14,11 @@
 # kernel build tree:
 #
 #   make KDIR=/lib/modules/<version>/build
-{ stdenv, kernel, lib }:
+{
+  stdenv,
+  kernel,
+  lib,
+}:
 
 stdenv.mkDerivation {
   pname = "pctv320cx";

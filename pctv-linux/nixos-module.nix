@@ -8,7 +8,12 @@
 # driver asks for - dvb-usb-dib0700-1.20.fw (the DiB0700 bridge's
 # microcontroller) and v4l-cx25840.fw (the CX25843 standard-init program) -
 # ship in linux-firmware, which enableRedistributableFirmware pulls in.
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.hardware.pctv320cx;
@@ -47,6 +52,9 @@ in
     # driver is loaded it claims the USB interface first and the analog driver
     # never sees it.  Blacklist it (nothing DVB works on this card anyway
     # until someone writes the demod side).
-    boot.blacklistedKernelModules = [ "dvb_usb_dib0700" "dvb_usb" ];
+    boot.blacklistedKernelModules = [
+      "dvb_usb_dib0700"
+      "dvb_usb"
+    ];
   };
 }
