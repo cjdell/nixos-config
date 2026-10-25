@@ -917,6 +917,13 @@ impl CpuThrottle {
         !self.files.is_empty() && self.min_khz > 0 && self.max_khz >= self.min_khz
     }
 
+    /// The kernel may clamp a written ceiling (acpi-cpufreq on this 1800X
+    /// rounds anything above 3.6 GHz — its top `_PSS` entry — back to 3.6).
+    /// Report what is actually enforced, read back from the first policy.
+    fn read_cap(&self) -> Option<u64> {
+        self.files.first().and_then(|f| read_u64(f))
+    }
+
     fn apply(&self, khz: u64) -> Result<String, String> {
         let mut err = String::new();
         for f in &self.files {
@@ -986,7 +993,12 @@ impl Shared {
         let gi = self.backend.info();
         let th = self.cpu_throttle.available();
         let target = self.cpu_target.load(Ordering::SeqCst) as f64 / 100.0;
-        let cpu_cap = if th { self.cpu_cap_khz.load(Ordering::SeqCst) as f64 / 1e6 } else { 0.0 };
+        let cap_raw = self.cpu_cap_khz.load(Ordering::SeqCst);
+        let cpu_cap = if cap_raw == 0 {
+            0.0
+        } else {
+            self.cpu_throttle.read_cap().unwrap_or(cap_raw) as f64 / 1e6
+        };
         format!(
             "{{\"ok\":{},\"cap\":{},\"cap_min\":{},\"cap_max\":{},\"cap_default\":{},\"budget\":{},\
              \"cpu_throttle\":{},\"cpu_target\":{},\"cpu_cap\":{},\"cpu_min_ghz\":{},\"cpu_max_ghz\":{},\
@@ -1376,7 +1388,10 @@ fn main() {
                             }
                         }
                     }
-                    cap_json = sh2.cpu_cap_khz.load(Ordering::SeqCst) as f64 / 1e6;
+                    cap_json = match sh2.cpu_cap_khz.load(Ordering::SeqCst) {
+                        0 => 0.0,
+                        c => throttle.read_cap().unwrap_or(c) as f64 / 1e6,
+                    };
                 }
 
                 let mut j = s.to_json();
