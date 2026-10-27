@@ -132,3 +132,44 @@ curl -s -X POST -H "X-Emby-Token: $JF_API_KEY" http://127.0.0.1:8096/Library/Ref
   u.PlaybackPositionTicks>0)` → 0).
 * `journalctl -u podman-jellyfin` has no Tvdb errors on a test FullRefresh.
 * Temp API key deleted; `logging.default.json` restored from `.bak` + restart.
+
+## 2026-10-27 sequel: Stargate SG-1 — filenames were the stale layer
+
+Same renumber disease, opposite layout: DS9's filenames were truthful (only
+Jellyfin was stale); SG-1's **filenames baked in the OLD TVDB numbers**
+(`Stargate.SG1-s01e07.Brief.Candle.mkv` — live TVDB puts *Brief Candle* at
+E09), so re-matching alone can't fix it. Season 01 was shifted (the
+Nox/Cold-Lazarus/Brief-Candle rotation + 15/16 and 18/19 swaps); S02–S10
+numbers were already live.
+
+Recipe used (the rename half has no general script yet — plan file +
+`mv` loop with an undo log):
+
+1. Map every file to a live episode **by its embedded title** (not its
+   number): normalize titles (unescape HTML entities, drop `(1)`/`pt 2`/
+   `Part 1` suffixes), fall back to `difflib` for release typos
+   (*"Shades of Gray"*→Grey, *"Unnatrual Selection"*→Unnatural). Keep
+   `(1)/(2)` suffixes only where the base title repeats in the season
+   (Tok'ra, New Order, …).
+2. **Verify the labels are truthful before renaming anything** — SG-1 S01
+   title cards: end-credits black → ~60 s intro+cast-credits roll → the title
+   text. OCR of a bottom-centre crop (`tesseract --psm 6`, PNG **file** input
+   — stdin silently yields nothing) at 3 s steps over that window found
+   `BRIEFCANDLE` (e07), `THENOX` (e13), `TINMAN` (e18). The labels form a
+   partition of the season's titles, so confirming members of each
+   permutation-cycle/cycle-pair (3 of 11) fixes all of them.
+3. Rename to one canonical scheme: `Stargate SG-1 SxxEyy Title.mkv`
+   (merged doubles `SxxEyy-Ezz`, e.g. `S01E01-E02 Children of the Gods`),
+   212 files, undo log in `/tmp/jfdb/sg1_renames_undo.sh`.
+4. `POST /Library/Refresh`, wait until the episode count is back (212),
+   then `jf-rematch.py --dry` — with truthful filenames it reports **0**,
+   because the scan itself re-matched every item (that is the point: TheTVDB
+   fetcher enabled + correct numbers ⇒ future scans self-heal). Verify
+   ProviderIds too, not just names (compare against the live TSV; expect 0).
+5. Merged double files become combined items automatically
+   (*Children of the Gods (1) / (2)*, *Lost City (1) / (2)*, idx 21–22).
+6. Watched state survives mass renames within a scan — verified (UserData
+   rows followed the renamed files; 0 orphans).
+
+Cosmetic leftovers: `.txt`/`.nfo` release junk still sits in the season
+folders (Jellyfin ignores it).
