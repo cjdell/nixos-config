@@ -206,3 +206,24 @@ Gotchas found this round:
   fix the display name with the override above.
 * `GET /Shows/{seriesId}/Episodes` counts items, not files: verify the total
   equals your `ls *.mkv | wc -l` before believing "0 to fix" from jf-rematch.
+
+## Season-folder normalisation (all series, 2026-10-27)
+
+Season folders across `/Media/TV` are now uniformly `Season N` (no zero-pad —
+Jellyfin parses both, but the library was mixing styles):
+DS9's seven `Star Trek - Deep Space Nine 1993 Season N Complete 720p AI Upscale
+DVD x264 [i_c]` dirs, Voyager's seven `Star Trek Voyager S0N AI Upscale ...`
+dirs and SG-1's `Season 01`–`Season 09` were renamed (23 dirs;
+`archive/season-folders-2026-10-27/` has the planner + full undo).
+Verified after `POST /Library/Refresh`: item counts returned to file counts
+(DS9 173, SG-1 212, BSG 105, VOY 168), 0 stale paths, 0 orphaned UserData
+rows, watched state intact, and `jf-rematch --dry` still reports 0 for all
+three fixed shows — renaming a season folder re-keys items in place, exactly
+like renaming episode files.
+
+Notes: BSG's hidden `.Season 4` (dot-prefixed, invisible to Jellyfin) holds
+2 GB of alternate finale cuts (*Islanded* extended, two *Daybreak* versions)
+— deliberately left alone; the empty `Pluribus/untitled folder` was removed.
+`Avenue 5` has flat episode files (no season folders) and junk at the TV root
+(`.wav`/`.sh`/`.jar`) — Jellyfin ignores them.
+
