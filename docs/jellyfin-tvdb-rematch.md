@@ -173,3 +173,36 @@ Recipe used (the rename half has no general script yet — plan file +
 
 Cosmetic leftovers: `.txt`/`.nfo` release junk still sits in the season
 folders (Jellyfin ignores it).
+
+## 2026-10-27 sequel #2: Battlestar Galactica (2003 box-set) — specials renumbered
+
+Third variant of the same disease. Files were `Battlestar Galactica (2003) -
+SxxEyy - Title (1080p BluRay x265 RZeroX).mkv` (release tags everywhere).
+The **main episodes matched live TVDB perfectly** (RZeroX numbered from the
+miniseries = current TVDB); only the **Specials** were poisoned: live TVDB
+renumbered them (*Face of the Enemy* → S00E10–19, *The Resistance* → E23–32,
+*Razor* minisodes → E33–39, *The Plan* → E22, *Blood & Chrome* → E40), so
+Jellyfin had every special titled with some other special's name.
+`jf-rematch.py` fixed all 33 (0 failures); content of the merged *Razor*
+double + *Blood & Chrome* (CapCity skyline/centurions) + *The Lowdown*
+(behind-the-scenes) verified visually before renumbering.
+
+Then style-normalised all 105 files → `Battlestar Galactica SxxEyy Title.mkv`
+(stripped `(2003)` + release tags via a regex tag-list in
+`archive/bsg-2026-10-27/plan-renames.py`; undo script in the same dir).
+After rename: realtime monitor re-keyed all items in place — provider ids,
+names and watched state all survived; 105/105 name+id verified vs live TSV.
+
+Gotchas found this round:
+* The 2004 series' TVDB slug is **`battlestar-galactica-2003`** (bare
+  `battlestar-galactica` is the 1978 show — the scraper happily returned
+  *Saga of a Star World*!). Check S01's first title looks right.
+* An **empty `X-Emby-Token` gives 401 with an empty body** — the JSON decoder
+  then dies with a misleading "Expecting value" error. Echo the key length
+  first when an endpoint that worked minutes ago suddenly "returns nothing".
+* `POST /Items/{id}` for a manual name override 400s ("Error processing
+  request") **but still applies the edit** — re-read the item to confirm.
+* Live TVDB can hand back double-encoded entities (`Blood &amp; Chrome`);
+  fix the display name with the override above.
+* `GET /Shows/{seriesId}/Episodes` counts items, not files: verify the total
+  equals your `ls *.mkv | wc -l` before believing "0 to fix" from jf-rematch.
