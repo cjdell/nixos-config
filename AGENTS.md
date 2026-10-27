@@ -632,7 +632,7 @@ if a Strata turn is in flight. A reboot always restores `llm`
 it). And an accidental overlap resolves *cooperatively* instead of looping:
 sd-gate evicts the LLM over `POST /v1/unload` (Strata's serve layer then
 auto-reloads on the next LLM request, whose `before_load` hook stops sd-gate
-back). The script calls `/run/setuid-programs/sudo` (passwordless wheel on
+back). The script calls `/run/wrappers/bin/sudo` (passwordless wheel on
 this host), so no polkit rule is needed.
 
 ## Recallium (memory server, live on zen3-nixos)

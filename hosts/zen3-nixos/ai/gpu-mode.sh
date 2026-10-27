@@ -16,7 +16,7 @@
 
 set -u
 
-SUDO=/run/setuid-programs/sudo
+SUDO=/run/wrappers/bin/sudo
 STATUS=http://127.0.0.1:8080/v1/status
 CHAT=http://127.0.0.1:8080/v1/chat/completions
 TOTAL_VRAM_MB=32624

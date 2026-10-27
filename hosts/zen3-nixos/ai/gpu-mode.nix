@@ -17,7 +17,7 @@
 # documentation.
 #
 # No polkit is needed: sudo is passwordless for wheel on this host
-# (common/system.nix), and the script calls /run/setuid-programs/sudo.
+# (common/system.nix), and the script calls /run/wrappers/bin/sudo.
 
 {
   environment.systemPackages = [
