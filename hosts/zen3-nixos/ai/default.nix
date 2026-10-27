@@ -8,6 +8,9 @@
 #                         (DISABLED while ./strata.nix runs - see the import list)
 #   strata.nix          - Strata engine (HIP/gfx1201) + serve + strata. subdomain
 #   sd-gate.nix         - on-demand stable-diffusion.cpp server + sd. subdomain
+#                         (started by gpu-mode, NOT at boot)
+#   gpu-mode.nix        - the `gpu-mode` command: lease the R9700 to llm / sd /
+#                         game (see ./gpu-mode.sh)
 #   llama-log-viewer.nix- log viewer web app + logs. subdomain
 #   ollama-bridge.nix   - legacy Ollama-compatible bridge (no proxy)
 #   recallium.nix       - Recallium container + recallium./recallium-mcp.
@@ -25,6 +28,7 @@
     # ./alexandria.nix
     # ./diamcp.nix
     ./gpu-panel.nix
+    ./gpu-mode.nix
     # ./llama-log-viewer.nix
     # llama-swap is DISABLED while the Strata experiment runs: both want the
     # R9700's VRAM and tens of GB of RAM, and Strata exists to run a model
@@ -34,7 +38,10 @@
     ./strata.nix
     # ./ollama-bridge.nix
     ./recallium.nix
-    # ./sd-gate.nix
+    # SD shares the card with Strata via the gpu-mode lease (./gpu-mode.nix):
+    # the service exists, starts only when asked (no wantedBy), and the two
+    # servers evict each other politely if they ever run at once.
+    ./sd-gate.nix
   ];
 
   options.ai = {

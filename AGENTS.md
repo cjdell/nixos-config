@@ -82,7 +82,7 @@ All in `hosts/<name>` (directory name == host name == flake attribute), on the
 | Host | LAN IP | Role | What it actually runs | Deploy notes |
 | --- | --- | --- | --- | --- |
 | **grafton-router** | `.1` (`2a02:8010:6680:49::1`) | Edge router **and** the main homelab app host | PPPoE WAN (`pppoe-zen`), `lan` bridge + VLAN10, nftables, dnsmasq DHCP+DNS, AdGuard, WireGuard `10.47.0.0/16`, headscale + Tailscale, **kanidm** IdP (`kanidm.home.chrisdell.info`), nginx public edge `*.home.chrisdell.info` (ACME DNS-01 Route 53 + route53 dynamic DNS) proxying to itself *and* to N100-NAS (`grafana…`→`:3000`, `filebrowser…`→`:8002`), Home Assistant + InfluxDB + Mosquitto + zigbee2mqtt, Frigate (+`frigate-whisper`/`frigate-monitor`), Jellyfin, Immich, qBittorrent, Ghost, 2fauth, Beszel, Postgres, **meter-relay** (`:8484`), container-ui, TFTP/iPXE netboot, a microVM host (`grafton-hackspace-client`, `.15`), dsh-harness `:3080` | **autoRollback ON** → `sudo nixos-confirm`. 15 GiB RAM + 8 GiB `/swapfile`. No Rust toolchain. Config is `hosts/grafton-router/` (imports its own flake inputs). |
-| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Strata `:8080` (R9700 32 GB; llama-swap `:8081` is **disabled** — see the Strata section), sd-gate + SDXL, Recallium (its LLM = Strata via `/recallium-llm`), diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
+| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Strata `:8080` (R9700 32 GB; llama-swap `:8081` is **disabled** — see the Strata section), sd-gate + SDXL (only when `gpu-mode sd` holds the card — see the GPU-modes section), Recallium (its LLM = Strata via `/recallium-llm`), diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
 | **N100-NAS** | `.22` | Media/app NAS (ZFS pool `samsung-4tb`: `ds-media`, `ds-photos`) | Jellyfin, Immich (podman: server/ml/redis/postgres), qBittorrent, Postgres + postgresqlBackup, filebrowser, Grafana `:3000` (kanidm OIDC, `grafana.home.chrisdell.info`), container-ui `:8091`, Samba + NFS, sanoid + syncoid → N40L-NAS and dbthr33, Scrutiny, Prometheus exporters, Tailscale | **autoRollback ON** → `sudo nixos-confirm`. Repo checkout lives here too. `common/folding-at-home.nix` (the linuxserver container) is imported — it was crash-looping on every host over an unqualified image name, fixed 2026-10-20, so it will start CPU-folding on the next switch of every host that imports it. |
 | **GEN8-NAS** | `.23` | Bulk file + snapshot host (ZFS `sas-24tb`: `ds-public`, `ds-cjdell`, `ds-backup`) | Samba + NFS shares, sanoid snapshots, syncoid → N40L-NAS, `backup-host` receiver (`backup` user, `/var/lib/backup`), Scrutiny, Prometheus exporters, Tailscale, `lsiutil`/`sasutils` (HBA) | no autoRollback. ZFS via disko. |
 | **N40L-NAS** | `.21` (`…:49::21`) | The backup **target** (ZFS `sas-16tb`) | Receives the GEN8 + N100 syncoid streams under `sas-16tb/ds-external-backups/…`, holds dbthr33's `ds-frigate-archive`, UniFi controller container, `zfs-status`, Scrutiny, Tailscale | `nfs.nix`, `samba.nix` and `backup.nix` exist in the directory but are **not imported** by `default.nix` — no shares and no offsite push from this box. no autoRollback. |
@@ -547,23 +547,30 @@ then fails with `ErrorOutOfDeviceMemory` even though 32 GB VRAM is free.
 the VAE on CPU: `--vae-on-cpu`). Bigger graphs (Flux/SD3 at high res) will hit
 the same cap.
 
-### sd-gate: on-demand sd-server + web UI (live)
+### sd-gate: on-demand sd-server + web UI (live, started by `gpu-mode sd`)
 
-VRAM is at a premium (the R9700 also hosts llama-swap's resident coding
-model), so SDXL is **not** kept resident:
+VRAM is at a premium (the R9700 hosts Strata's resident LLM), so SDXL is
+**not** kept resident — and since 2026-10-27 `sd-gate.service` is **not
+`wantedBy` at boot either**: the `gpu-mode` lease (section above) starts it,
+because the LLM and SD split one 32 GiB card.
 
 - **systemd service `sd-gate`** (`hosts/zen3-nixos/ai/sd-gate.nix`; zero-dep Rust app
   in `crates/sd-gate/`): always listens on `127.0.0.1:8084` (nginx's `/sd-api`
   target). On the **first connection** it checks free VRAM (`amd-smi metric
-  -m --json`): if < `--min-vram-gib 10` (i.e. the llama-swap LLM is
-  resident) it posts to llama-swap's `POST /api/models/unload` and waits up
-  to `--vram-wait-secs 90` for the VRAM before spawning `sd-server` on
-  `127.0.0.1:8085` (same SDXL model, `--vae-tiling`, `--max-vram -1`); if the
-  VRAM stays low it proceeds anyway (GTT-spill speed). Then it waits for
-  readiness (`GET /v1/models` → 200) and proxies TCP traffic. **120 s after
-  the last request it kills `sd-server` → VRAM freed**; the next request
-  loads it back (a few seconds with a warm page cache). Lifecycle in
-  `journalctl -u sd-gate`.
+  -m --json`): if < `--min-vram-gib 10` (i.e. Strata's LLM is resident) it
+  posts to **Strata's `POST /v1/unload`** (`--llm-unload-url`; the llama-swap
+  `:8081` endpoint it used to call is gone, and the gate now sends the
+  `Content-Type: application/json` header that Strata's CSRF guard demands,
+  else 415) and waits up to `--vram-wait-secs 90` for the VRAM before
+  spawning `sd-server` on `127.0.0.1:8085` (same SDXL model, `--vae-tiling`,
+  `--max-vram -1`); if the VRAM stays low it proceeds anyway (GTT-spill
+  speed). Strata's serve layer then reloads the LLM **by itself on the next
+  LLM request**, and its `before_load` hook stops sd-gate first (see
+  `./strata.nix`) — whoever needed the card last wins it, nothing loops. The
+  gate waits for readiness (`GET /v1/models` → 200) and proxies TCP traffic.
+  **120 s after the last request it kills `sd-server` → VRAM freed**; the
+  next request loads it back (a few seconds with a warm page cache).
+  Lifecycle in `journalctl -u sd-gate`.
 - **Status page:** `http://192.168.49.50/sd-status/` or
   `https://sd.ai.chrisdell.info/sd-status/` (JSON at
   `/sd-status/status`) — state, sd-server pid/times, idle-unload countdown,
@@ -588,13 +595,45 @@ model), so SDXL is **not** kept resident:
 - **Force-unload now:** `kill $(cat /run/sd-gate.pid)` — the gate survives and
   respawns sd-server on the next request. The unit's `ExecStop` kills any
   leftover sd-server if the gate itself is SIGKILLed, so VRAM can't be orphaned.
-- **Shared-GPU gotcha:** the R9700 is also home to llama-swap's resident coding
-  model (~26 GB VRAM), so SD runs at GTT-spill speed while the LLM is loaded
-  (e.g. ~36 s for 8 steps at 512×512 vs ~25 s for 30 steps at 1024×1024 when
-  free). The gate now unloads the LLM automatically when it loads SD (see
-  above); manual equivalent: `curl -X POST http://127.0.0.1:8081/api/models/unload`
-  (the LLM re-loads on the next LLM request). Model stays resident regardless,
-  so nothing to preload.
+- **Shared-GPU gotcha:** the R9700 is also home to Strata's resident LLM
+  (~32 GB VRAM + expert cache), so SD runs at GTT-spill speed if the LLM is
+  still loaded (e.g. ~36 s for 8 steps at 512×512 vs ~25 s for 30 steps at
+  1024×1024 when free). The gate evicts the LLM automatically when it loads
+  SD (see above); the clean version is `gpu-mode sd`, which *stops*
+  `strata.service` outright (Pi / Recallium / llm endpoints stay down until
+  `gpu-mode llm`). The SDXL model stays resident while the gate runs, so
+  nothing to preload.
+
+## GPU modes: `gpu-mode llm | sd | game` (zen3-nixos)
+
+One 32 GiB card, three jobs that each want it whole: the Strata LLM, Stable
+Diffusion, and (occasionally) a game. `gpu-mode`
+(`hosts/zen3-nixos/ai/gpu-mode.nix` + `./gpu-mode.sh`, installed on PATH)
+makes the card a **lease**:
+
+- `gpu-mode` — status: which mode holds the card, per-unit state, whether
+  Strata's model is loaded and what is in flight, MiB free.
+- `gpu-mode llm` — stop `sd-gate`, start `strata`, wait until `/v1/status`
+  reports `loaded:true` (the model load is **multi-minute**, ~60 GiB RAM;
+  the box is sluggish while it fills). **The boot default.** If the serve
+  layer is already up but its engine was evicted, it sends a 1-token warm-up
+  request so "ready" really means ready.
+- `gpu-mode sd` — stop `strata`, start `sd-gate` (SDXL itself loads on the
+  first request and idles out 120 s after the last).
+- `gpu-mode game` (aliases `free` / `off`) — stop both: 32 GiB of VRAM and
+  the ~60 GiB of RAM Strata held come back. Polls `amd-smi` until free.
+
+The lease is exclusive by *unit state*: sd/game **stop** `strata.service`
+(not merely unload it), so background Pi/Recallium traffic cannot
+auto-reload the 90 GB model into VRAM mid-game — the LLM endpoints answer
+502 while off lease, which is the point. Interactive switches warn + confirm
+if a Strata turn is in flight. A reboot always restores `llm`
+(`sd-gate.service` deliberately has no `wantedBy` — only `gpu-mode` starts
+it). And an accidental overlap resolves *cooperatively* instead of looping:
+sd-gate evicts the LLM over `POST /v1/unload` (Strata's serve layer then
+auto-reloads on the next LLM request, whose `before_load` hook stops sd-gate
+back). The script calls `/run/setuid-programs/sudo` (passwordless wheel on
+this host), so no polkit rule is needed.
 
 ## Recallium (memory server, live on zen3-nixos)
 
@@ -974,6 +1013,15 @@ batching (`"parallel"` / `--batch N` / `--batch-mtp`) is available and **not
 enabled** — slots cost 0.56 GiB of expert-cache VRAM each against **232 MiB free**
 and drop the MTP draft path, which is what the 54.8 tok/s is made of. Analysis and
 the numbers to watch if concurrency ever reaches 3+: [`docs/strata-batching.md`](docs/strata-batching.md).
+
+⚠️ **The whole card is a lease, not an allocation:** `gpu-mode sd|game`
+(see the GPU-modes section) **stops `strata.service` outright** — do not
+"restart it for good measure" while testing SD or gaming, that reloads the
+model and eats the VRAM for minutes. The serve layer's `POST /v1/unload`
+(model leaves VRAM, auto-reloads on the next request) and the `before_load`
+config key (a shell command run before every (re)load — ours stops
+`sd-gate`) are what let the two servers hand the card to each other without
+fighting.
 
 ⚠️ **0.1.43 and 0.1.44 change answers on our card** — three RDNA4 defaults now apply that
 did not in 0.1.42: `STRATA_ROUTE_TAIL_SKIP=7` (stays off only from 90 % of experts in the GPU

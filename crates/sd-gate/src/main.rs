@@ -7,9 +7,11 @@
 //! is out of the R9700's VRAM again — and the next request loads it back.
 //!
 //! Before each spawn it checks free VRAM (`--vram-tool`, amd-smi): if less
-//! than `--min-vram-gib` is available it asks llama-swap to unload its model
-//! (`--llm-unload-url`) and waits for the VRAM to be freed, so SDXL gets a
-//! fast (non-GTT-spill) run instead of sharing the GPU.
+//! than `--min-vram-gib` is available it asks the resident LLM server to
+//! unload its model (`--llm-unload-url`; Strata's `POST /v1/unload`) and
+//! waits for the VRAM to be freed, so SDXL gets a fast (non-GTT-spill) run
+//! instead of sharing the GPU. Strata's serve layer reloads the LLM by
+//! itself on the next LLM request, so the eviction is temporary by design.
 //!
 //! A second listener (`--status-listen`, 127.0.0.1:8086) serves a status
 //! page (HTML at `/`, JSON at `/status`) showing why the model is running:
@@ -150,8 +152,17 @@ fn http_request(method: &str, url: &str, timeout: Duration) -> Option<String> {
     let (addr, path) = parse_http_url(url)?;
     let mut s = TcpStream::connect_timeout(&addr, timeout).ok()?;
     let _ = s.set_read_timeout(Some(timeout));
+    // POSTs carry the JSON content type Strata demands: its /v1/unload
+    // anti-CSRF guard answers 415 to a content-type-less request. An empty
+    // body means "unload, no model filter, do not wait for a running turn"
+    // (busy -> 409, which the caller rides out by polling VRAM).
+    let post = if method == "POST" {
+        "Content-Type: application/json\r\nContent-Length: 0\r\n"
+    } else {
+        ""
+    };
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{post}Connection: close\r\n\r\n"
     );
     s.write_all(req.as_bytes()).ok()?;
     let mut buf = Vec::new();
@@ -262,7 +273,7 @@ fn kill_child(sh: &Shared) {
     let _ = std::fs::remove_file(PIDFILE);
 }
 
-/// If free VRAM is below the threshold, ask llama-swap to unload its model
+/// If free VRAM is below the threshold, ask the LLM server (Strata) to unload
 /// and wait (up to cfg.vram_wait) for the VRAM to be freed. Never blocks the
 /// spawn forever: if the VRAM stays low we proceed (sd-server degrades to
 /// GTT-spill speed rather than refusing to run).
@@ -287,18 +298,18 @@ fn ensure_vram(sh: &Shared, cfg: &Cfg) {
         return;
     }
     log(&format!(
-        "free VRAM {} MB < required {} MB; asking llama-swap to unload ({})",
+        "free VRAM {} MB < required {} MB; asking the LLM server to unload ({})",
         v.free_mb, min_mb, cfg.llm_unload_url
     ));
     match http_request("POST", &cfg.llm_unload_url, Duration::from_secs(20)) {
         Some(resp) => {
             let status_line = resp.lines().next().unwrap_or("").to_string();
-            log(&format!("llama-swap unload response: {status_line}"));
+            log(&format!("LLM unload response: {status_line}"));
             if status_line.contains(" 2") {
                 sh.counts.lock().unwrap().llm_unloads += 1;
             }
         }
-        None => log("llama-swap unload request failed"),
+        None => log("LLM unload request failed"),
     }
     let deadline = Instant::now() + cfg.vram_wait;
     let mut last = v.free_mb;
@@ -711,7 +722,7 @@ fn main() {
     let mut ready_secs: u64 = 180;
     let mut vram_tool = "amd-smi";
     let mut min_vram_gib: f64 = 10.0;
-    let mut llm_unload_url = "http://127.0.0.1:8081/api/models/unload";
+    let mut llm_unload_url = "http://127.0.0.1:8080/v1/unload";
     let mut vram_wait_secs: u64 = 90;
     let mut cmd: Option<Vec<String>> = None;
 

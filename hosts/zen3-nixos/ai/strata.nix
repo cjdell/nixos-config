@@ -370,6 +370,17 @@ let
       # not move it, the next candidate is GPU_PINNED_MIN_XFER_SIZE=1048576
       # (#920). Details: docs/strata-hang.md.
       env.HSA_USERPTR_FOR_PAGED_MEM = "0";
+      # GPU leasing (./gpu-mode.nix). serve/server.py runs this shell command
+      # before it (re)loads the engine and only proceeds once it exits. Its
+      # purpose is the SD -> LLM direction of the lease: sd-gate evicted our
+      # model via POST /v1/unload to run SDXL, and before the next LLM request
+      # pays the multi-minute reload we take the card back decisively —
+      # stopping sd-gate kills its sd-server (same cgroup, and ExecStop kills
+      # the pidfile child) so the two never fight over VRAM. On a box in the
+      # normal llm mode (or at boot) sd-gate is already stopped and the stop
+      # is a no-op. The LLM direction (strata -> sd) is the same idea in
+      # ./sd-gate.nix: --llm-unload-url points at /v1/unload.
+      before_load = "${pkgs.systemd}/bin/systemctl stop sd-gate";
     }
   );
 
