@@ -112,7 +112,7 @@ in
         "dell-vostro-kabylake-nixos                   ,192.168.49.62,1h"
         "asus-xeon-1270v5-nixos,                      ,192.168.49.63,1h"
         "lenovo-thinkcentre-core-8400-c-nixos         ,192.168.49.64,1h"
-        "asus-i7-6700-nixos                           ,192.168.49.65,1h"
+        "70:8b:cd:a8:50:bc,asus-i7-6700-nixos         ,192.168.49.65,1h"
         "AirM5                                        ,192.168.49.66,1h"
         "rocketlakelatitude-nixos                     ,192.168.49.67,1h"
         "precision-nixos                              ,192.168.49.68,1h"
