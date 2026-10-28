@@ -12,7 +12,7 @@
 #
 # The panel has one GPU backend per vendor; a host says which one it is:
 #   gpu = "nvidia" + nvidiaSmi   asus-i7-6700 (GTX 1060 + GTX 970 via nvidia-smi;
-#                                the backend samples every GPU line)
+#                                one card + one cap slider per GPU line)
 #   gpu = "amd"                  zen1 (RX 5700 XT via amdgpu sysfs)
 # Adding the next heater (haswellatx, ...) is another folding-heater.nix that
 # imports this module and sets the two or three options below — never a copy

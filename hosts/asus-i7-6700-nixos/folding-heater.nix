@@ -98,12 +98,11 @@
   # crates/fah-panel, service module common/fah-panel.nix): live GPU
   # (nvidia-smi) + CPU (sysfs) telemetry with a power-cap slider, served
   # unauthenticated on port 80 — http://192.168.49.65/ — matching how the
-  # FAH Web Control on :7396 is exposed here. The nvidia backend samples
-  # every GPU (power summed across the 1060 + 970 for the load card), and
-  # its cap slider sets the same limit on both cards (shared nvidia-smi -pl
-  # without -i) — an emergency throttle knob, not per-card tuning. No
-  # boot-time power caps and no budget marker here: unlike the old
-  # PSU-crippled HP, the DC estimate has nothing to watch against.
+  # FAH Web Control on :7396 is exposed here. The nvidia backend shows one
+  # live card + one cap slider PER GPU (1060 and 970, each with its own
+  # nvidia-smi -i N -pl range), and the DC-load card sums both boards with
+  # the CPU. No boot-time power caps and no budget marker here: unlike the
+  # old PSU-crippled HP, the DC estimate has nothing to watch against.
   services.fah-panel = {
     enable = true;
     gpu = "nvidia";

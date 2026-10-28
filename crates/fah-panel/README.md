@@ -15,11 +15,13 @@ any frontend change requires rebuilding the binary.
 
 - **nvidia** — `--nvidia-smi <absolute store path>` (the panel never searches
   PATH, so the service pins the exact driver package). Polls
-  `--query-gpu=util,memory,temp,fan,power,clocks,pstate,throttle`, one line
-  per GPU on a multi-card host (power/memory summed, temp/util/clocks the
-  hottest/busiest); the control
-  is `nvidia-smi -pl` (NVML power cap, the one wattage knob GeForce has;
-  without `-i` it sets the same cap on every card).
+  `--query-gpu=util,memory,temp,fan,power,clocks,pstate,throttle`; the CSV has
+  one line per GPU and **each line becomes its own entry** — the UI renders a
+  card and a power-cap slider per card, and the control is
+  `nvidia-smi -i <N> -pl <W>` (per-card NVML power cap, the one wattage knob
+  GeForce has). Identity + cap ranges come from one
+  `--query-gpu=name,driver_version,power.min_limit,power.max_limit` at
+  startup.
 - **amd** — native amdgpu sysfs, resolved by `--amd-pci <vendor:device|BDF>`
   (empty = first PCI device exporting an amdgpu hwmon; prefer ids, BDFs
   shuffle): `gpu_busy_percent`, `mem_info_vram_*`, hwmon temps
@@ -28,21 +30,25 @@ any frontend change requires rebuilding the binary.
   write to `power1_cap` (microwatts); on Navi 10 it works with the *default*
   ppfeaturemask (verified on zen1), no overdrive bits needed. `power1_cap_*`
   supplies the slider range + hardware default live. amdgpu exposes no product
-  name — pass `--gpu-name`.
+  name — pass `--gpu-name`. One device (index 0); a second AMD card would
+  want its own hwmon set + `--amd-pci` list.
 - **auto** (default) — nvidia when `--nvidia-smi` is given, else amdgpu.
 
 ## Architecture
 
 ```
-browser ──HTTP/SSE──> fah-panel ─┬─ nvidia: nvidia-smi --query-gpu / -pl
+browser ──HTTP/SSE──> fah-panel ─┬─ nvidia: nvidia-smi --query-gpu / -i N -pl
                                  └─ amd:    /sys/bus/pci/devices/*/{gpu_busy_percent,pp_dpm_*,hwmon}
                           └────> /sys: coretemp|k10temp hwmon, per-core cpufreq, RAPL package-0
 ```
 
-- The **power cap is live state only**: whatever the backend reports is
-  truth. Persisting a cap at boot is the job of a per-host unit (see
-  `nvidia-power-limit.service` in
-  `hosts/hp-z240-xeon-1240v6-nixos/folding-heater.nix`), not the panel.
+- A **sample carries one `gpus[]` entry per GPU plus machine-wide CPU and DC
+  fields** — the DC estimate (and its budget marker) is deliberately summed
+  across all cards, because the PSU does not offer per-slot meters either.
+- The **power caps are live state only**: whatever the backend reports is
+  truth. Persisting a cap at boot is the job of a per-host unit (an old
+  example was `nvidia-power-limit.service` on the pre-2026-10-28 hp-z240
+  box), not the panel.
 - CPU columns are ported from gpu-panel: package temperature
   (`Tctl`/`Tdie`/`Package id 0`, hottest `Core` fallback), per-core
   `scaling_cur_freq` spread, package power differenced from the RAPL
@@ -68,13 +74,19 @@ browser ──HTTP/SSE──> fah-panel ─┬─ nvidia: nvidia-smi --query-gpu
 | GET | `/` | dashboard (embedded HTML/JS/CSS) |
 | GET | `/api/snapshot` | current sample + 600-sample history + control state + static cpu info |
 | GET | `/api/stream` | SSE, one JSON sample per tick (2 s default) |
-| GET | `/api/health` | liveness + backend/gpu/driver/cap-range info |
-| POST | `/api/power` | `{"cap": 120}` — range-checked against the backend's cap min/max |
+| GET | `/api/health` | liveness + per-GPU names/drivers/cap-ranges + cpu throttle state |
+| POST | `/api/power` | `{"gpu": 0, "cap": 120}` — one card, range-checked against its cap min/max; `gpu` defaults to 0 |
 | POST | `/api/cpu-target` | `{"target": 75}` — CPU max-temperature slider; `0` = off |
 
-`control` in the snapshot/health responses carries `backend` (`nvidia` /
-`amd`), `gpu`, `driver`, `host`, `ram`, `cap`, `cap_min`/`cap_max`,
-`cap_default` (0/absent → omitted by the UI), `budget`, and the CPU
+A **sample** is `{ts, gpus:[{index, util, mem_used, mem_total, temp, fan,
+power, power_limit, clock_gpu, clock_mem, clock_gpu_max, clock_mem_max,
+pstate, perf, throttle[]}, …], cpu_temp, cpu_power, total, ok, error}` plus
+the sampler-spliced `cpu_hot`/`cpu_clk_avg`/`cpu_clk_max`/`cpu_cap`.
+
+`control` in the snapshot/health responses carries `gpus: [{index, name,
+driver, cap, cap_min, cap_max, cap_default}, …]` (cap = that card's live
+`power_limit`; `cap_min == 0` → no cap support, slider hidden), plus
+`backend` (`nvidia`/`amd`), `host`, `ram`, `budget`, and the CPU
 auto-throttle state: `cpu_throttle` (a writable `scaling_max_freq` exists),
 `cpu_target`, the applied `cpu_cap` (GHz, null = no limit) and its
 `cpu_min_ghz`/`cpu_max_ghz` bounds.
@@ -103,8 +115,8 @@ panel reports the read-back ceiling, not its request.)
 Built by `crates/fah-panel/nix/package.nix`, run as `fah-panel.service` by
 `common/fah-panel.nix` (`services.fah-panel`), enabled per heater:
 
-- `hosts/hp-z240-xeon-1240v6-nixos/folding-heater.nix` — `gpu = "nvidia"`,
-  `budget = 180` → `http://192.168.49.65/`
+- `hosts/asus-i7-6700-nixos/folding-heater.nix` — `gpu = "nvidia"` (dual
+  GTX: two cards, two sliders) → `http://192.168.49.65/`
 - `hosts/zen1-nixos/folding-heater.nix` — `gpu = "amd"`, `amdPci =
   "1002:731f"` → `http://192.168.49.51/`
 

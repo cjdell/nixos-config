@@ -17,33 +17,23 @@
 
 <main>
   <section id="cards">
-    <div class="card"><div class="label">GPU load</div><div class="value" id="util">–</div><canvas id="spark-util"></canvas></div>
-    <div class="card"><div class="label">GPU power</div><div class="value" id="power">–</div><canvas id="spark-power"></canvas></div>
-    <div class="card"><div class="label">GPU temp</div><div class="value" id="temp">–</div><canvas id="spark-temp"></canvas></div>
-    <div class="card"><div class="label">VRAM</div><div class="value" id="vram">–</div><div class="foot" id="vram-foot"></div></div>
+    <!-- One live card per GPU, built by app.js from /api/health's gpus[] -->
+    <div id="gpu-strip" class="gpu-strip"></div>
+    <div class="card cpu"><div class="label">CPU</div><div class="value" id="cpu-temp">–</div><div class="foot" id="cpu-foot"></div></div>
+    <div class="card cpu"><div class="label">CPU power / clocks</div><div class="value" id="cpu-power">–</div><div class="foot" id="cpu-clk-foot"></div></div>
     <div class="card wide" id="clocks-card">
       <div class="label">Clocks</div>
       <div class="kv-grid">
-        <div><div class="label">GPU core</div><div class="value small" id="clk-gpu">–</div><div class="foot" id="clk-gpu-foot"></div></div>
-        <div><div class="label">GPU VRAM</div><div class="value small" id="clk-vram">–</div><div class="foot" id="clk-vram-foot"></div></div>
         <div><div class="label">CPU (per-core)</div><div class="value small" id="clk-cpu">–</div><div class="foot" id="clk-cpu-foot"></div></div>
         <div><div class="label">RAM bus</div><div class="value small" id="clk-ram">–</div><div class="foot" id="clk-ram-foot">from SMBIOS at startup</div></div>
       </div>
     </div>
-    <div class="card"><div class="label">Fan</div><div class="value" id="fan">–</div><div class="foot" id="pstate-foot"></div></div>
-    <div class="card cpu"><div class="label">CPU</div><div class="value" id="cpu-temp">–</div><div class="foot" id="cpu-foot"></div></div>
-    <div class="card cpu"><div class="label">CPU power / clocks</div><div class="value" id="cpu-power">–</div><div class="foot" id="cpu-clk-foot"></div></div>
-    <div class="card wide"><div class="label">DC load estimate (CPU package + GPU board)</div><div class="value" id="total">–</div><div class="foot" id="total-foot">rail sensors are not wired on this board — this sum is the brownout monitor</div><canvas id="spark-total"></canvas></div>
+    <div class="card wide"><div class="label">DC load estimate (CPU package + all GPU boards)</div><div class="value" id="total">–</div><div class="foot" id="total-foot">rail sensors are not wired on this board — this sum is the brownout monitor</div><canvas id="spark-total"></canvas></div>
   </section>
 
   <section class="card" id="control">
-    <div class="label">GPU power cap</div>
-    <div id="cap-row">
-      <input type="range" id="cap-slider" min="0" max="200" step="1">
-      <span id="cap-value" class="value small">–</span>
-      <button id="cap-apply">apply</button>
-    </div>
-    <div class="foot" id="cap-foot"></div>
+    <!-- One power-cap slider per GPU, built by app.js -->
+    <div id="cap-rows"></div>
     <div class="label ctl-gap">CPU max temperature (auto-throttle)</div>
     <div id="cpu-row">
       <input type="range" id="cpu-slider" min="0" max="100" step="1">
@@ -56,7 +46,7 @@
   <section class="card" id="about">
     <div class="foot">folding@home: <a id="fah-link" href="#" target="_blank" rel="noopener">web control</a>
       · donors <code>cjdell</code> team <code>236565</code>
-      · the startup cap lives in the host's boot-time systemd unit; both sliders only change live state —
+      · the startup caps live in the host's boot-time systemd unit; both sliders only change live state —
       a panel restart releases any CPU ceiling it set</div>
   </section>
 </main>

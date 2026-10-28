@@ -5,9 +5,11 @@
 //! boxes differ in what their GPU exposes, so the panel has a GPU backend per
 //! vendor behind one Sample schema, and the frontend/HTTP/SSE half is shared.
 //!
-//! * `--gpu nvidia` — GTX 970 (hp-z240): the proprietary driver exposes no
-//!   sysfs, so telemetry comes from `nvidia-smi --query-gpu` polling and the
-//!   control is `nvidia-smi -pl` (NVML power cap).
+//! * `--gpu nvidia` — GTX cards (asus-i7-6700, formerly the hp-z240): the
+//!   proprietary driver exposes no sysfs, so telemetry comes from
+//!   `nvidia-smi --query-gpu` polling — one entry per GPU line, since the
+//!   asus-i7-6700 has two cards — and the control is `nvidia-smi -i N -pl`
+//!   (per-card NVML power cap).
 //! * `--gpu amd` — RX 5700 XT (zen1): amdgpu exposes everything natively in
 //!   sysfs (gpu_busy_percent, hwmon temps/power, pp_dpm clock tables); the
 //!   control is a write to `hwmon/power1_cap` (microwatts), which works with
@@ -112,9 +114,14 @@ fn id_of(dir: &str, which: &str) -> String {
 // Backend trait
 // ---------------------------------------------------------------------------
 
-/// Static-ish identity + power-cap range shown in the panel header/control.
+/// Static-ish identity + power-cap range of ONE GPU, shown in the panel
+/// header and behind that GPU's cap slider.
+#[derive(Clone)]
 struct GpuInfo {
     kind: &'static str,
+    /// Stable index the frontend addresses this GPU by (= nvidia-smi index;
+    /// the single amdgpu device is 0).
+    index: usize,
     name: String,
     driver: String,
     /// Power-cap range; (0,0) = unsupported and the UI hides the slider.
@@ -124,13 +131,14 @@ struct GpuInfo {
     cap_default: f64,
 }
 
-/// One GPU vendor backend: produce the shared Sample schema and set the one
-/// wattage knob the card exposes. Implementations must be cheap to call from
-/// both the sampler thread and HTTP handler threads.
+/// One GPU vendor backend: produce the shared Sample schema for EVERY GPU
+/// the box has, and set that GPU's wattage knob by index. Implementations
+/// must be cheap to call from both the sampler thread and HTTP handler
+/// threads.
 trait GpuBackend: Send + Sync {
-    fn info(&self) -> GpuInfo;
+    fn infos(&self) -> Vec<GpuInfo>;
     fn sample(&self) -> Sample;
-    fn set_cap(&self, w: f64) -> Result<String, String>;
+    fn set_cap(&self, gpu: usize, w: f64) -> Result<String, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,63 +184,68 @@ fn throttle_names(bits: u64) -> Vec<&'static str> {
 
 struct Nvidia {
     smi: String,
-    name: String,
-    driver: String,
-    /// Power-cap range from power.min_limit/max_limit; (0,0) = unsupported.
-    cap_min: f64,
-    cap_max: f64,
+    /// Per-GPU identity + cap range, discovered once at startup (a boot
+    /// service; GPU hot-plug is out of scope). A driver that has not come up
+    /// yet yields a single placeholder entry — the UI shows `no data` until
+    /// the next restart, same as before.
+    gpus: Vec<GpuInfo>,
 }
 
 impl Nvidia {
     /// Startup identity queries (non-fatal: nvidia-smi may answer only a
     /// moment later; every error just shows up as `no data` in the UI).
     fn new(smi: &str, name_override: &str) -> Nvidia {
-        // One line per GPU; a multi-card host shows every name.
-        let name = nvidia_smi(smi, &["--query-gpu=name", "--format=csv,noheader"])
-            .map(|out| {
-                let names: Vec<&str> =
-                    out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-                if names.is_empty() {
-                    "NVIDIA GPU".to_string()
-                } else {
-                    names.join(" + ")
-                }
-            })
-            .unwrap_or_else(|e| {
-                eprintln!("fah-panel: nvidia-smi not usable yet: {e}");
-                "NVIDIA GPU".into()
-            });
-        let driver = nvidia_smi(smi, &["--query-gpu=driver_version", "--format=csv,noheader"])
-            .unwrap_or_default()
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        // Power-cap range; "N/A" fields (no support) become (0, 0) -> slider hidden.
-        // Multi-card: the range follows the FIRST card — set_cap() below is a plain
-        // nvidia-smi -pl (no -i), i.e. one shared cap for all cards, an emergency
-        // throttle knob rather than per-card tuning.
-        let (cap_min, cap_max) = match nvidia_smi(
+        // One CSV line per GPU -> one GpuInfo each. "N/A" cap fields (no
+        // support) become (0, 0) -> that card's slider stays hidden.
+        let mut gpus = nvidia_smi(
             smi,
-            &["--query-gpu=power.min_limit,power.max_limit", "--format=csv,noheader,nounits"],
-        ) {
-            Ok(line) => {
-                let f: Vec<&str> =
-                    line.lines().next().unwrap_or("").split(',').map(|c| c.trim()).collect();
-                (
-                    f.first().and_then(|v| v.parse().ok()).unwrap_or(0.0),
-                    f.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0),
-                )
+            &[
+                "--query-gpu=name,driver_version,power.min_limit,power.max_limit",
+                "--format=csv,noheader,nounits",
+            ],
+        )
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .enumerate()
+        .map(|(index, line)| {
+            let f: Vec<&str> = line.split(',').map(|c| c.trim()).collect();
+            let num = |i: usize| f.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            GpuInfo {
+                kind: "nvidia",
+                index,
+                name: f
+                    .first()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "NVIDIA GPU".to_string()),
+                driver: f.get(1).copied().unwrap_or("").to_string(),
+                cap_min: num(2),
+                cap_max: num(3),
+                // The legacy 580 branch has no default_power_limit query field.
+                cap_default: 0.0,
             }
-            Err(_) => (0.0, 0.0),
-        };
-        Nvidia {
-            smi: smi.to_string(),
-            name: pick_name(name_override, name),
-            driver,
-            cap_min,
-            cap_max,
+        })
+        .collect::<Vec<_>>();
+        if gpus.is_empty() {
+            eprintln!("fah-panel: nvidia-smi gave no GPU list yet (driver not up?)");
+            gpus.push(GpuInfo {
+                kind: "nvidia",
+                index: 0,
+                name: "NVIDIA GPU".to_string(),
+                driver: String::new(),
+                cap_min: 0.0,
+                cap_max: 0.0,
+                cap_default: 0.0,
+            });
         }
+        // --gpu-name is a single-card convenience (amdgpu-style naming); on a
+        // multi-card host the real per-card names are the whole point.
+        if gpus.len() == 1 && !name_override.trim().is_empty() {
+            gpus[0].name = pick_name(name_override, gpus[0].name.clone());
+        }
+        Nvidia { smi: smi.to_string(), gpus }
     }
 }
 
@@ -246,33 +259,28 @@ fn pick_name(override_name: &str, discovered: String) -> String {
 }
 
 impl GpuBackend for Nvidia {
-    fn info(&self) -> GpuInfo {
-        GpuInfo {
-            kind: "nvidia",
-            name: self.name.clone(),
-            driver: self.driver.clone(),
-            cap_min: self.cap_min,
-            cap_max: self.cap_max,
-            // The legacy 580 branch has no default_power_limit query field.
-            cap_default: 0.0,
-        }
+    fn infos(&self) -> Vec<GpuInfo> {
+        self.gpus.clone()
     }
 
     fn sample(&self) -> Sample {
         take_sample(&self.smi)
     }
 
-    fn set_cap(&self, w: f64) -> Result<String, String> {
-        nvidia_smi(&self.smi, &["-pl", &w.to_string()]).map(|m| m.replace('\n', " "))
+    fn set_cap(&self, gpu: usize, w: f64) -> Result<String, String> {
+        nvidia_smi(&self.smi, &["-i", &gpu.to_string(), "-pl", &w.to_string()])
+            .map(|m| m.replace('\n', " "))
     }
 }
 
-/// One GPU sample. nvidia-smi semantics: unavailable values come back as
-/// 0/"N/A"; we keep 0 and let the UI print "–" for the few that matter
-/// (fan on auto is reported as 0 -> null by fnum_pos).
+/// Live numbers for ONE GPU. nvidia-smi semantics: unavailable values come
+/// back as 0/"N/A"; we keep 0 and let the UI print "–" for the few that
+/// matter (fan on auto is reported as 0 -> null by fnum_pos).
 #[derive(Clone, Default)]
-struct Sample {
-    ts: i64,
+struct GpuSample {
+    /// Backend GPU index (matches GpuInfo.index; a poll that sees more GPUs
+    /// than startup discovered still numbers its lines from 0).
+    index: usize,
     util: f64,
     mem_used: f64,
     mem_total: f64,
@@ -288,27 +296,16 @@ struct Sample {
     /// amdgpu performance level ("auto"/"peak"/…); empty on nvidia.
     perf: String,
     throttle: Vec<&'static str>,
-    /// CPU package (RAPL) + GPU board power (NVML/amdgpu) = what the +12 V
-    /// rail is being asked to supply. There are no real rail sensors on these
-    /// boards (the HP Super-I/O hwmon exposes nothing but a dead pwm1; no
-    /// BMC), so this estimate plus the boot-time behaviour is the brownout
-    /// monitor.
-    total: f64,
-    cpu_temp: f64,
-    cpu_power: f64,
-    ok: bool,
-    error: String,
 }
 
-impl Sample {
+impl GpuSample {
     fn to_json(&self) -> String {
         format!(
-            "{{\"ts\":{},\"util\":{},\"mem_used\":{},\"mem_total\":{},\"temp\":{},\
+            "{{\"index\":{},\"util\":{},\"mem_used\":{},\"mem_total\":{},\"temp\":{},\
              \"fan\":{},\"power\":{},\"power_limit\":{},\"clock_gpu\":{},\"clock_mem\":{},\
              \"clock_gpu_max\":{},\"clock_mem_max\":{},\
-             \"pstate\":\"{}\",\"perf\":\"{}\",\"throttle\":[{}],\"cpu_temp\":{},\"cpu_power\":{},\"total\":{},\
-             \"ok\":{},\"error\":\"{}\"}}",
-            self.ts,
+             \"pstate\":\"{}\",\"perf\":\"{}\",\"throttle\":[{}]}}",
+            self.index,
             fnum(self.util),
             fnum(self.mem_used),
             fnum(self.mem_total),
@@ -323,6 +320,34 @@ impl Sample {
             json_escape(&self.pstate),
             json_escape(&self.perf),
             self.throttle.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(","),
+        )
+    }
+}
+
+/// One poll: a GpuSample per GPU plus the machine-wide DC estimate. The
+/// total (CPU package + every GPU board) is what the +12 V rail is asked to
+/// supply; there are no real rail sensors on these boards (no BMC, the HP
+/// Super-I/O exposed nothing but a dead pwm1), so this estimate plus the
+/// boot-time behaviour is the brownout monitor — deliberately aggregated
+/// across cards, since the PSU does not offer per-slot meters either.
+#[derive(Clone, Default)]
+struct Sample {
+    ts: i64,
+    gpus: Vec<GpuSample>,
+    total: f64,
+    cpu_temp: f64,
+    cpu_power: f64,
+    ok: bool,
+    error: String,
+}
+
+impl Sample {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"ts\":{},\"gpus\":[{}],\"cpu_temp\":{},\"cpu_power\":{},\"total\":{},\
+             \"ok\":{},\"error\":\"{}\"}}",
+            self.ts,
+            self.gpus.iter().map(|g| g.to_json()).collect::<Vec<_>>().join(","),
             fnum_pos(self.cpu_temp),
             fnum(self.cpu_power),
             fnum(self.total),
@@ -330,50 +355,44 @@ impl Sample {
             json_escape(&self.error),
         )
     }
+
+    fn gpu_power_sum(&self) -> f64 {
+        self.gpus.iter().map(|g| g.power).sum()
+    }
 }
 
-/// One nvidia-smi poll. One output line per GPU (the dual-card heater
-/// asus-i7-6700-nixos has two): power and memory SUM (that is what the
-/// DC-load card asks the +12 V rail for), temp/fan/util/clocks take the
-/// hottest/busiest card, pstate the most active, and the throttle reasons
-/// are unioned. A single-card host sees exactly the old numbers.
+/// One nvidia-smi poll; the CSV answers one line per GPU (the dual-card
+/// heater asus-i7-6700-nixos has two) and every line becomes its own
+/// GpuSample.
 fn take_sample(bin: &str) -> Sample {
     let mut s = Sample::default();
     match nvidia_smi(bin, &[&format!("--query-gpu={POLL_FIELDS}"), POLL_QUERY]) {
         Ok(out) => {
-            let mut throttle: Vec<&'static str> = Vec::new();
-            for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            for (index, line) in out.lines().map(str::trim).filter(|l| !l.is_empty()).enumerate()
+            {
                 let f: Vec<&str> = line.split(',').map(|c| c.trim()).collect();
                 if f.len() < 13 {
                     s.error = format!("unexpected nvidia-smi output: {line}");
                     return s;
                 }
-                s.util = s.util.max(csv_f64(f[0]));
-                s.mem_used += csv_f64(f[1]);
-                s.mem_total += csv_f64(f[2]);
-                s.temp = s.temp.max(csv_f64(f[3]));
-                s.fan = s.fan.max(csv_f64(f[4]));
-                s.power += csv_f64(f[5]);
-                s.power_limit += csv_f64(f[6]);
-                s.clock_gpu = s.clock_gpu.max(csv_f64(f[7]));
-                s.clock_mem = s.clock_mem.max(csv_f64(f[8]));
-                // Lower P-number = more active; "N/A" only wins if nothing else spoke.
-                if s.pstate.is_empty()
-                    || (f[9] != "N/A" && (s.pstate == "N/A" || f[9] < s.pstate.as_str()))
-                {
-                    s.pstate = f[9].to_string();
-                }
+                let mut g = GpuSample { index, ..Default::default() };
+                g.util = csv_f64(f[0]);
+                g.mem_used = csv_f64(f[1]);
+                g.mem_total = csv_f64(f[2]);
+                g.temp = csv_f64(f[3]);
+                g.fan = csv_f64(f[4]);
+                g.power = csv_f64(f[5]);
+                g.power_limit = csv_f64(f[6]);
+                g.clock_gpu = csv_f64(f[7]);
+                g.clock_mem = csv_f64(f[8]);
+                g.pstate = f[9].to_string();
                 let bits = u64::from_str_radix(f[10].trim_start_matches("0x"), 16).unwrap_or(0);
-                for t in throttle_names(bits) {
-                    if !throttle.contains(&t) {
-                        throttle.push(t);
-                    }
-                }
-                s.clock_gpu_max = s.clock_gpu_max.max(csv_f64(f[11]));
-                s.clock_mem_max = s.clock_mem_max.max(csv_f64(f[12]));
+                g.throttle = throttle_names(bits);
+                g.clock_gpu_max = csv_f64(f[11]);
+                g.clock_mem_max = csv_f64(f[12]);
+                s.gpus.push(g);
             }
-            s.throttle = throttle;
-            s.ok = true;
+            s.ok = !s.gpus.is_empty();
         }
         Err(e) => s.error = e,
     }
@@ -614,24 +633,26 @@ impl Amd {
 }
 
 impl GpuBackend for Amd {
-    fn info(&self) -> GpuInfo {
+    fn infos(&self) -> Vec<GpuInfo> {
         // Read the cap range live: the files are static in practice, but
         // reading them on every /api/health also covers a card whose paths
-        // resolved only after startup.
+        // resolved only after startup. One amdgpu device per heater so far;
+        // a second RX card would need its own hwmon set (and a pci spec list).
         let (mut cmin, mut cmax, mut cdef) = (0.0, 0.0, 0.0);
         if let Ok(p) = self.paths() {
             cmin = read_f64(&format!("{}/power1_cap_min", p.hwmon)).unwrap_or(0.0) / 1e6;
             cmax = read_f64(&format!("{}/power1_cap_max", p.hwmon)).unwrap_or(0.0) / 1e6;
             cdef = read_f64(&format!("{}/power1_cap_default", p.hwmon)).unwrap_or(0.0) / 1e6;
         }
-        GpuInfo {
+        vec![GpuInfo {
             kind: "amd",
+            index: 0,
             name: self.name.clone(),
             driver: self.driver.clone(),
             cap_min: cmin,
             cap_max: cmax,
             cap_default: cdef,
-        }
+        }]
     }
 
     fn sample(&self) -> Sample {
@@ -644,13 +665,14 @@ impl GpuBackend for Amd {
                 return s;
             }
         };
-        s.util = read_u64(&format!("{}/gpu_busy_percent", p.dev)).unwrap_or(0) as f64;
+        let mut g = GpuSample::default();
+        g.util = read_u64(&format!("{}/gpu_busy_percent", p.dev)).unwrap_or(0) as f64;
         // MiB, like the nvidia backend reports memory.used/total.
-        s.mem_used = read_u64(&format!("{}/mem_info_vram_used", p.dev)).unwrap_or(0) as f64
+        g.mem_used = read_u64(&format!("{}/mem_info_vram_used", p.dev)).unwrap_or(0) as f64
             / 1_048_576.0;
-        s.mem_total = read_u64(&format!("{}/mem_info_vram_total", p.dev)).unwrap_or(0) as f64
+        g.mem_total = read_u64(&format!("{}/mem_info_vram_total", p.dev)).unwrap_or(0) as f64
             / 1_048_576.0;
-        s.temp = {
+        g.temp = {
             let t = amd_temp_by(&p, "edge");
             if t > 0.0 {
                 t
@@ -664,23 +686,27 @@ impl GpuBackend for Amd {
             }
         };
         // pwm1 is 0..255; the UI wants a percentage (and null -> "auto").
-        s.fan = read_u64(&format!("{}/pwm1", p.hwmon)).map(|v| v as f64 * 100.0 / 255.0).unwrap_or(0.0);
-        s.power = read_f64(&format!("{}/power1_average", p.hwmon)).unwrap_or(0.0) / 1e6;
-        s.power_limit = read_f64(&format!("{}/power1_cap", p.hwmon)).unwrap_or(0.0) / 1e6;
+        g.fan = read_u64(&format!("{}/pwm1", p.hwmon)).map(|v| v as f64 * 100.0 / 255.0).unwrap_or(0.0);
+        g.power = read_f64(&format!("{}/power1_average", p.hwmon)).unwrap_or(0.0) / 1e6;
+        g.power_limit = read_f64(&format!("{}/power1_cap", p.hwmon)).unwrap_or(0.0) / 1e6;
         let (c, cmax) = dpm_clocks(&format!("{}/pp_dpm_sclk", p.dev));
-        s.clock_gpu = c;
-        s.clock_gpu_max = cmax;
+        g.clock_gpu = c;
+        g.clock_gpu_max = cmax;
         let (m, mmax) = dpm_clocks(&format!("{}/pp_dpm_mclk", p.dev));
-        s.clock_mem = m;
-        s.clock_mem_max = mmax;
-        s.perf = read_trim(&format!("{}/power_dpm_force_performance_level", p.dev))
+        g.clock_mem = m;
+        g.clock_mem_max = mmax;
+        g.perf = read_trim(&format!("{}/power_dpm_force_performance_level", p.dev))
             .unwrap_or_else(|| "auto".to_string());
+        s.gpus.push(g);
         s.ok = true;
         s.ts = now_ms();
         s
     }
 
-    fn set_cap(&self, w: f64) -> Result<String, String> {
+    fn set_cap(&self, gpu: usize, w: f64) -> Result<String, String> {
+        if gpu != 0 {
+            return Err(format!("this host has one GPU (index 0), not {gpu}"));
+        }
         let p = self.paths()?;
         let path = format!("{}/power1_cap", p.hwmon);
         std::fs::write(&path, format!("{}", (w * 1e6).round() as u64))
@@ -1006,20 +1032,36 @@ struct Shared {
     cpu_cap_khz: AtomicU64,
     seq: AtomicU64,
     cur: Mutex<String>,
+    /// The live power_limit of each GPU from the last sample (indexed by GPU
+    /// index) — what each cap slider shows as the card's current cap.
+    gpu_powers: Mutex<Vec<f64>>,
     history: Mutex<VecDeque<String>>,
     cpu_info: String,
 }
 
 impl Shared {
-    fn control_json(&self, cur: &str) -> String {
-        let mut cap = 0.0f64;
-        // power_limit is part of the sample JSON; read it back out.
-        if let Some(i) = cur.find("\"power_limit\":") {
-            let rest = &cur[i + 14..];
-            let end = rest.find([',', '}']).unwrap_or(rest.len());
-            cap = rest[..end].parse().unwrap_or(0.0);
-        }
-        let gi = self.backend.info();
+    fn control_json(&self) -> String {
+        let ok = self.cur.lock().unwrap().contains("\"ok\":true");
+        let powers = self.gpu_powers.lock().unwrap().clone();
+        let gpus = self
+            .backend
+            .infos()
+            .iter()
+            .map(|gi| {
+                format!(
+                    "{{\"index\":{},\"name\":\"{}\",\"driver\":\"{}\",\"cap\":{},\
+                     \"cap_min\":{},\"cap_max\":{},\"cap_default\":{}}}",
+                    gi.index,
+                    json_escape(&gi.name),
+                    json_escape(&gi.driver),
+                    fnum_pos(powers.get(gi.index).copied().unwrap_or(0.0)),
+                    fnum(gi.cap_min),
+                    fnum(gi.cap_max),
+                    fnum_pos(gi.cap_default),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let th = self.cpu_throttle.available();
         let target = self.cpu_target.load(Ordering::SeqCst) as f64 / 100.0;
         let cap_raw = self.cpu_cap_khz.load(Ordering::SeqCst);
@@ -1029,24 +1071,16 @@ impl Shared {
             self.cpu_throttle.read_cap().unwrap_or(cap_raw) as f64 / 1e6
         };
         format!(
-            "{{\"ok\":{},\"cap\":{},\"cap_min\":{},\"cap_max\":{},\"cap_default\":{},\"budget\":{},\
-             \"cpu_throttle\":{},\"cpu_target\":{},\"cpu_cap\":{},\"cpu_min_ghz\":{},\"cpu_max_ghz\":{},\
-             \"gpu\":\"{}\",\"driver\":\"{}\",\"ram\":\"{}\",\"backend\":\"{}\",\"host\":\"{}\"}}",
-            cur.contains("\"ok\":true"),
-            fnum(cap),
-            fnum(gi.cap_min),
-            fnum(gi.cap_max),
-            fnum_pos(gi.cap_default),
+            "{{\"ok\":{ok},\"gpus\":[{gpus}],\"budget\":{},\
+             \"cpu_throttle\":{th},\"cpu_target\":{},\"cpu_cap\":{},\"cpu_min_ghz\":{},\"cpu_max_ghz\":{},\
+             \"ram\":\"{}\",\"backend\":\"{}\",\"host\":\"{}\"}}",
             fnum(self.budget),
-            th,
             fnum(target),
             fnum_pos(cpu_cap),
             fnum(self.cpu_throttle.min_khz as f64 / 1e6),
             fnum(self.cpu_throttle.max_khz as f64 / 1e6),
-            json_escape(&gi.name),
-            json_escape(&gi.driver),
             json_escape(&self.ram),
-            gi.kind,
+            self.backend.infos().first().map(|g| g.kind).unwrap_or("?"),
             json_escape(&self.host),
         )
     }
@@ -1055,12 +1089,13 @@ impl Shared {
 fn snapshot_json(sh: &Shared) -> String {
     let cur = sh.cur.lock().unwrap().clone();
     let hist = sh.history.lock().unwrap();
+    let control = sh.control_json();
     format!(
         "{{\"now\":{},\"current\":{},\"history\":[{}],\"control\":{},\"cpu\":{}}}",
         now_ms(),
         cur,
         hist.iter().cloned().collect::<Vec<_>>().join(","),
-        sh.control_json(&cur),
+        control,
         sh.cpu_info,
     )
 }
@@ -1169,21 +1204,30 @@ fn handle(mut s: TcpStream, sh: Arc<Shared>) {
                 send_json(&mut s, "200 OK", &body);
             }
             "/api/stream" => sse_stream(s, sh),
-            "/api/health" => send_json(&mut s, "200 OK", &sh.control_json(&sh.cur.lock().unwrap().clone())),
+            "/api/health" => send_json(&mut s, "200 OK", &sh.control_json()),
             _ => send_text(&mut s, "404 Not Found", "not found"),
         }
         return;
     }
 
     if req.method == "POST" && path == "/api/power" {
-        let gi = sh.backend.info();
+        // One cap knob per GPU; the body says which card ("gpu", default 0
+        // so a hand-rolled POST keeps working on single-card heaters).
+        let gpu = body_num(&req.body, "gpu").map(|v| v as usize).unwrap_or(0);
+        let infos = sh.backend.infos();
+        let gi = match infos.iter().find(|g| g.index == gpu) {
+            Some(gi) => gi,
+            None => {
+                send_json(&mut s, "400 Bad Request", &format!("{{\"ok\":false,\"error\":\"no GPU index {gpu}\"}}"));
+                return;
+            }
+        };
         match body_num(&req.body, "cap") {
             Some(w) if gi.cap_max > 0.0 && w >= gi.cap_min && w <= gi.cap_max => {
-                match sh.backend.set_cap(w) {
+                match sh.backend.set_cap(gpu, w) {
                     Ok(msg) => {
-                        log(&format!("power cap set to {w} W: {msg}"));
-                        let cur = sh.cur.lock().unwrap().clone();
-                        send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg), sh.control_json(&cur)));
+                        log(&format!("GPU {gpu} power cap set to {w} W: {msg}"));
+                        send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg), sh.control_json()));
                     }
                     Err(e) => {
                         log(&format!("power cap failed: {e}"));
@@ -1219,8 +1263,7 @@ fn handle(mut s: TcpStream, sh: Arc<Shared>) {
         };
         log(&msg);
         if ok {
-            let cur = sh.cur.lock().unwrap().clone();
-            send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg), sh.control_json(&cur)));
+            send_json(&mut s, "200 OK", &format!("{{\"ok\":true,\"message\":\"{}\",\"control\":{}}}", json_escape(&msg), sh.control_json()));
         } else {
             send_json(&mut s, "400 Bad Request", &format!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(&msg)));
         }
@@ -1292,8 +1335,9 @@ fn main() {
                  device whose hwmon exports power1_average (amdgpu). Port 80 needs root,\n\
                  as does RAPL energy_uj and both power-cap controls — the service runs\n\
                  as root.\n\
-                 The power cap is live state: whatever the backend reports is truth, and\n\
-                 a boot-time systemd unit (not this panel) owns setting it at startup.\n\
+                 Each GPU gets its own live power cap (POST /api/power {{\"gpu\":N,\"cap\":W}});\n\
+                 whatever the backend reports is truth, and a boot-time systemd unit\n\
+                 (not this panel) owns setting caps at startup.\n\
                  The CPU max-temperature slider (POST /api/cpu-target) is live state too:\n\
                  the sampler moves cpufreq scaling_max_freq to hold the package below the\n\
                  target, and a panel start releases any ceiling from a prior run. The\n\
@@ -1364,23 +1408,33 @@ fn main() {
         cpu_cap_khz: AtomicU64::new(0),
         seq: AtomicU64::new(0),
         cur: Mutex::new(Sample::default().to_json()),
+        gpu_powers: Mutex::new(Vec::new()),
         history: Mutex::new(VecDeque::with_capacity(601)),
         cpu_info: cpu_info_json(&cpu),
     });
-    let gi = backend.info();
+    let infos = backend.infos();
+    let desc = infos
+        .iter()
+        .map(|g| {
+            format!(
+                "{} [{:.0}-{:.0}W]",
+                g.name,
+                g.cap_min,
+                g.cap_max
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     log(&format!(
-        "fah-panel: host={host} backend={} gpu={} driver={} caps=({},{}) ram=\"{}\" listen={listen} cpu_threads={} cpu_throttle={}",
-        gi.kind,
-        gi.name,
-        gi.driver,
-        gi.cap_min,
-        gi.cap_max,
+        "fah-panel: host={host} backend={} driver={} gpus={{{desc}}} ram=\"{}\" listen={listen} cpu_threads={} cpu_throttle={}",
+        infos.first().map(|g| g.kind).unwrap_or("?"),
+        infos.first().map(|g| g.driver.clone()).unwrap_or_default(),
         sh.ram,
         cpu.cur_freq.len(),
         throttle.available(),
     ));
-    if gi.cap_max == 0.0 {
-        log("fah-panel: warning: no power-cap range right now (device not up yet? the slider stays hidden until /api/health sees one)");
+    if infos.iter().all(|g| g.cap_max == 0.0) {
+        log("fah-panel: warning: no power-cap range right now (device not up yet? each slider stays hidden until /api/health sees one)");
     }
 
     // Sampler: GPU backend poll + CPU sysfs; the CPU numbers ride along in a
@@ -1400,7 +1454,17 @@ fn main() {
                 let hot = cpu_temp_by(&cpu, "Core");
                 let (clk_avg, clk_max) = cpu_clocks(&cpu);
                 s.cpu_power = cpu_power(&cpu, &mut rapl);
-                s.total = s.power + s.cpu_power;
+                s.total = s.gpu_power_sum() + s.cpu_power;
+                {
+                    let mut powers = sh2.gpu_powers.lock().unwrap();
+                    powers.clear();
+                    for g in &s.gpus {
+                        while powers.len() <= g.index {
+                            powers.push(0.0);
+                        }
+                        powers[g.index] = g.power_limit;
+                    }
+                }
 
                 // CPU max-temperature auto-throttle step (see CpuThrottle).
                 let mut cap_json = 0.0f64;
