@@ -1,7 +1,7 @@
 # fah-panel
 
 Folding-heater telemetry web panel — ONE app for every space heater in the
-fleet (hp-z240-xeon-1240v6-nixos: GTX 970 via the proprietary driver,
+fleet (asus-i7-6700-nixos: GTX 1060 6GB + GTX 970 via the proprietary driver,
 zen1-nixos: RX 5700 XT via amdgpu sysfs; more to come). Each heater differs
 in what its GPU exposes, so the GPU half is pluggable behind one Sample
 schema; the CPU half (k10temp/coretemp, cpufreq, RAPL) is cross-vendor sysfs
@@ -15,8 +15,11 @@ any frontend change requires rebuilding the binary.
 
 - **nvidia** — `--nvidia-smi <absolute store path>` (the panel never searches
   PATH, so the service pins the exact driver package). Polls
-  `--query-gpu=util,memory,temp,fan,power,clocks,pstate,throttle`; the control
-  is `nvidia-smi -pl` (NVML power cap, the one wattage knob GeForce has).
+  `--query-gpu=util,memory,temp,fan,power,clocks,pstate,throttle`, one line
+  per GPU on a multi-card host (power/memory summed, temp/util/clocks the
+  hottest/busiest); the control
+  is `nvidia-smi -pl` (NVML power cap, the one wattage knob GeForce has;
+  without `-i` it sets the same cap on every card).
 - **amd** — native amdgpu sysfs, resolved by `--amd-pci <vendor:device|BDF>`
   (empty = first PCI device exporting an amdgpu hwmon; prefer ids, BDFs
   shuffle): `gpu_busy_percent`, `mem_info_vram_*`, hwmon temps

@@ -9,8 +9,8 @@
 # account token. Progress: `journalctl -u fah-client -f` or
 # `tail /var/lib/fah-client/log.txt`.
 #
-# Heater panel: http://192.168.49.51/ (fah-panel, same app as the hp-z240's,
-# here with the amdgpu sysfs backend — gpu_busy_percent/hwmon/pp_dpm on the
+# Heater panel: http://192.168.49.51/ (fah-panel, same app as the
+# asus-i7-6700's, here with the amdgpu sysfs backend — gpu_busy_percent/hwmon/pp_dpm on the
 # RX 5700 XT and k10temp/RAPL on the 1800X, plus the live power-cap slider
 # writing hwmon power1_cap; the 75–150 W range this VBIOS exposes is read at
 # startup, verified writable on the default ppfeaturemask).
@@ -41,8 +41,8 @@
     restartUnits = [ "fah-client.service" ];
   };
 
-  # Same panel binary as the hp-z240 heater, AMD backend (see crates/fah-panel).
-  # No --budget here: this is a proper AM4 desktop PSU, not the Z240's
+  # Same panel binary as the asus-i7-6700 heater, AMD backend (see crates/fah-panel).
+  # No --budget here: this is a proper AM4 desktop PSU, not the old Z240's
   # brownout-prone SFF one, so the DC-load card just reports without a marker.
   services.fah-panel = {
     enable = true;

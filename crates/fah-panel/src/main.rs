@@ -187,15 +187,21 @@ impl Nvidia {
     /// Startup identity queries (non-fatal: nvidia-smi may answer only a
     /// moment later; every error just shows up as `no data` in the UI).
     fn new(smi: &str, name_override: &str) -> Nvidia {
+        // One line per GPU; a multi-card host shows every name.
         let name = nvidia_smi(smi, &["--query-gpu=name", "--format=csv,noheader"])
+            .map(|out| {
+                let names: Vec<&str> =
+                    out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                if names.is_empty() {
+                    "NVIDIA GPU".to_string()
+                } else {
+                    names.join(" + ")
+                }
+            })
             .unwrap_or_else(|e| {
                 eprintln!("fah-panel: nvidia-smi not usable yet: {e}");
                 "NVIDIA GPU".into()
-            })
-            .lines()
-            .next()
-            .unwrap_or("NVIDIA GPU")
-            .to_string();
+            });
         let driver = nvidia_smi(smi, &["--query-gpu=driver_version", "--format=csv,noheader"])
             .unwrap_or_default()
             .lines()
@@ -203,6 +209,9 @@ impl Nvidia {
             .unwrap_or_default()
             .to_string();
         // Power-cap range; "N/A" fields (no support) become (0, 0) -> slider hidden.
+        // Multi-card: the range follows the FIRST card — set_cap() below is a plain
+        // nvidia-smi -pl (no -i), i.e. one shared cap for all cards, an emergency
+        // throttle knob rather than per-card tuning.
         let (cap_min, cap_max) = match nvidia_smi(
             smi,
             &["--query-gpu=power.min_limit,power.max_limit", "--format=csv,noheader,nounits"],
@@ -323,32 +332,47 @@ impl Sample {
     }
 }
 
+/// One nvidia-smi poll. One output line per GPU (the dual-card heater
+/// asus-i7-6700-nixos has two): power and memory SUM (that is what the
+/// DC-load card asks the +12 V rail for), temp/fan/util/clocks take the
+/// hottest/busiest card, pstate the most active, and the throttle reasons
+/// are unioned. A single-card host sees exactly the old numbers.
 fn take_sample(bin: &str) -> Sample {
     let mut s = Sample::default();
     match nvidia_smi(bin, &[&format!("--query-gpu={POLL_FIELDS}"), POLL_QUERY]) {
         Ok(out) => {
-            // One line (first GPU wins); fields as above.
-            let line = out.lines().next().unwrap_or("").to_string();
-            let f: Vec<&str> = line.split(',').map(|c| c.trim()).collect();
-            if f.len() < 13 {
-                s.error = format!("unexpected nvidia-smi output: {line}");
-                return s;
+            let mut throttle: Vec<&'static str> = Vec::new();
+            for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let f: Vec<&str> = line.split(',').map(|c| c.trim()).collect();
+                if f.len() < 13 {
+                    s.error = format!("unexpected nvidia-smi output: {line}");
+                    return s;
+                }
+                s.util = s.util.max(csv_f64(f[0]));
+                s.mem_used += csv_f64(f[1]);
+                s.mem_total += csv_f64(f[2]);
+                s.temp = s.temp.max(csv_f64(f[3]));
+                s.fan = s.fan.max(csv_f64(f[4]));
+                s.power += csv_f64(f[5]);
+                s.power_limit += csv_f64(f[6]);
+                s.clock_gpu = s.clock_gpu.max(csv_f64(f[7]));
+                s.clock_mem = s.clock_mem.max(csv_f64(f[8]));
+                // Lower P-number = more active; "N/A" only wins if nothing else spoke.
+                if s.pstate.is_empty()
+                    || (f[9] != "N/A" && (s.pstate == "N/A" || f[9] < s.pstate.as_str()))
+                {
+                    s.pstate = f[9].to_string();
+                }
+                let bits = u64::from_str_radix(f[10].trim_start_matches("0x"), 16).unwrap_or(0);
+                for t in throttle_names(bits) {
+                    if !throttle.contains(&t) {
+                        throttle.push(t);
+                    }
+                }
+                s.clock_gpu_max = s.clock_gpu_max.max(csv_f64(f[11]));
+                s.clock_mem_max = s.clock_mem_max.max(csv_f64(f[12]));
             }
-            s.util = csv_f64(f[0]);
-            s.mem_used = csv_f64(f[1]);
-            s.mem_total = csv_f64(f[2]);
-            s.temp = csv_f64(f[3]);
-            s.fan = csv_f64(f[4]);
-            s.power = csv_f64(f[5]);
-            s.power_limit = csv_f64(f[6]);
-            s.clock_gpu = csv_f64(f[7]);
-            s.clock_mem = csv_f64(f[8]);
-            s.pstate = f[9].to_string();
-            s.throttle = throttle_names(
-                u64::from_str_radix(f[10].trim().trim_start_matches("0x"), 16).unwrap_or(0),
-            );
-            s.clock_gpu_max = csv_f64(f[11]);
-            s.clock_mem_max = csv_f64(f[12]);
+            s.throttle = throttle;
             s.ok = true;
         }
         Err(e) => s.error = e,

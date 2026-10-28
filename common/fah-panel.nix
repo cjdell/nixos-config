@@ -11,7 +11,8 @@
 # http://<heater>/ next to the FAH Web Control on :7396.
 #
 # The panel has one GPU backend per vendor; a host says which one it is:
-#   gpu = "nvidia" + nvidiaSmi   hp-z240-xeon-1240v6 (GTX 970 via nvidia-smi)
+#   gpu = "nvidia" + nvidiaSmi   asus-i7-6700 (GTX 1060 + GTX 970 via nvidia-smi;
+#                                the backend samples every GPU line)
 #   gpu = "amd"                  zen1 (RX 5700 XT via amdgpu sysfs)
 # Adding the next heater (haswellatx, ...) is another folding-heater.nix that
 # imports this module and sets the two or three options below — never a copy
@@ -72,8 +73,8 @@
       default = 0;
       description = ''
         Flag the CPU+GPU DC-load estimate above this many watts (brownout
-        margin) — only meaningful on PSU-crippled boxes like the hp-z240;
-        0 hides the budget marker.
+        margin) — only meaningful on PSU-crippled boxes like the old
+        hp-z240 heater; 0 hides the budget marker.
       '';
     };
 
@@ -87,7 +88,8 @@
         ceiling; being ExecStart state this persists across panel restarts
         AND reboots. The panel's slider overrides the target live, per
         session — changing it here is what makes it permanent (same split
-        as nvidia-power-limit.service vs the GPU cap slider on the hp-z240).
+        as a boot-time power-limit unit vs the GPU cap slider on the old
+        hp-z240).
       '';
     };
   };

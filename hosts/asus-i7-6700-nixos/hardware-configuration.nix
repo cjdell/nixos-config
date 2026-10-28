@@ -2,11 +2,12 @@
 # and may be overwritten by future invocations.  Please make changes
 # to /etc/nixos/configuration.nix instead.
 #
-# HP Z240 SFF: Xeon E3-1240 v6 (Kaby Lake, 4c/8t, NO iGPU) + NVIDIA
-# GeForce GTX 970 (GM204/Maxwell, 0x13c2), 8 GiB RAM, one SATA SSD
-# (sda: BOOT=vfat 1G, ROOT=ext4). Converted 2026-10-25 from
-# machines/hp-z240-xeon-1240v6; Intel VA-API / mesa / container-toolkit
-# cruft dropped (no iGPU, no containers).
+# ASUS Z170 PRO GAMING: i7-6700 (Skylake, 4c/8t, HD Graphics 530 iGPU =
+# the console, driven by i915) + NVIDIA GeForce GTX 1060 6GB (GP106/
+# Pascal, 0x1c03) + GTX 970 (GM204/Maxwell, 0x13c2), 16 GiB RAM, one SATA
+# SSD (sda: BOOT=vfat 1G, ROOT=ext4 — the old HP's disk, the by-label
+# mounts below came through the swap untouched). Rebuilt 2026-10-28;
+# renamed from hp-z240-xeon-1240v6-nixos.
 {
   config,
   lib,
@@ -38,11 +39,12 @@
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
-  # The GTX 970 is the only display output. Maxwell (GM204) fell out of the
-  # main NVIDIA branches with 590 — 580 is the last branch supporting it, and
-  # nixpkgs keeps it as an LTSB legacy branch (until Aug 2028), so pin it:
+  # The NVIDIA cards are compute-only here (console = the iGPU). Maxwell
+  # (GM204) fell out of the main NVIDIA branches with 590 — 580 is the last
+  # branch supporting it (and Pascal), and nixpkgs keeps it as an LTSB legacy
+  # branch (until Aug 2028), so pin it as long as the GTX 970 lives here:
   # hardware.nvidia.package is also what ./folding-heater.nix takes the
-  # OpenCL ICD out of for the GPU folding slot.
+  # OpenCL ICD out of for the GPU folding slots.
   services.xserver.videoDrivers = [ "nvidia" ];
   hardware.nvidia = {
     # patchelf 0.19.2 (NixOS/patchelf#674, NixOS/nixpkgs#576412 — same pin as

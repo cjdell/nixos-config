@@ -146,7 +146,7 @@
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEm2NQfhWPdGkDsDQQDx/yJTeNceNWgqQMStW4ESixib root@N40L-NAS (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEqKYLh/zb6s1MWILerRlIQ2AiqJHJHNbTt7CTze/5zX root@gatling-services (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKRvbzK5uAlww+wmGRk8Y6Tfe0As7Z3FUDo9/16tPT11 root@haswellatx-nixos (nix builder)"
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICz9IKHBT5WoeiTooTqU0YdTjTo9toRZp44aoIQfvUE4 root@hp-z240-xeon-1240v6-nixos (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICz9IKHBT5WoeiTooTqU0YdTjTo9toRZp44aoIQfvUE4 root@asus-i7-6700-nixos (nix builder)"
     ];
 
     boot.kernel.sysctl = {
