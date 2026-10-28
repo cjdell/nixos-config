@@ -188,8 +188,9 @@ double + *Blood & Chrome* (CapCity skyline/centurions) + *The Lowdown*
 (behind-the-scenes) verified visually before renumbering.
 
 Then style-normalised all 105 files → `Battlestar Galactica SxxEyy Title.mkv`
-(stripped `(2003)` + release tags via a regex tag-list in
-`archive/bsg-2026-10-27/plan-renames.py`; undo script in the same dir).
+(stripped `(2003)` + release tags via a regex tag-list; the rename plan lived
+in a git-archived folder, now discarded — `/tmp/jfdb/bsg_renames.txt` still
+has it until reboot).
 After rename: realtime monitor re-keyed all items in place — provider ids,
 names and watched state all survived; 105/105 name+id verified vs live TSV.
 
@@ -213,8 +214,7 @@ Season folders across `/Media/TV` are now uniformly `Season N` (no zero-pad —
 Jellyfin parses both, but the library was mixing styles):
 DS9's seven `Star Trek - Deep Space Nine 1993 Season N Complete 720p AI Upscale
 DVD x264 [i_c]` dirs, Voyager's seven `Star Trek Voyager S0N AI Upscale ...`
-dirs and SG-1's `Season 01`–`Season 09` were renamed (23 dirs;
-`archive/season-folders-2026-10-27/` has the planner + full undo).
+dirs and SG-1's `Season 01`–`Season 09` were renamed (23 dirs).
 Verified after `POST /Library/Refresh`: item counts returned to file counts
 (DS9 173, SG-1 212, BSG 105, VOY 168), 0 stale paths, 0 orphaned UserData
 rows, watched state intact, and `jf-rematch --dry` still reports 0 for all
