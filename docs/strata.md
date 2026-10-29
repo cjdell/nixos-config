@@ -257,6 +257,47 @@ script had the same latent break and is fixed the same way.
 switch`; both packs stay on disk, and the unit's `ConditionPathExists` still
 protects a pack that is not built.
 
+## 0.2.7.1 (2026-10-29)
+
+Pinned `46c152a1` — the v0.2.7.1 tag (2026-10-28) points **exactly at main's HEAD**, so this is
+bleeding edge with nothing newer above it. Follows 0.2.2..0.2.7 (2026-10-21..27); the app/Terminal/Control
+layer is 0.2.7.1 and the engine source is `project(strata VERSION 0.1.53)`, `CMakeLists.txt:11`
+(was 0.1.46.1 at `CMakeLists.txt:7`). Built
+`/nix/store/yxly8rqbd9cpcd29894mz2baqsafbdhb-strata-0.2.7.1`, **live since 2026-10-29 03:11** —
+`/v1/status` reports `"engine": "0.1.53"`.
+
+**Audit patch re-base: 6 of 19 hunks rejected, all pure context shifts**, hand-placed and
+regenerated from the patched tree (19 hunks, 280 additions, 0 deletions, added lines byte-identical
+to the 0.2.1.1 file, `patch -p1 --fuzz=0` with **no offsets** and `git apply --check` clean):
+verify.hpp gained `topk_scratch_` between `sel_` and `logits_`; the shared-expert site grew a
+`note_prio_tail` body inside `if (sh_fork)`; the `hit_out` `grouped` call gained a trailing `true`
+and an `ar_on()` sibling branch — `ar_on()` is `all_resident_ && !ar_off_` (verify.hpp:528), so at our
+43 % expert cache it is **never live** and the audit does not need mirroring there; the new
+`tap_on_`/STRATA_TAP_FILE block sits after `stamp(l, 24`; `tap_write` + STRATA_LOGITS_DUMP now sit
+between the run()-tail `note_nonfinite` (the audit dump goes right after it — the second
+`note_nonfinite`, in `Verifier::pl_finish`, is not the site) and STRATA_DBG_NAN; and in
+`iq_kernels.cu` upstream inserted the `if (g_exp_phase == 3) return;` bench early-return after
+`check("native_expert_grouped/gu")` — the gate/up `stage_audit` pair is placed **before** it. The
+other 13 hunks landed with offsets up to +1506. Guard anchors intact (server.py's 17
+non-finite/retry lines, `logits_nonfinite_rows` at verify.cpp:2498, `note_nonfinite`/`hits_in_combine`).
+
+**Both int8-KV clamps still needed and unique**: `kv_q8.cu:55` unchanged; the prefill target moved to
+`kernels.cu:2257` (was 2199; `hf_sat` still :64). Both `installPhase` server.py rewrites present once
+(now :7664/:7676). `import serve.server` verified against the built output; the five `strata_control`
+modules it needs are still stdlib-only (rich/textual stay in `strata_cli/dashboard|monitor`,
+certifi/truststore in `strata_control/tls.py` function bodies), so `serverPython` is unchanged. The
+ggml pin is unchanged (`setup.py:222`, still `3cf03257`), all 18 engine args still parse, CMake options
+unchanged, `STRATA_VISION_HIP` is a separate opt-in program (we keep the CPU encoder).
+
+**Behaviour changes to expect** (from the release notes; the ones that touch this box): 0.2.7's
+"Faster Qwen on Radeon RX 9000 / AI PRO R9700" is **default-on** — the per-token lookup table stays in
+RAM and the decode card/CPU split starts differently, and **answers can differ in wording**. 0.2.6/0.2.7
+re-froze `STRATA_DEFAULTS=026` for Qwen. 0.2.5 uncapped the RAM expert store (48 GB → hold every routed
+expert where free RAM allows) — watch RAM during the load given the `-cram` OOM history. First live
+numbers (short turns, warm load): **decode 60-64 tok/s at 92-94 % expert-cache hits** (was 48-57 at
+90-93 % on 0.2.1.1), a 138K-prompt read streamed clean, no audit fires, `HSA_USERPTR_FOR_PAGED_MEM=0`
+and the ROCm 10 runtime mapping confirmed unchanged.
+
 ## 0.2.1.1 (2026-10-20)
 
 Pinned `9ae93f7b` (v0.2.1.1, the Windows-Terminal hotfix on 0.2.1 of the same day; 0.2.1 follows

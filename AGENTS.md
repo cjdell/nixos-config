@@ -996,13 +996,14 @@ reads corresponds to something reviewable.
 ## Strata (Qwen3.8-Flash-Next on the R9700, live)
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.1.1** (`9ae93f7b1fe989d04a8e404d32cddaeeff10505f`, updated 2026-10-20 from
-0.1.44.1 `296b59d2`). 0.2.0 split the repo into **app + Terminal + engine** — the
-engine source in this tag is version 0.1.46.1, and `serve/server.py` now imports the
+**0.2.7.1** (`46c152a1310f77cd2f0ce2c7cd213962df14fe83`, updated 2026-10-29 from
+0.2.1.1 `9ae93f7b` — the v0.2.7.1 tag is exactly main's HEAD, so this is bleeding
+edge). 0.2.0 split the repo into **app + Terminal + engine** — the
+engine source in this tag is version 0.1.53 (`CMakeLists.txt:11`), and `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-10-20 15:38** — `ExecStart` names `/nix/store/k91dljvza0ksdr3m262nbqcbmglr0kw7-strata-0.2.1.1`
-and `/v1/status` reports `"engine": "0.1.46.1"`):
+2026-10-29 03:11** — `ExecStart` names `/nix/store/yxly8rqbd9cpcd29894mz2baqsafbdhb-strata-0.2.7.1`
+and `/v1/status` reports `"engine": "0.1.53"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -1047,8 +1048,9 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   with **`--compat-bf16` required** — its 195 `hc_*` projections are Q8_0, which the
   AMD build cannot read natively in 0.1.41). **Live since 2026-10-09 19:23**, and it
   is **~20 % slower at decode than IQ3_S** (48-57 tok/s at 90-93 % expert-cache hits
-  vs 62-68 at 92-97 %, same 66-70 K depth): 10,679 cache slots instead of 13,104, so
-  1.7x the misses at 1.18x the bytes each. Prefill is unchanged (~1,250 tok/s) and
+  vs 62-68 at 92-97 %, same 66-70 K depth; on 0.2.7.1 since 2026-10-29 it measures
+  **60-64 tok/s at 92-94 % hits** - the 0.2.7 RX 9000 decode rework largely closed the gap):
+  10,679 cache slots instead of 13,104, so 1.7x the misses at 1.18x the bytes each. Prefill is unchanged (~1,250 tok/s) and
   262144 ctx is unaffected; RAM is calmer (39 GiB, `MemorySwapPeak` 0). Flip the line
   back to `"iq3s"` if decode speed matters more than the weights. Analysis, quant mix
   and measurements: [`docs/strata.md`](docs/strata.md) "UD-IQ4_XS".
@@ -1065,11 +1067,10 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
   `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
   the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
-  `prefill/kernels.cu:2199` (was 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
-  live here because we run `--kv int8`. Still unclamped on 0.2.1.1: `kv_q8.cu` only added a
-  `STRATA_EXPERIMENTAL_SM60`-gated gather below the shipped kernels, and `prefill/kernels.cu`'s
-  769 changed lines are the Qwen3.6 prompt path + NVFP4 work, so both `postPatch` clamps are
-  still needed and both `--replace-fail` targets are still unique.
+  `prefill/kernels.cu:2257` (was 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
+  live here because we run `--kv int8`. Still unclamped on 0.2.7.1: the intervening releases moved
+  the target lines but clamped neither, so both `postPatch` clamps are still needed and both
+  `--replace-fail` targets are still unique.
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
 - **The recurring strata "core dumps" are not crashes — they are the engine's hang
@@ -1096,13 +1097,17 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   MoE path plus a dump in `Verifier::run` that rides on upstream's `nf_mask_` and prints
   *every* fire. It is allocated and launched **only** with `STRATA_KERNEL_AUDIT=1` (set in
   `strata.nix`) because each probe is an extra node in the captured verify graph. Re-based
-  onto 0.2.1.1 on 2026-10-20 — the first re-base since 0.1.40.3 that needed real work:
-  **5 of 19 hunks were rejected** by upstream context changes (verify.cpp's audit-alloc
-  insert, the per-window reset, `audit_hit_rows`, and both `iq_kernels.cu` hunks — the file
-  gained ~1,100 lines of S26/S27 v2/v2k expert paths, neither matching our IQ4_XS geometry)
-  and were re-placed by hand; the other 14 landed with offsets up to +1159. Regenerated from
+  onto 0.2.7.1 on 2026-10-29: **6 of 19 hunks were rejected** by upstream context changes and
+  re-placed by hand (all six pure context shifts: a new `topk_scratch_` member in verify.hpp;
+  the shared-expert site where `if (sh_fork)` grew a `note_prio_tail` body; the `hit_out`
+  `grouped` call gaining a trailing `true` plus a new `ar_on()` branch that needs no audit —
+  `ar_on()` is `all_resident_ && !ar_off_`, never live at our 43 % cache; the new `tap_on_`
+  block after `stamp(l, 24`; `tap_write`/STRATA_LOGITS_DUMP at the run()-tail dump site; and
+  the new `g_exp_phase == 3` bench early-return in iq_kernels.cu, which the gate/up audit now
+  precedes). The other 13 landed with offsets up to +1506. Regenerated from
   the patched tree: 19 hunks, 280 additions, 0 deletions, byte-identical added lines,
   `--fuzz=0` with **no offsets** (`patch -p1 --fuzz=0` and `git apply --check` both clean).
+  (The previous re-base, onto 0.2.1.1 on 2026-10-20, had hand-placed 5 hunks.)
   Its two anchors are intact: upstream's `nf_mask_` (`Verifier::note_nonfinite` in
   `verify.cpp`) and the `hits_in_combine` gate the routed-total probe checks.
   **#879 is closed but not dead** — closed 2026-10-13 as a stale-tracker sweep, and on

@@ -1,8 +1,8 @@
 --- a/include/strata/core/verify.hpp
 +++ b/include/strata/core/verify.hpp
-@@ -601,6 +601,8 @@
-     float* tail_snap_ = nullptr;                              // per QSA layer
+@@ -691,6 +691,8 @@
      int32_t* sel_ = nullptr;
+     int32_t* topk_scratch_ = nullptr;   // qsa_block_topk_long's multi-CTA exchange (STRATA_SELECT_LONG=1 only)
      float *logits_ = nullptr, *w_ = nullptr, *shared_ = nullptr, *parts_ = nullptr, *hit_out_ = nullptr;
 +    int32_t* lay_flags_ = nullptr;   // local audit port (2026-10-05): 7 per-layer poison signals, 2 recorders
 +    int64_t lay_flags_n_ = 0;
@@ -11,7 +11,7 @@
      uint8_t* staging_ = nullptr;                                  // VRAM slots for the PCIe share of the misses
 --- a/include/strata/kernels/iq_kernels.hpp
 +++ b/include/strata/kernels/iq_kernels.hpp
-@@ -60,6 +60,11 @@
+@@ -67,6 +67,11 @@
  
  /// Bytes of scratch `native_expert_grouped` needs for `cap_entries` entries.
  size_t native_expert_scratch_bytes(int64_t cap_entries, int64_t n_ff);
@@ -47,7 +47,7 @@
  
 --- a/src/core/verify.cpp
 +++ b/src/core/verify.cpp
-@@ -823,6 +823,13 @@
+@@ -1007,6 +1007,13 @@
          arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
          one_ = b.take<int32_t>(4);
          hist_snap_ = b.take<float>(T * HS);
@@ -61,7 +61,7 @@
          ple_key_ = b.take<float>(T * (uint64_t) strata::kernels::NG_HC_DIM); ple_val_ = b.take<float>(T * N);
      };
      Bump count;
-@@ -832,6 +839,7 @@
+@@ -1016,6 +1023,7 @@
          return false;
      }
      cudaMemset(arena_, 0, count.used);
@@ -69,7 +69,7 @@
      if (hflag_out_d_ != nullptr && hcount_d_ == nullptr) {   // the overlapped split's hand-off counter
          if (cudaMalloc((void**) &hcount_d_, 64) != cudaSuccess) { err = "verify: hand-off counter allocation failed"; return false; }
          cudaMemset(hcount_d_, 0, 64);
-@@ -1086,6 +1094,9 @@
+@@ -1302,6 +1310,9 @@
      // a batch window: row t is slot t, whose state lives in its own session
      auto slot_ss = [&](int t) -> SessionState& { return batch_rec_ ? *slots_[(size_t) brow_[t]] : ss; };
      const int hrow0 = batch_rec_ ? row_base_ : 0;   // a slot group's own hand-off rows
@@ -79,7 +79,7 @@
      // STRATA_BATCH_SELF_COMMIT: the window keeps its rows (no commit graph, nothing to snapshot for one)
      const bool keep_rows = batch_rec_ && batch_self_commits(brow_, T);
  
-@@ -1287,6 +1298,9 @@
+@@ -1503,6 +1514,9 @@
              static const int dummy = [] { const char* e = std::getenv("STRATA_DUMMY_NODES"); return e != nullptr ? std::atoi(e) : 0; }();
              for (int d = 0; d < dummy; ++d) gpu_noop(cs);
          }
@@ -89,7 +89,7 @@
          if (inputs_pending) {   // the window's steps and positions, before the first mixer reads them
              join(1);
              inputs_pending = false;
-@@ -1831,6 +1845,9 @@
+@@ -2056,6 +2070,9 @@
              err = "verify layer " + std::to_string(l) + ": " + e.what();
              return false;
          }
@@ -99,17 +99,17 @@
          stamp(l, 16, grp);
          const bool q8_ffn = gr_read_group(1, true, inj_, inj2_);   // true: nat_xq_ holds the MoE input's q8_1 (STRATA_QFUSE)
          stamp(l, 32, grp);   // the profile only: the FFN-side read ends here, the router starts
-@@ -1957,6 +1974,9 @@
+@@ -2188,6 +2205,9 @@
                  err = std::string("verify shared expert: ") + e.what();
                  return false;
              }
 +            if (lay_flags_ != nullptr)   // local audit: the shared expert's output alone (its own stream: ordered)
 +                strata::kernels::logits_nonfinite(shared_ + (size_t) tb * N, (long long) (te - tb) * N,
 +                                                  lay_flags_ + 2 * (g.n_layers + 1) + l, sh_stream);
-             if (sh_fork) cudaEventRecord(ev_join_, sh_cs_);
-         }
-         if (strata::kernels::cpu::expert_layout().native) {
-@@ -1985,6 +2005,7 @@
+             if (sh_fork) {
+                 note_prio_tail(sh_cs_, -1);
+                 cudaEventRecord(ev_join_, sh_cs_);
+@@ -2219,6 +2239,7 @@
      const bool fuse_head_gr = fuse_head_gr_env && (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
                                !cvec().covers(g.n_layers - 1);
      auto post = [&](int64_t l, int grp) -> bool {
@@ -117,17 +117,17 @@
          const int tb = tb_[grp], te = te_[grp], n = te - tb;
          const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
          const int64_t cap = (int64_t) n * K, capx = (int64_t) max_t_ * K;
-@@ -2037,6 +2058,9 @@
+@@ -2281,6 +2302,9 @@
              }
              stamp(l, 19, grp);
-             grouped(p_ptr, p_start, p_counts, 0, hit_out);
+             grouped(p_ptr, p_start, p_counts, 0, hit_out, true);
 +            if (lay_flags_ != nullptr)   // local audit: only the rows this layer's plan actually computed on the GPU
 +                strata::kernels::audit_hit_rows(hit_out, p_dst, p_counts + 1, ids_ + (size_t) tb * K,
 +                                                cap, (int) N, (int) l, lay_flags_ + 9 * (g.n_layers + 1), cs);
              stamp(l, 20, grp);
              if (device_plan_) wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
              else if (m_bal_ != nullptr)   // set_pcie_balance: the PCIe part starts
-@@ -2078,10 +2102,27 @@
+@@ -2322,10 +2346,27 @@
                      copy_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
              }
              // 143-amdk: the add of the GPU's hit rows is done by the combine that follows (one launch fewer)
@@ -155,7 +155,7 @@
          }
          // Same condition as `sh_fork` above, which is per group and out of scope here: wait only when the fork
          // actually ran (a wait on an event never recorded is a no-op, but saying it outright reads better).
-@@ -2111,6 +2152,9 @@
+@@ -2355,6 +2396,9 @@
          }
          if (remote_opt_) remote_opt_->combine(bo_ + tb * N, y_dummy_ + tb * N, tb, n,
                                device_plan_ ? skip_ + grp : nullptr, ring, cs);
@@ -163,11 +163,11 @@
 +            strata::kernels::logits_nonfinite(bo_ + (size_t) tb * N, (long long) (te - tb) * N,
 +                                              lay_flags_ + 4 * (g.n_layers + 1) + l, cs);
          stamp(l, 24, grp);
-         if (l == g.n_layers - 1) {
-             if (!fuse_head_gr) {
-@@ -3005,6 +3049,82 @@
-     }
+         if (tap_on_ && !batch_rec_ && l < (int64_t) tap_slot_.size() && tap_slot_[(size_t) l] >= 0) {
+             // the layer's completed output: R with this FFN half's write applied (the next layer's read would fold it), the mean of
+@@ -3427,6 +3471,82 @@
      for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
+     if (tap_file_ != nullptr && !batch_rec_) tap_write(T, tokens, pos0);
      note_nonfinite(T, nullptr);
 +    // Local audit port (2026-10-05; re-based onto 0.1.43 on 2026-10-12).  The GUARD is upstream now (#1892,
 +    // on by default, same STRATA_NAN_GUARD switch): a window whose head logits are not all finite emits nothing,
@@ -245,12 +245,12 @@
 +        }
 +        std::fflush(stderr);
 +    }
-     if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {   // debug: the first non-finite head
-         static bool reported = false;
-         if (!reported) {
+     // STRATA_LOGITS_DUMP=<path> (debug tap, off by default): the window's logits as the sampler saw them, written
+     // AFTER the window (the stream is synchronised above and the graph capture is over, so a plain copy is legal -
+     // the same place STRATA_DBG_NAN copies from).  One record is
 --- a/src/kernels/cuda/iq_kernels.cu
 +++ b/src/kernels/cuda/iq_kernels.cu
-@@ -4735,6 +4735,59 @@
+@@ -6213,6 +6213,59 @@
  
  void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
  
@@ -310,16 +310,16 @@
  void native_expert_set_expdec(int on) { g_expdec = on ? 1 : 0; }
  int native_expert_expdec() { return expdec_mode(); }
  void native_expert_set_expdec_params(const NativeExpertExpdecParams& p) {
-@@ -4926,6 +4979,8 @@
+@@ -6418,6 +6471,8 @@
      }
  #endif
      check("native_expert_grouped/gu");
 +    stage_audit(gate, (long long) cap_entries * L.n_ff, 0, s);
 +    stage_audit(up,   (long long) cap_entries * L.n_ff, 1, s);
+     if (g_exp_phase == 3) return;   // the bench: gate/up only
      const long long nh = (long long) cap_entries * L.n_ff;
  #if defined(STRATA_HIP_GFX906)
-     // gfx906: the separate SwiGLU and q8_1 passes stay the default (the A/B baseline); the RDNA one-pass
-@@ -4941,6 +4996,7 @@
+@@ -6434,6 +6489,7 @@
          if (L.had_block > 0)   // APR: the down weights are Hadamard-folded, so is their input (in place, every entry row)
              hadamard_rows(h, h, cap_entries, L.n_ff, L.had_block, L.d_signs, s);
          quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
@@ -327,7 +327,7 @@
      } else {
          swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, grp_start, n_groups,
                                                                                  (int) L.n_ff, hq);
-@@ -4983,6 +5039,7 @@
+@@ -6489,6 +6545,7 @@
          default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
      }
      check("native_expert_grouped/down");
@@ -337,7 +337,7 @@
  }  // namespace strata::kernels
 --- a/src/kernels/cuda/sampler.cu
 +++ b/src/kernels/cuda/sampler.cu
-@@ -1390,4 +1390,87 @@
+@@ -1432,4 +1432,87 @@
      coupled_check("spec_draft merge");
  }
  
