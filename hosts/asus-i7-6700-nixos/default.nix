@@ -19,6 +19,7 @@
 
 [
   ./folding-heater.nix
+  ./gpu-mode.nix
   ./hardware-configuration.nix
 
   # sops: the shared fleet key at /var/lib/sops-nix/key.txt decrypts
