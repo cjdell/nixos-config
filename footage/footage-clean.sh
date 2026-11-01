@@ -59,6 +59,7 @@ OPTIONS
   --preset P          x265/x264 speed preset (default medium)
   --vaapi-dev PATH    /dev/dri/renderD12x for --codec gpu-* (default renderD128)
   --deband            ffmpeg deband pass (banded skies/gradients)
+  --grade             analog colour refresh (eq: saturation 1.18, contrast 1.04)
   --sharpen A         mild unsharp after clean, e.g. 0.4 (default off)
   --test N            process only N seconds (from --from) — test first!
   --from SEC          start offset for --test (default 0)
@@ -92,6 +93,7 @@ CRF=20
 PRESET=medium
 VAAPI_DEV=/dev/dri/renderD128
 DEBAND=0
+GRADE=0
 SHARPEN=""
 TEST=0
 FROM=0
@@ -115,7 +117,8 @@ while [ $# -gt 0 ]; do
     --preset) PRESET=$2; shift 2 ;;
     --vaapi-dev) VAAPI_DEV=$2; shift 2 ;;
     --deband) DEBAND=1; shift ;;
-    --sharpen) SHARPEN=$2; shift ;;
+    --grade) GRADE=1; shift ;;
+    --sharpen) SHARPEN=$2; shift 2 ;;
     --test) TEST=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
     --threads) THREADS=$2; shift 2 ;;
@@ -238,7 +241,8 @@ if [ "$CMATRIX" = bt2020c ] || [ "$CSPACE" = bt2020c ]; then
 fi
 
 VF=""
-[ "$DEBAND" = 1 ] && VF="${VF:+$VF,}deband=16:6:3.0"
+[ "$DEBAND" = 1 ] && VF="${VF:+$VF,}deband=1thr=0.006:2thr=0.006:3thr=0.006:4thr=0.006:r=16"
+[ "$GRADE" = 1 ] && VF="${VF:+$VF,}eq=saturation=1.18:contrast=1.04"
 [ -n "$SHARPEN" ] && VF="${VF:+$VF,}unsharp=5:5:${SHARPEN}"
 
 echo "  pipeline:"
