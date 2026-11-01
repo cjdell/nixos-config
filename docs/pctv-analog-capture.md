@@ -384,6 +384,19 @@ uyvy` (a memcpy) is the mode that structurally cannot be.
   never send, which deadlocks the muxer against the writer.
 * `pthread_cond_timedwait` times out on **CLOCK_REALTIME**; build the abstime with
   `clock_gettime(CLOCK_REALTIME, ...)`, not `CLOCK_MONOTONIC`.
+* **Two `stream` runs on one card do not fail - they corrupt.** libusb's
+  `claim_interface` is what keeps a second reader out, and the probe treated
+  `Resource busy` as a warning and submitted URBs anyway: the kernel was happy to
+  hand the endpoint's bytes to whoever polled first, so the *existing* capture -
+  the one whose operator is watching - starts seeing spliced lines, holds its
+  gate, and its file grows frame holes while its sound path is shared with a
+  second ALSA client and starts reading alternation between programme level and
+  digital silence (which the AGC then hunts, at ten console lines a second).
+  Observed 2026-11-01 when an agent ran a "quick verification capture" over a
+  user's tape; the holes in the user's file were the evidence.  `stream` now
+  treats a failed claim as fatal (`ctl`/diagnostics still tolerate it, because
+  re-tuning a live capture is a legitimate thing to do), and the monitor logs to
+  a file when detached so the counters outlive the desktop launcher.
 * **A stalled encoder is not a dead encoder.** An intermediate version called
   `cap_died()` when an audio write did not finish in 3 s - and a muxer waiting for
   video does exactly that, so an FFV1 capture at about 1.0x died at 42 s with

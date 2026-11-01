@@ -2924,7 +2924,27 @@ int main(int argc, char **argv)
             printf("detach kernel driver: %s\n", r ? libusb_strerror(r) : "ok");
         }
         r = libusb_claim_interface(dev, 0);
-        if (r < 0) fprintf(stderr, "claim if0: %s (continuing anyway)\n", libusb_strerror(r));
+        if (r < 0) {
+            /* A failed claim is fine for the diagnostic verbs: a live capture
+             * holds the interface while `ctl input svideo` re-tunes it, and
+             * control transfers still work.  It is NOT fine for streaming.
+             * Two processes submitting bulk-IN URBs on endpoint 0x82 split the
+             * BT.656 stream between them: the newcomer gets a few garbage
+             * fields, and the VICTIM is the capture already running - its
+             * parser sees splices, holds its gate, its front view stutters and
+             * its file gains frame holes, while its operator just sees a noisy
+             * tape.  Measured 2026-11-01: an agent's 1 s `stream` run at
+             * 20:11:55 put a frame hole in a user's capture at t=89.58 s. */
+            if (!strcmp(argv[1], "stream")) {
+                fprintf(stderr, "claim if0: %s - another capture holds the card, "
+                        "so not streaming. Finish it, or look for a stray "
+                        "pctv_probe (`pgrep -a pctv_probe`).\n", libusb_strerror(r));
+                libusb_close(dev);
+                libusb_exit(NULL);
+                return 21;
+            }
+            fprintf(stderr, "claim if0: %s (continuing anyway)\n", libusb_strerror(r));
+        }
     }
 
     const char *c = argv[1];

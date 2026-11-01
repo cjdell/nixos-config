@@ -47,6 +47,7 @@
 #include <time.h>
 #include <math.h>
 #include <strings.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -141,6 +142,16 @@ static int master_from_name(const char *s)
         return MASTER_DVD;
     fprintf(stderr, "pctv-monitor: unknown master '%s' (dvd|uyvy|ffv1) - using dvd\n", s);
     return MASTER_DVD;
+}
+
+/* ...and back again, for the log line that says what a capture was configured as. */
+static const char *master_name(int m)
+{
+    switch (m) {
+    case MASTER_UYVY: return "uyvy";
+    case MASTER_FFV1: return "ffv1";
+    default:          return "dvd";
+    }
 }
 
 /* Overlay: draw the big input banner until this SDL tick; the controls hint
@@ -984,6 +995,9 @@ static void audio_apply_controls(void)
  * old loop treated everything above -3 dBFS as one, and that is what made it
  * pump. */
 #define AGC_TARGET_DBFS   (-18.0)
+/* An error bigger than this is not a level to slew toward, it is a reference
+ * that cannot be believed - see agc_tick(). */
+#define AGC_MAX_ERR_DB    (24.0)
 #define AGC_WINDOW_S        30     /* peak window: "average over ~30 s" */
 #define AGC_RATE_DBPS       0.5    /* how fast the calibration may move */
 #define AGC_EMERG_DBPS      4.0    /* only while the ADC is at/over full scale */
@@ -1005,6 +1019,34 @@ static void agc_reset(void)
     agc_acc = 0.0;
 }
 
+/* AGC lines are worth about one a second, and a flood of them is worth nothing:
+ * a fresh session re-settles by tens of dB, and a measured clip puts the loop
+ * into its emergency slew, which is ~10 log lines a second printing over the
+ * frame counters that a capture is actually diagnosed with (that console flood
+ * during a live tape, 2026-11-01, is the reason this exists).  The controller's
+ * actions are untouched - only the printing is rate limited, with a count of
+ * what it swallowed. */
+#define AGC_LOG_MS 1000
+static void agc_log(const char *fmt, ...)
+{
+    static unsigned long last_t;
+    static int suppressed;
+    unsigned long t = SDL_GetTicks();
+    if (last_t && t - last_t < AGC_LOG_MS) { suppressed++; return; }
+    if (suppressed) {
+        fprintf(stderr, "pctv-monitor: AGC: (%d more gain move%s, %lus)\n",
+                suppressed, suppressed == 1 ? "" : "s", (t - last_t) / 1000);
+        suppressed = 0;
+    }
+    last_t = t;
+    fputs("pctv-monitor: AGC: ", stderr);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
 /* Trade one step of the coarse input boost for room in the fine Capture
  * volume, and compensate with the fine stage in the same breath so the TOTAL
  * gain does not move.  The old code re-seated the fine stage at a fixed
@@ -1024,8 +1066,7 @@ static void stage_boost(int dir, double keep_total, double spdb)
     snd_mixer_selem_set_capture_volume_all(el_cap, v);
     audio_apply_controls();
     agc_acc = 0.0;
-    fprintf(stderr, "pctv-monitor: AGC: staging, boost %s -> total %+.1f dB "
-                    "(capture %+.1f, boost %+.1f)\n",
+    agc_log("staging, boost %s -> total %+.1f dB (capture %+.1f, boost %+.1f)",
             dir > 0 ? "up" : "down", gain_db + boost_db, gain_db, boost_db);
 }
 
@@ -1110,6 +1151,23 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
                 spdb, emerg, cap_muted, clip_delta);
     }
     if (!emerg && fabs(err) < AGC_DEADBAND_DB) err = 0.0;
+    /* Tens of dB of error does not mean "slew hard", it means the reference is
+     * not trustworthy.  A capture stream that is starved, or shared with a
+     * second reader, measures digital silence; the loop then decides it is
+     * 50 dB short and hunts at full tilt - logging a line per step the whole
+     * way, which is what filled the console during a capture.  Freeze instead,
+     * and say so once. */
+    static int insane;
+    if (fabs(err) > AGC_MAX_ERR_DB) {
+        if (!insane)
+            fprintf(stderr, "pctv-monitor: AGC: %.0f dB off target with a %.0f dBFS "
+                            "peak - ignoring that reference (no audio, or another "
+                            "program is reading the capture device)\n", err, pk);
+        insane = 1;
+        agc_acc = 0.0;
+        return;
+    }
+    insane = 0;
     double lim = (emerg ? AGC_EMERG_DBPS : AGC_RATE_DBPS) * dt;
     if (err >  lim) err =  lim;
     if (err < -lim) err = -lim;
@@ -1124,7 +1182,12 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
             stage_boost(-1, total, spdb);
         else if (err > 0.0 && cap_val >= cap_hi)
             stage_boost(+1, total, spdb);
-        else if (err > 0.0 && cap_val < cap_lo + (cap_hi - cap_lo) / 5)
+        /* Make room in the stage the loop is about to run OUT of, not the one
+         * it is comfortably inside: while attenuating and approaching its
+         * floor, give up a boost step so the level sits mid-range again.  This
+         * was tested against `err > 0` - firing while the loop wanted MORE
+         * gain - so the next tick bought the step back and both logged. */
+        else if (err < 0.0 && cap_val < cap_lo + (cap_hi - cap_lo) / 5)
             stage_boost(-1, total, spdb);
     }
 
@@ -1142,8 +1205,8 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
     snd_mixer_selem_set_capture_volume_all(el_cap, v);
     snd_mixer_selem_set_capture_switch_all(el_cap, 1);
     audio_apply_controls();
-    fprintf(stderr, "pctv-monitor: AGC: peak %.1f dBFS, %d s max %.1f dBFS source"
-                    " -> total %+.1f dB (capture %+.1f, boost %+.1f)\n",
+    agc_log("peak %.1f dBFS, %d s max %.1f dBFS source -> total %+.1f dB "
+            "(capture %+.1f, boost %+.1f)",
             pk, AGC_WINDOW_S, agc_slow_src, gain_db + boost_db, gain_db, boost_db);
 }
 
@@ -2406,6 +2469,43 @@ static void draw_audio_panel(SDL_Renderer *ren)
 
 /* -------------------------------------------------------------------- main */
 
+/* Every line the monitor writes.  Launched from the desktop there is no
+ * terminal, so stderr goes wherever the launcher puts it - which is nowhere -
+ * and the counters that make a capture diagnosable (dup, skip, held, gaps,
+ * xruns) are thrown away with it.  When stderr is not a terminal, append to a
+ * log file instead; a run in a terminal still prints.  PCTV_LOG=<path> forces a
+ * file, PCTV_LOG=0 turns this off.  The probe and FFmpeg inherit fd 2, so one
+ * file holds the whole story. */
+static void log_to_file(const char *why)
+{
+    const char *e = getenv("PCTV_LOG");
+    if (e && !strcmp(e, "0")) return;
+    if (isatty(2) && !e) return;
+    char path[512];
+    if (e)
+        snprintf(path, sizeof path, "%s", e);
+    else {
+        const char *st = getenv("XDG_STATE_HOME");
+        snprintf(path, sizeof path, "%s/pctv-monitor.log",
+                 (st && *st) ? st
+                             : (getenv("HOME") ? "/home/cjdell/.local/state" : "/tmp"));
+        if (!(st && *st)) {
+            char *slash = strrchr(path, '/');
+            if (slash) { *slash = 0; mkdir(path, 0755); *slash = '/'; }
+        }
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    dup2(fd, 2);
+    close(fd);
+    char ts[32];
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tmv);
+    fprintf(stderr, "pctv-monitor: %s at %s: logging to %s\n", why, ts, path);
+}
+
 int main(int argc, char **argv)
 {
     char saved[200];
@@ -2417,6 +2517,7 @@ int main(int argc, char **argv)
     /* Outrank the desktop before SDL, the ALSA capture thread and the probe
      * exist, so every one of them inherits SCHED_FIFO (pctv-rt.h). */
     pctv_become_rt("pctv-monitor", 8);
+    log_to_file("session start");
 
     /* input: saved choice, then PCTV_INPUT, then -i/--input (highest priority) */
     if (cfg_read("input", saved, sizeof saved)) {
@@ -2608,7 +2709,9 @@ int main(int argc, char **argv)
     if (want_capture) {
         if (frames > 0) cap_start();
         else cap_pending = 1;
-        fprintf(stderr, "pctv-monitor: capture queued, starting with the first frame\n");
+        fprintf(stderr, "pctv-monitor: capture queued, starting with the first frame "
+                        "(input %s, master %s)\n", INPUT_LABEL[cur_input],
+                master_name(cap_master));
     }
 
     int help_on = getenv("PCTV_HELP") != 0;   /* `H' toggles it; env for headless checks */

@@ -315,6 +315,7 @@ Knobs for the capture path (all environment, all optional):
 | `PCTV_VQ_SLOTS` | 24 | video queue depth, 4..32 frames (each costs 829 KB); raise it if `skip` climbs |
 | `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
 | `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
+| `PCTV_LOG` | file when detached | `$XDG_STATE_HOME/pctv-monitor.log` holds every line when there is no terminal (the desktop launcher has none, so `dup`/`skip`/`held` used to vanish with it); `PCTV_LOG=/path` picks the file, `PCTV_LOG=0` keeps stderr as-is |
 | `PCTV_MASTER` | `dvd` | `dvd` / `uyvy` / `ffv1` (`--master` on the command line) |
 | `PCTV_RT_PRIO` | monitor 8, probe 10 | `0` turns RT off for an A/B run |
 | `PCTV_VERBOSE` | - | one status line per second, including `q <depth> dup N skip N` |
