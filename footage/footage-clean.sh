@@ -33,7 +33,7 @@ USAGE
 Pipeline stages (each optional, run in this order):
   1. probe      interlacing + color-tag sanity (always runs)
   2. clean      crop -> deinterlace -> temporal denoise (VapourSynth)
-  3. upscale    RealESRGAN on GPU via Vulkan (video2x)
+  3. upscale    RealESRGAN / RealCUGAN on GPU via Vulkan (video2x)
   4. interp     RIFE 2x frame interpolation on GPU (video2x)
   5. encode     FFmpeg final encode + original audio, sane bt709 tags
 
@@ -47,9 +47,14 @@ OPTIONS
   --field ORDER       tff|bff field order (default: detected, else tff)
   --denoise LEVEL     none|light|standard|strong|stronger       (default standard)
   --crop WxH+X+Y      crop first (overscan, head-switch noise, bars)
-  --upscale N         2|3|4  RealESRGAN upscale on the GPU
-  --model NAME        RealESRGAN model: realesr-animevideov3 (default, tuned
-                      for video) | realesrgan-plus-anime | realesrgan-plus
+  --upscale N         2|3|4  neural upscale on the GPU
+  --processor P       realesrgan (default) | realcugan
+  --model NAME        model for the processor:
+                        realesrgan: realesr-animevideov3 (default, best speed/
+                                    quality on video) | realesrgan-plus-anime |
+                                    realesrgan-plus (x4 quality, ~30x slower)
+                        realcugan:  models-pro (default, sharper, can
+                                    over-texture skin/faces) | models-se
   --interp            RIFE 2x frame interpolation (e.g. 25p -> 50p)
   --gpu N             video2x Vulkan device index for stages 3-4 (default 0;
                       enumerate with 'nix run .#footage-kit.passthru.video2xPatched -- -l')
@@ -85,7 +90,9 @@ FIELD=auto
 DENOISE=standard
 CROP=""
 UPSCALE=1
+PROCESSOR=realesrgan
 MODEL=realesr-animevideov3
+MODEL_SET=0
 INTERP=0
 GPUDEV=""
 CODEC=x265
@@ -109,7 +116,8 @@ while [ $# -gt 0 ]; do
     --denoise) DENOISE=$2; shift 2 ;;
     --crop) CROP=$2; shift 2 ;;
     --upscale) UPSCALE=$2; shift 2 ;;
-    --model) MODEL=$2; shift 2 ;;
+    --processor) PROCESSOR=$2; shift 2 ;;
+    --model) MODEL=$2; MODEL_SET=1; shift 2 ;;
     --interp) INTERP=1; shift ;;
     --gpu) GPUDEV=$2; shift 2 ;;
     --codec) CODEC=$2; shift 2 ;;
@@ -138,7 +146,13 @@ done
 [ -f "$IN" ] || { echo "footage-clean: no such file: $IN" >&2; exit 1; }
 IN=$(realpath -- "$IN")
 [ -n "$OUT" ] || OUT="${IN%.*}-cleaned.mp4"
-[ -n "$THREADS" ] || THREADS=$(nproc)
+ [ -n "$THREADS" ] || THREADS=$(nproc)
+if [ "$PROCESSOR" = realcugan ] && [ "$MODEL_SET" = 0 ]; then
+  MODEL=models-pro   # sensible default for the realcugan processor
+fi
+case "$PROCESSOR" in realesrgan|realcugan) ;;
+  *) echo "footage-clean: --processor must be realesrgan|realcugan" >&2; exit 2 ;;
+esac
 
 # ---------------------------------------------------------------- probe ----
 IFS=$'\t' read -r WIDTH HEIGHT FPS FRATE FIELD_ORDER CSPACE CMATRIX PRIM TRC \
@@ -247,7 +261,7 @@ VF=""
 
 echo "  pipeline:"
 [ "$NEED_VS" = 1 ] && echo "    1. VapourSynth: crop=${CROP:-none} deint=${DEINT_APPLIED}/${FIELD} denoise=${DENOISE} -> lossless-ish h264 intermediate"
-[ "$UPSCALE" != 1 ] && echo "    2. video2x -p realesrgan -s $UPSCALE --realesrgan-model $MODEL (Vulkan)"
+[ "$UPSCALE" != 1 ] && echo "    2. video2x -p $PROCESSOR -s $UPSCALE --$PROCESSOR-model $MODEL (Vulkan)"
 [ "$INTERP" = 1 ] && echo "    3. video2x -p rife -m 2 (rife-v4.6, Vulkan)"
 echo "    4. encode: $CODEC crf/qp=$CRF preset=$PRESET ${VF:+vf=$VF} + audio copy + bt709 tags"
 if [ "$DRY" = 1 ]; then exit 0; fi
@@ -311,9 +325,9 @@ fi
 if [ "$UPSCALE" != 1 ]; then
   D=()
   [ -n "$GPUDEV" ] && D=(-d "$GPUDEV")
-  stage "RealESRGAN x${UPSCALE} (${MODEL})" \
-    $VIDEO2X -i "$CUR" -o "$TMP/stage2.mp4" -p realesrgan -s "$UPSCALE" \
-      --realesrgan-model "$MODEL" ${D[@]+"${D[@]}"} -e crf=12 -e preset=fast
+  stage "${PROCESSOR} x${UPSCALE} (${MODEL})" \
+    $VIDEO2X -i "$CUR" -o "$TMP/stage2.mp4" -p "$PROCESSOR" -s "$UPSCALE" \
+      --"$PROCESSOR"-model "$MODEL" ${D[@]+"${D[@]}"} -e crf=12 -e preset=fast
   CUR="$TMP/stage2.mp4"
 fi
 

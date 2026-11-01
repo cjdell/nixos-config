@@ -18,6 +18,8 @@ nix run .#footage-kit -- --help               # footage-clean --help
 just probe ~/Downloads/n265.mp4               # what is this file?
 just footage --test 12 ~/Downloads/n265.mp4   # short test render FIRST
 just footage --denoise standard --deband ~/Downloads/n265.mp4
+# analog PCTV capture (crop bars + head-switch band, idet picks the field order):
+just footage --deint qtgmc --denoise light --crop 700x556+10+2 captures/<file>.mpg
 ```
 
 Built binaries: `result/bin/footage-clean`, `result/bin/footage-probe`.
@@ -34,7 +36,7 @@ pinned nixpkgs, it lands like this:
 | ----------------- | ----------------------------- | ---------------------------------------------------------- |
 | deinterlace       | QTGMC (Avisynth/havsfunc)     | QTGMC-style chain built from the packaged parts: znedi3/eedi3 field-interpolation → MVTools FlowInter → MDegrain (`--deint qtgmc`). Real QTGMC.py needs fmtconv + havsfunc, which nixpkgs does not carry — the substitution is honest and close (`slower` preset minus the source-match passes). `bwdif` via plain FFmpeg is the fast fallback. |
 | denoise           | BM3D / KNLMeansCL / SMDegrain | MDegrain (MVTools) temporal denoise, 4 strengths (`--denoise light..stronger`) + chroma BoxBlur. BM3D/KNLMeans VS plugins aren't packaged; motion-compensated averaging is the right tool for exactly the noise these files have (per-frame sensor noise + compression banding). |
-| tape artifacts    | FixChromaBleeding etc.        | not applicable to the current files (they're progressive digital captures, not composite/VHS). If real RF/tape captures show up: avs-xf/fmtconv would have to be vendored first; noted under "extension points". |
+| tape artifacts    | FixChromaBleeding etc.        | the analog path today is the PCTV MPEG-2 capture: crop (pillar bars + head-switching band, `--crop 700x556+10+2`), `--deint qtgmc`, `--denoise light` and `--grade` handle combing, tape noise and faded colour; verified on `captures/pctv-cap-20261101-210236.mpg`. Composite-level fixes (color bleed, WRNAGS) would need avs-xf/fmtconv vendored first; noted under "extension points". |
 | upscale           | vs-mlrt + ONNX models         | **video2x → realesrgan-ncnn-vulkan** (Vulkan/Mesa, works on the R9700 and the RX 580). vs-mlrt's ONNX runtime has no AMD-relevant EP on Linux; ncnn-vulkan is the same net, and video2x also carries RIFE. |
 | interpolation     | RIFE                          | **video2x rife-ncnn-vulkan** (`--interp`). |
 | encode            | x265                          | libx265 default; `--codec av1|x264|gpu-h265|gpu-h264`. Note AMF encoders do **not** work on Linux (they need the Windows AMF runtime); VAAPI is the GPU path (tested on renderD128). |
@@ -71,6 +73,35 @@ is not); RIFE 2× at 2560×1080 ≈ **11 fps**. VapourSynth MDegrain
 VAAPI HEVC encode (`--codec gpu-h265`) runs on renderD128 (RX 580) and
 was verified end-to-end; AMF does not work on Linux at all (missing
 Windows-only runtime). `VapourSynth + x265` never touch VRAM.
+
+## Enhancement experiments (2026-11-01, on the PCTV capture)
+
+Two 5 s samples of the cleaned 700×556/50p PCTV render (drive segment =
+roadside pylons/foliage, stage-show segment = fine set detail), compared
+as 1:1 crops at equal output size. CPU-side first:
+
+* `--grade` (sat 1.18 / contrast 1.04) — **the cheap win** on faded
+  analog colour; keep on for tape.
+* `--sharpen 0.4` — safe, mild crispness; ≥0.6 starts ringing.
+* `--deband` — marginal after MDegrain (temporal averaging already
+  smooths gradients); keep opt-in for nastier sources.
+
+GPU upscalers (RX 580, 5 s/250-frame clips, all at x2 of the sample):
+
+| variant | result | time | verdict |
+| --- | --- | --- | --- |
+| lanczos x2 | soft, no artefacts | <5 s | the bar to beat |
+| `--model realesr-animevideov3` (default) | natural detail, no artefacts seen | ~45 s | **best all-rounder, the kit default** |
+| `--processor realcugan --model models-pro` | sharpest, nicest texture on foliage/set | ~50 s | runner-up; occasionally over-crisp on edges — spot-check faces |
+| realesrgan-plus x4 → lanczos ½ | ~indistinguishable from animevideov3 at x2 | ~23 min | **not worth ~30× the cost**; reserve for hero stills/clips |
+
+libplacebo is **not** in this nixpkgs' video2x build (`Filter
+'libplacebo' not found`) — no RAISR/Animeweb upscalers via this route.
+
+Extrapolated to the full 29-min capture at x2: ≈ 4–5 h on the RX 580 —
+run it on the R9700 (`--gpu 1` after `gpu-mode game`; expect several
+×  faster on RDNA4) as a dedicated session, not beside Strata (475 MB
+VRAM free with the LLM resident).
 
 ## Notes
 
