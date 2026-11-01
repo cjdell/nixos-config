@@ -27,19 +27,18 @@ let
   guestConstants = c; # the guest uses the same constants as the host
 
   vmSecretShare = "/run/vm-secrets/friend-router";
-  vmSecretNames = [
-    "friend_router_wg_key"
-    "friend_vm_host_key"
-  ];
 
   # Same copy-not-mount discipline as grafton-hackspace-client: virtiofsd
   # keeps the directory inode it opened at VM start, so this stays a plain
   # directory refreshed in place, never a mount.
+  # friend_router_wg_key additionally gets group systemd-network 0440: the
+  # GUEST's systemd-networkd reads it as PrivateKeyFile for its wg-friend
+  # netdev, and virtiofs carries uids straight through — the guest's
+  # systemd-network group has the same numeric id as ours (this nixpkgs: 152).
   publishVmSecrets = ''
     ${pkgs.coreutils}/bin/mkdir -p ${vmSecretShare}
-    ${lib.concatMapStringsSep "\n" (n: ''
-      ${pkgs.coreutils}/bin/install -m 0400 ${config.sops.secrets.${n}.path} ${vmSecretShare}/${n}
-    '') vmSecretNames}
+    ${pkgs.coreutils}/bin/install -m 0440 -g systemd-network ${config.sops.secrets.friend_router_wg_key.path} ${vmSecretShare}/friend_router_wg_key
+    ${pkgs.coreutils}/bin/install -m 0400 ${config.sops.secrets.friend_vm_host_key.path} ${vmSecretShare}/friend_vm_host_key
   '';
 
   demoWebRoot = pkgs.writeTextDir "index.html" ''
