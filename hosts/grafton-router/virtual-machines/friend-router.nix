@@ -54,8 +54,6 @@ let
   friendLanDevice = pkgs.writeShellScript "friend-lan-device" ''
     set -u
     IP=${lib.getExe' pkgs.iproute2 "ip"}
-    SYSC=${lib.getExe' pkgs.systemd "sysctl"}
-    RESOLVECTL=${lib.getExe' pkgs.systemd "resolvectl"}
 
     # wait for the LAN bridge to exist (networkd)
     for i in $(seq 1 60); do [ -e /sys/class/net/br-friend ] && break; sleep 1; done
@@ -71,19 +69,20 @@ let
     # The VM is a router (forwarding=1), so plain accept_ra would ignore RAs:
     # 2 = accept even while forwarding. Keep the default route off this port
     # anyway — the tunnel owns the default — but still SLAAC an address.
-    $SYSC -w net.ipv6.conf.fdev0.accept_ra=2 2>/dev/null || true
-    $SYSC -w net.ipv6.conf.fdev0.accept_ra_defrtr=0
-    $SYSC -w net.ipv6.conf.fdev0.accept_ra_rt_info_max_plen=0 2>/dev/null || true
+    # Asserted twice: networkd touches the freshly-created link's defaults as
+    # its own event processing lands, and whichever writes last wins.
+    set_ra() {
+      echo 2 > /proc/sys/net/ipv6/conf/fdev0/accept_ra
+      echo 0 > /proc/sys/net/ipv6/conf/fdev0/accept_ra_defrtr
+    }
+    set_ra
+    sleep 3
+    set_ra
+    echo "fdev0 accept_ra=$(cat /proc/sys/net/ipv6/conf/fdev0/accept_ra)"
 
     # static token address (deterministic demo URL); a real device keeps
     # whatever SLAAC/DHCPv6 hands out alongside it.
     $IP -6 addr replace ${guestConstants.FRIEND_V6_DEV}/64 dev fdev0
-
-    # resolved has no RA-learned DNS of its own here (fdev0 is unmanaged),
-    # so point its global fallback at AdGuard through the tunnel.
-    for i in $(seq 1 60); do $RESOLVECTL status >/dev/null 2>&1 && break; sleep 1; done
-    $RESOLVECTL dns global ${guestConstants.LAN_IPV6_ADDRESS} || true
-    $RESOLVECTL domain global "~." || true
     echo "friend-lan-device ready on fdev0"
   '';
 in
@@ -241,12 +240,15 @@ in
 
           # RA the shared /64 onto the friend's LAN, with RDNSS — the
           # same networkd mechanism the router itself uses for :49::/64.
+          # The static address is not cosmetic: networkd refuses to send
+          # any RA from a link without one (silently, at trace level).
           "30-br-friend" = {
             matchConfig.Name = "br-friend";
             networkConfig = {
               IPv6SendRA = true;
               DHCP = "no";
             };
+            address = [ "${guestConstants.FRIEND_V6_LAN}/64" ];
             ipv6SendRAConfig = {
               EmitDNS = true;
               DNS = guestConstants.LAN_IPV6_ADDRESS;
@@ -259,11 +261,20 @@ in
             ];
           };
 
+          # AllowedIPs routes are NOT installed by the netdev alone (that is
+          # wg-quick/iproute2's job), so ::/0 over the tunnel is declared
+          # explicitly — every friend-side v6 destination rides wstunnel.
           "40-wg-friend" = {
             matchConfig.Name = "wg-friend";
             linkConfig.RequiredForOnline = "no";
             networkConfig.DHCP = "no";
             address = [ "${guestConstants.FRIEND_V6_VM}/64" ];
+            routes = [
+              {
+                Destination = "::/0";
+                PreferredSource = guestConstants.FRIEND_V6_VM;
+              }
+            ];
           };
         };
       };
@@ -322,7 +333,7 @@ in
         wantedBy = [ "multi-user.target" ];
         serviceConfig = {
           ExecStart = ''
-            ${lib.getExe pkgs.python3}/bin/python3 -m http.server 80 \
+            ${pkgs.python3}/bin/python3 -m http.server 80 \
               --bind :: --directory ${demoWebRoot}
           '';
           Restart = "always";
@@ -330,7 +341,17 @@ in
         };
       };
 
-      services.resolved.enable = true;
+      # resolved has no per-link DNS anywhere in this guest (fdev0 is
+      # deliberately unmanaged), so the global server is the tunnel path:
+      # AdGuard at :49::1, reached through wg-friend. `resolvectl dns
+      # global` is not a thing on this systemd — it wants the setting.
+      services.resolved = {
+        enable = true;
+        settings.Resolve = {
+          DNS = guestConstants.LAN_IPV6_ADDRESS;
+          Domains = [ "~." ];
+        };
+      };
 
       services.openssh = {
         enable = true;

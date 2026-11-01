@@ -86,6 +86,10 @@ rec {
   FRIEND_V6_SUBNET = "2a02:8010:6680:f0::/64"; # the shared /64 from our /48
   FRIEND_V6_ROUTER = "2a02:8010:6680:f0::1"; # wg-friend on the router
   FRIEND_V6_VM = "2a02:8010:6680:f0::2"; # wg-friend on the friend VM
+  # br-friend (the friend's LAN) needs its own global address, distinct from
+  # the two tunnel ends: networkd only sends router advertisements from a
+  # link that has a static IPv6 address configured.
+  FRIEND_V6_LAN = "2a02:8010:6680:f0::9"; # friend-router LAN gateway on br-friend
   FRIEND_V6_DEV = "2a02:8010:6680:f0::10"; # static token addr on the VM's demo device
   WSTUNNEL_PORT = 8087; # wstunnel server, loopback only (nginx fronts it on 443)
   WG_FRIEND_PORT = 51830; # wg-friend's listen port (51820 is wg0's)
