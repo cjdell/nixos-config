@@ -117,12 +117,18 @@ in
     # The monitor's only cushion between a 27 MB/s BT.656 stream and a 2-core
     # box that is simultaneously running ffmpeg, the SDL display, kwin and the
     # USB workers is a pipe. The unprivileged default cap (fs.pipe-max-size =
-    # 1 MiB) is 39 ms of slack, and one scheduling hiccup past that makes the
+    # 1 MiB) is 39 ms of slack, and one scheduling hiccup past that made the
     # probe's non-blocking write fail and discard a whole 32 KiB URB = 19
-    # BT.656 lines; the parser then splices the field across the hole, which is
+    # BT.656 lines; the parser then spliced the field across the hole, which is
     # exactly the "one interlaced field is misaligned" glitch seen in the live
     # view and in the recorded .mpg. Raise the cap so pctv-monitor can ask for
     # 32 MiB (1.2 s of slack) instead of 1 MiB.
+    #
+    # Since 2026-11-01 the probe also queues 64 MiB (2.4 s) in front of this pipe
+    # and never discards on EAGAIN (docs/pctv-analog-capture.md §11), so a
+    # refused F_SETPIPE_SZ is now a latency regression rather than lost tape -
+    # which is why the stream queue is sized from the same arithmetic and why
+    # both are declared here instead of being left to chance.
     boot.kernel.sysctl."fs.pipe-max-size" = lib.mkDefault "67108864";
 
     # ...and the per-user half of the same arithmetic.  `F_SETPIPE_SZ` charges

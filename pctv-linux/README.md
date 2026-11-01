@@ -279,15 +279,34 @@ Matroska twin (which fixes the label, never the MPEG-2 bitstream).
 * **Recording is obvious on screen**: a 4 px red border around the frame, a
   large `REC mm:ss.t` badge with a dot blinking once a second, and a line with
   frames, bytes, the drop counters and the encoder queue occupancy.
-* The encoder is fed from a **4-frame ring owned by a writer thread**, never
-  from the main loop.  Writing an 829 KB UYVY frame inline meant the display
-  waited on the encoder - and while the main loop waits, nothing drains the
-  probe either, so the whole pipeline hiccups.  If the ring fills, the newest
-  frame is dropped whole and counted: an encoder that cannot keep up shows up
-  as counted frame drops (with the video track ending up shorter than the
-  audio) instead of a stalling picture.
-* Both pipes are `poll()`ed and the audio pipe is non-blocking: a slow encoder
-  costs counted frame drops, never a wedged GUI or a stalled USB drain.
+* Frames are queued **where they are born** (a 12-slot ring, one frame per
+  assembled picture) and a single **writer thread** owns every write to ffmpeg's
+  two pipes.  Writing an 829 KB UYVY frame inline meant the display waited on the
+  encoder - and while the main loop waits, nothing drains the probe either, so the
+  whole pipeline hiccups.
+* **The 25 fps clock lives in the writer thread, and it is the audio stream's
+  clock**: a frame goes out when the muxed audio reaches 40 ms x n, not when 40 ms
+  of host time has passed.  That is what keeps a two-hour tape from ending with
+  its picture a second ahead of its speech, and it is why the REC overlay says
+  `audio clock` / `wall clock`.  Full reasoning and the measurements:
+  `docs/pctv-analog-capture.md` §11.
+* Nothing is dropped to keep up any more: the audio queue is 1 MiB (5.5 s), the
+  video ring 10 frames (400 ms) and the encoder's own video pipe 8 MiB (10
+  frames), and both pipes are non-blocking with a resume-on-partial write, so a
+  stalled encoder costs latency and, at the very worst, counted drops - never a
+  wedged GUI, a corrupted stream or a hung `c`.
+* **`dup` and `skip` are the two numbers that say whether the recording kept every
+  picture.** `dup` = the clock asked and the card had not delivered (one frame
+  written twice - a visible drag); `skip` = the queue filled and the oldest frame
+  was evicted (a picture lost - a visible jump).  A clean capture reads
+  `dup 0, skip 0`; the stop line repeats them.  If the card and the host disagree
+  by a few tens of ppm you will see one event every few minutes, and that is the
+  most any two crystals can promise.
+* Watch a `.mpg` with the field order declared (`ffplay -top 1`, `AssumeTFF()`):
+  MPEG-2 cannot carry it, and a player that guesses wrong deinterlaces every
+  moving object backwards - which is what "the recording is not as fluid as the
+  live view" usually was, on top of the cadence work above.  `--master ffv1` and
+  `uyvy` stamp the flag correctly.
 * `ffprobe` reports `field_order=bb` for these files even though the sequence
   extension carries `top_field_first=1` (read the byte after `00 00 01 B5`);
   that is a probe quirk - do not "fix" the encoder flags.  `-top 1` is not even

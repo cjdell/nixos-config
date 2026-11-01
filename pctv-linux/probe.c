@@ -56,6 +56,8 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <pthread.h>
+#include <poll.h>
 #include <libusb-1.0/libusb.h>
 #include "pctv-rt.h"
 
@@ -2443,10 +2445,10 @@ static int cmd_analog2(int argc, char **argv)
  * from the bulk-IN endpoint to stdout until SIGINT/SIGTERM.  Consumers
  * (pctv-monitor, mpv, ...) parse the BT.656 sync words themselves.
  *
- * Stdout is best-effort and non-blocking from the libusb callback: if the
- * consumer stalls we drop that chunk rather than stalling the USB event loop
- * (the parser resyncs on the next SAV, so a dropped chunk costs at most a
- * few lines, never a wedged stream).  Bring-up diagnostics go to stderr.
+ * Since 2026-11-01 the callback does not write to stdout at all: it fills a
+ * 64 MiB ring and a writer thread drains it (see "the stdout queue" below), so
+ * a slow consumer costs latency, never data.  Bring-up diagnostics still go to
+ * stderr, so stdout stays pure BT.656.
  */
 static volatile sig_atomic_t stream_stop;
 static int stream_inflight;
@@ -2463,36 +2465,217 @@ static double drop_t[DROP_LOG];
 static struct timespec stream_t0;
 static void stream_on_sig(int sig) { (void)sig; stream_stop = 1; }
 
+/* ---- the stdout queue: the one place that used to destroy data -----------
+ * stream_cb() used to write() each completed URB straight into the pipe and, on
+ * EAGAIN, throw the rest of it away: 32 KiB = 19 BT.656 lines gone, which the
+ * parser then spliced a field across (the "one interlaced field is misaligned"
+ * glitch, and the reason the monitor grew fields_gap/fields_dropped counters at
+ * all).  Every cushion in front of that decision was measured in time: 24 URBs
+ * in flight (~29 ms) plus whatever fits the pipe, and a cushion measured in time
+ * only buys the consumer a deadline.
+ *
+ * This inverts it.  The callback never blocks and never discards: it copies the
+ * URB into a 64 MiB ring (2.4 s of stream at 27 MB/s) and one writer thread does
+ * every blocking write to stdout.  Bytes are now lost only if the consumer stops
+ * reading for *seconds*, the ring overflows, and the count says exactly how much
+ * and when.  It also means the pipe size and the consumer's scheduling are no
+ * longer correctness-critical - which is what "buffer all the input" is supposed
+ * to mean.  PCTV_STREAM_BUF=0 restores the old drop-on-EAGAIN behaviour for an
+ * A/B run; PCTV_STREAM_BUF=<MiB> sizes the ring.
+ */
+#define SQ_CHUNK (256u << 10)
+static unsigned char *sq;                       /* NULL = inline (old) path */
+static size_t sq_cap, sq_head, sq_count, sq_sent;
+static volatile int sq_dead;                    /* writer gave up on the pipe */
+static volatile int sq_finishing;
+static int sq_mib;
+static pthread_t sq_thr;
+static int sq_thr_started;
+static pthread_mutex_t sq_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  sq_cv = PTHREAD_COND_INITIALIZER;
+
+static void stream_note_drop(size_t bytes)      /* called with sq_mtx held */
+{
+    stream_drop_chunks++;
+    stream_drop_bytes += (unsigned long long)bytes;
+    if (stream_drop_chunks <= DROP_LOG) {
+        struct timespec dn;
+        clock_gettime(CLOCK_MONOTONIC, &dn);
+        drop_t[stream_drop_chunks - 1] =
+            (dn.tv_sec - stream_t0.tv_sec) + 1e-9 * (dn.tv_nsec - stream_t0.tv_nsec);
+    }
+}
+
+/* Producer: the libusb callback.  Never blocks, never discards unless the whole
+ * ring is full, and never touches bytes the writer has reserved. */
+static void sq_produce(const unsigned char *p, size_t n)
+{
+    pthread_mutex_lock(&sq_mtx);
+    if (sq_dead) { pthread_mutex_unlock(&sq_mtx); return; }
+    size_t freeb = sq_cap - sq_count;
+    if (n > freeb) {
+        size_t need = n - freeb;
+        size_t evictable = sq_count - sq_sent;      /* never the in-flight part */
+        size_t ev = need < evictable ? need : evictable;
+        sq_head = (sq_head + ev) % sq_cap;
+        sq_count -= ev;
+        stream_note_drop(ev);
+        need -= ev;
+        if (need) {                                  /* cannot happen at 32 KiB
+                                                      * into 64 MiB, but count it */
+            if (need > n) need = n;
+            stream_note_drop(need);
+            n -= need;
+        }
+    }
+    if (n) {
+        size_t tail = (sq_head + sq_count) % sq_cap;
+        size_t first = n < sq_cap - tail ? n : sq_cap - tail;
+        memcpy(sq + tail, p, first);
+        if (n > first) memcpy(sq, p + first, n - first);
+        sq_count += n;
+        pthread_cond_broadcast(&sq_cv);
+    }
+    pthread_mutex_unlock(&sq_mtx);
+}
+
+static void *sq_writer(void *unused)
+{
+    int stalled = 0;
+    for (;;) {
+        size_t n = 0, first = 0;
+        unsigned char *b = NULL;
+        pthread_mutex_lock(&sq_mtx);
+        while (!sq_count && !sq_dead && !sq_finishing)
+            pthread_cond_wait(&sq_cv, &sq_mtx);
+        if (sq_dead) { pthread_mutex_unlock(&sq_mtx); break; }
+        n = sq_count > SQ_CHUNK ? SQ_CHUNK : sq_count;
+        if (n) {
+            size_t off = (sq_head + sq_sent) % sq_cap;
+            first = n < sq_cap - off ? n : sq_cap - off;
+            b = sq + off;
+            sq_sent = n;                             /* reserve until written */
+        }
+        int finishing = sq_finishing;
+        pthread_mutex_unlock(&sq_mtx);
+        if (!n) {
+            if (finishing) break;                    /* drained */
+            continue;
+        }
+        struct pollfd pf = { .fd = STDOUT_FILENO, .events = POLLOUT };
+        int pr = poll(&pf, 1, 500);
+        if (pr <= 0 || !(pf.revents & POLLOUT)) {
+            /* Consumer not reading.  If we are finishing this is the end of the
+             * run; otherwise it is a stall, and the ring (not the data) absorbs
+             * it - so keep the bytes queued and try again. */
+            if (++stalled >= 4 && finishing) { sq_dead = 1; break; }
+            if (stalled >= 40) { sq_dead = 1; break; }   /* 20 s: give up */
+            usleep(20000);
+            continue;
+        }
+        stalled = 0;
+        const unsigned char *seg = b;
+        size_t left = first;
+        int err = 0;
+        while (left) {
+            ssize_t w = write(STDOUT_FILENO, seg, left);
+            if (w > 0) { seg += w; left -= (size_t)w; continue; }
+            if (w < 0 && errno == EINTR) continue;
+            if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                usleep(2000); continue;               /* the ring soaks it up */
+            }
+            err = 1; break;                           /* EPIPE/EBADF: reader gone */
+        }
+        size_t second = n - first;
+        if (!err && second) {
+            seg = sq; left = second;
+            while (left) {
+                ssize_t w = write(STDOUT_FILENO, seg, left);
+                if (w > 0) { seg += w; left -= (size_t)w; continue; }
+                if (w < 0 && errno == EINTR) continue;
+                if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    usleep(2000); continue;
+                }
+                err = 1; break;
+            }
+        }
+        pthread_mutex_lock(&sq_mtx);
+        sq_sent = 0;
+        if (!err) { sq_head = (sq_head + n) % sq_cap; sq_count -= n; }
+        pthread_mutex_unlock(&sq_mtx);
+        if (err) {
+            /* The reader is gone (the monitor died or closed the pipe).  Streaming
+             * on would leave this process holding the USB interface, which makes
+             * every later run fail with "claim if0: Resource busy" and no data -
+             * and that looks like a dead card. */
+            sq_dead = 1;
+            stream_stop = 1;
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void sq_start(void)
+{
+    const char *e = getenv("PCTV_STREAM_BUF");
+    sq_mib = e ? atoi(e) : 64;
+    if (sq_mib <= 0) return;                 /* inline (old) behaviour */
+    size_t cap = (size_t)sq_mib << 20;
+    cap = (cap / SQ_CHUNK + 1) * SQ_CHUNK;
+    sq = malloc(cap);
+    if (!sq) { fprintf(stderr, "stream: no %d MiB stream queue - writing inline\n",
+                        sq_mib); return; }
+    sq_cap = cap;
+    sq_head = sq_count = sq_sent = 0;
+    sq_dead = sq_finishing = 0;
+    if (pthread_create(&sq_thr, NULL, sq_writer, NULL) != 0) {
+        free(sq); sq = NULL; return;
+    }
+    sq_thr_started = 1;
+    fprintf(stderr, "stream: %zu MiB stdout queue (writer thread)\n", cap >> 20);
+}
+
+static void sq_finish(void)
+{
+    if (!sq_thr_started) return;
+    pthread_mutex_lock(&sq_mtx);
+    sq_finishing = 1;
+    pthread_cond_broadcast(&sq_cv);
+    pthread_mutex_unlock(&sq_mtx);
+    pthread_join(sq_thr, NULL);
+    sq_thr_started = 0;
+    free(sq); sq = NULL;
+}
+
+/* the pre-2026-11 behaviour, kept for PCTV_STREAM_BUF=0 A/B runs */
+static void stream_write_inline(const unsigned char *buf, size_t len)
+{
+    ssize_t off = 0;
+    while (off < (ssize_t)len) {
+        ssize_t w = write(STDOUT_FILENO, buf + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EPIPE || errno == EBADF) { stream_stop = 1; return; }
+            stream_drop_chunks++;
+            stream_drop_bytes += (unsigned long long)(len - off);
+            if (stream_drop_chunks <= DROP_LOG) {
+                struct timespec dn;
+                clock_gettime(CLOCK_MONOTONIC, &dn);
+                drop_t[stream_drop_chunks - 1] =
+                    (dn.tv_sec - stream_t0.tv_sec) + 1e-9 * (dn.tv_nsec - stream_t0.tv_nsec);
+            }
+            return;                            /* EAGAIN: drop the rest */
+        }
+        off += w;
+    }
+}
+
 static void stream_cb(struct libusb_transfer *t)
 {
     if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0) {
-        ssize_t off = 0;
-        int len = t->actual_length;
-        while (off < len) {
-            ssize_t w = write(STDOUT_FILENO, t->buffer + off, len - off);
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EPIPE || errno == EBADF) {
-                    /* The reader is gone (the monitor died or closed the pipe).
-                     * Keep streaming forever in that case would leave this
-                     * process holding the USB interface, which makes every
-                     * later run fail with "claim if0: Resource busy" and no
-                     * data - and that looks like a dead card. */
-                    stream_stop = 1;
-                    break;
-                }
-                stream_drop_chunks++;
-                stream_drop_bytes += (unsigned long long)(len - off);
-                if (stream_drop_chunks <= DROP_LOG) {
-                    struct timespec dn;
-                    clock_gettime(CLOCK_MONOTONIC, &dn);
-                    drop_t[stream_drop_chunks - 1] =
-                        (dn.tv_sec - stream_t0.tv_sec) + 1e-9 * (dn.tv_nsec - stream_t0.tv_nsec);
-                }
-                break;   /* EAGAIN: drop the rest of this chunk */
-            }
-            off += w;
-        }
+        if (sq) sq_produce(t->buffer, (size_t)t->actual_length);
+        else stream_write_inline(t->buffer, (size_t)t->actual_length);
     }
     if (!stream_stop) {
         if (libusb_submit_transfer(t) < 0) stream_stop = 1;
@@ -2571,6 +2754,7 @@ static int cmd_stream(int argc, char **argv)
     close(saved_out);
     int fl = fcntl(STDOUT_FILENO, F_GETFL, 0);
     if (fl >= 0) fcntl(STDOUT_FILENO, F_SETFL, fl | O_NONBLOCK);
+    sq_start();                 /* the queue that replaced drop-on-EAGAIN */
     signal(SIGINT, stream_on_sig);
     signal(SIGTERM, stream_on_sig);
     signal(SIGPIPE, SIG_IGN);
@@ -2601,7 +2785,9 @@ static int cmd_stream(int argc, char **argv)
         libusb_handle_events_timeout_completed(NULL, &tv, NULL);
     }
     for (int i = 0; i < ACAP_URBS; i++) { libusb_free_transfer(tr[i]); free(buf[i]); }
-    fprintf(stderr, "stream: stopped (%llu chunks, %llu B dropped on EAGAIN)\n",
+    sq_finish();                /* flush what the ring still holds, then join */
+    fprintf(stderr, "stream: stopped (%llu drops, %llu B lost to a full stream "
+                    "queue / EAGAIN)\n",
             stream_drop_chunks, stream_drop_bytes);
     for (unsigned long long i = 0; i < stream_drop_chunks && i < DROP_LOG; i++)
         fprintf(stderr, "stream: EAGAIN drop at t=%.3f s\n", drop_t[i]);

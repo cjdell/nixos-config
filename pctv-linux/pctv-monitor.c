@@ -158,7 +158,6 @@ static int  field_F = -1, field_lines = 0;
 static int  parity_mask = 0;         /* which field parities are in fuv */
 static int  field_repeat = 0;        /* same parity twice: feed anyway */
 static int  frame_ready = 0;
-static int  frame_new = 0;             /* a frame arrived since the last feed */
 /* ---- good-frame gate -----------------------------------------------------
  * A frame whose two fields do not belong together is far more visible than the
  * same picture shown twice: a field spliced across a stream hole sits ~19 rows
@@ -1225,9 +1224,17 @@ static int audio_open_pcm(snd_pcm_t **pcm, char *err, size_t n)
             continue;
         }
         for (unsigned r = 0; r < sizeof rates / sizeof rates[0]; r++) {
+            /* 60 ms of target latency, not the 20 ms this used to ask for: the
+             * ALSA read period is what an overrun costs, and an overrun is lost
+             * *samples*.  The PCM thread now never blocks on the encoder (it only
+             * copies into a 5.5 s ring), so the only thing that can still make it
+             * miss is this buffer being too small to survive a scheduling hiccup
+             * on a 2-core box.  It costs latency on the `o' monitor path, not
+             * sync: the capture writes what it reads, and the video is paced off
+             * the same byte count. */
             ep = snd_pcm_set_params(*pcm, SND_PCM_FORMAT_S16_LE,
                                     SND_PCM_ACCESS_RW_INTERLEAVED, 2, rates[r],
-                                    1 /* allow format/rate change */, 20000);
+                                    1 /* allow format/rate change */, 60000);
             if (ep >= 0) { audio_rate = rates[r]; break; }
         }
         if (ep >= 0) {
@@ -1489,13 +1496,45 @@ static void audio_start_thread(void)
     else athr_reopen = 1;
 }
 
-/* =========================================================== MPEG-2 capture
+/* =========================================================== capture path
  *
- * A PAL-DVD-style MPEG-2 program stream: deframed UYVY goes to ffmpeg's stdin
- * as rawvideo, the ALSA PCM to fd 3 as s16le, and ffmpeg muxes mpeg2video +
- * MP2 into a .mpg.  Both pipes are poll()ed before writing so a stalled
- * encoder can never wedge the GUI; a frame that cannot be handed over is
- * dropped and counted rather than half-written (which would desync rawvideo).
+ * Two streams go to ffmpeg: deframed UYVY on stdin as rawvideo, the ALSA PCM on
+ * fd 3 as s16le, muxed into the MPEG-PS or Matroska the chosen `--master` mode
+ * asks for.  Whoever produces data only ever copies it into a ring; ONE writer
+ * thread owns every blocking write to ffmpeg's two pipes, so neither the display
+ * loop nor the ALSA thread can ever be held up by an encoder or a disk.
+ *
+ * Pacing is the subtle part, and the design before 2026-11-01 got it wrong in
+ * both directions (measured in docs/pctv-320cx.md, "capture cadence"):
+ *
+ *   - The card supplies 25.00 frames/s on ITS clock (CX25843 at 13.5 MBaud,
+ *     1728 B/line, 625/50).  The host clock is a different crystal, and this
+ *     loop's iteration period is 17-28 ms - half a frame.
+ *   - The encoder used to be fed by polling the single `fuv` buffer from the
+ *     main loop whenever 40 ms of *host* time had passed.  A poll can only find
+ *     the buffer unchanged (so it writes a duplicate: "the picture drags") or
+ *     find two arrivals since the last poll (so one picture is overwritten
+ *     before it was ever written: "the picture catches up") - and the second
+ *     direction was counted nowhere at all.  A 120 s capture of a real tape
+ *     measured 2991 frames written, 374 of them duplicates and ~375 never
+ *     written; the 2 h tape that started the investigation is 2.376 s of video
+ *     short of its own audio track, i.e. 59 lost frames and a lip-sync error
+ *     grows toward a second across the tape.
+ *   - Now a frame enters the queue the moment it is assembled (arrival driven:
+ *     every frame exactly once, nothing can be overwritten) and the writer
+ *     thread *pops* it on a clock.  The queue is a phase buffer, so a late pop
+ *     costs nothing: a duplicate or an eviction now means the card and the host
+ *     disagree by a whole frame, not that a loop iteration landed on the wrong
+ *     side of a deadline.
+ *   - And the clock the writer pops on is the AUDIO stream's own timeline (bytes
+ *     written / bytes-per-ms) rather than the host clock, because that byte
+ *     count is exactly what the file's audio PTS ramp encodes.  Feeding frame k
+ *     when the audio track reaches 40 ms * k makes the two streams inside one
+ *     file consistent by construction, whatever the two crystals do: a card
+ *     running 300 ppm fast then costs one evicted frame every few seconds
+ *     instead of a second of drift per hour.  If the audio stream stalls (device
+ *     lost mid-capture) the writer falls back to the wall clock instead of
+ *     freezing the picture.
  */
 
 static char ffmpeg_path[4096] = "ffmpeg";
@@ -1504,31 +1543,32 @@ static int   cap_vfd = -1, cap_afd = -1;
 static int   cap_on = 0, cap_has_audio = 0;
 static char  cap_path[512];
 static unsigned long long cap_vframes = 0, cap_vdrops = 0, cap_adrops = 0;
-/* Capture pacing.  ffmpeg is told the video is exactly 25 fps (-f rawvideo
- * -r 25), so its video timeline advances 40 ms per frame regardless of how many
- * frames the source actually delivered.  This source does not deliver a steady
- * 50 fields/s: one capture measured 48.5 fields/s (1213 fields in 25 s) and
- * another 50.3 - fed as they arrive, the first came out with a video stream
- * 0.77 s shorter than its audio stream, so the picture led the sound by that
- * much and the error grew through the clip.  The capture is therefore fed on a
- * clock, not on arrivals: every 40 ms the newest complete frame is handed over,
- * repeated if the source has not produced a new one (the same thing the frame
- * gate already does for bad frames, and equally invisible); if the source ever
- * runs faster than the clock, the newest frame simply replaces the one before
- * it.  The display is untouched: it still shows every frame as it arrives. */
-static unsigned long long cap_vrepeats = 0;
-static unsigned long cap_feed_next;
-static unsigned long long cap_abytes = 0;
+static unsigned long long cap_abytes = 0, cap_adrop_bytes = 0;
+/* dup = re-sent because nothing new had arrived, skip = queued frame evicted
+ * because the writer had not popped it.  Both are whole-frame events with a
+ * cause now, and both are on screen: they are the two halves of what used to be
+ * invisible. */
+static unsigned long long cap_vrepeats = 0, cap_vskips = 0;
+static int cap_qmax = 0;                  /* video queue high-water, in frames */
+static int cap_clock_audio = 0;           /* writer paced by the audio stream */
 static time_t cap_t0 = 0;
-static unsigned long cap_t0_tick = 0;   /* SDL ticks, for a smooth REC counter */
-static int cap_pending = 0;      /* `c' pressed, waiting for the first frame */
+static unsigned long cap_t0_tick = 0;     /* SDL ticks, for a smooth REC counter */
+static int cap_pending = 0;               /* `c' pressed, waiting for the first frame */
 static pthread_mutex_t cap_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cap_cv = PTHREAD_COND_INITIALIZER;
 static int cap_refs = 0, cap_closing = 0;
+/* One lock and one condition variable for BOTH capture rings (audio below, video
+ * below): the writer thread waits on this one cv for either kind of work. */
+static pthread_mutex_t vq_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  vq_cv = PTHREAD_COND_INITIALIZER;
+
+/* Locking rule for the two capture locks: vq_mtx guards the two rings, cap_mtx
+ * guards the fds and the statistics.  Never take cap_mtx while holding vq_mtx -
+ * cap_master_ms() takes them in that order, and every producer follows it too. */
 
 /* Take the capture fds for one write.  The lock is NOT held during the write
  * itself: a stalled encoder must never be able to block whoever holds it -
- * that would stall the main loop, which is what drains the probe's stdout. */
+ * that would stall the writer, which is the only thing draining both rings. */
 static int cap_get(int *vfd, int *afd)
 {
     pthread_mutex_lock(&cap_mtx);
@@ -1556,128 +1596,343 @@ static void cap_died(void)
     if (was) fprintf(stderr, "pctv-monitor: encoder went away, capture stopped\n");
 }
 
-/* Write a whole buffer, having first waited for the pipe to drain.  Returns 0
- * on success, -1 if it was dropped or the encoder died. */
-static int pipe_write(int fd, const void *p, size_t n, int msecs)
+/* Write a buffer without ever sitting in the kernel.  Both pipe ends are
+ * O_NONBLOCK, so this either gets the bytes into the pipe or reports what it
+ * could not deliver - and that matters more than it looks: a blocking write()
+ * here is unkillable (the encoder decides when it returns), which used to turn a
+ * stuck ffmpeg into a monitor that could not finish stopping a capture, and a
+ * writer thread that cannot finish means cap_stop() never closes the pipes and
+ * nothing downstream ever sees EOF.
+ *
+ * *done reports how much reached the pipe, so a caller with fixed-size frames
+ * can resume where it stopped: rawvideo has no framing of its own, so a half
+ * written frame is not a lost frame, it is a corrupted stream (ffmpeg answers it
+ * with "Error submitting packet to decoder: Invalid argument" and everything
+ * after it is shifted).  Returns 0 = complete, -1 = the reader is gone, -2 = it
+ * did not drain in time (retry). */
+static int pipe_write(int fd, const void *p, size_t n, int msecs, size_t *done)
 {
-    if (fd < 0) return -1;
-    struct pollfd pf = { .fd = fd, .events = POLLOUT };
-    if (poll(&pf, 1, msecs) <= 0) return -1;
+    if (done) *done = 0;
+    if (fd < 0 || !n) return -1;
     const unsigned char *b = p;
+    struct pollfd pf = { .fd = fd, .events = POLLOUT | POLLERR | POLLHUP };
     while (n) {
         ssize_t w = write(fd, b, n);
-        if (w > 0) { b += w; n -= (size_t)w; continue; }
+        if (w > 0) { b += w; n -= (size_t)w; if (done) *done += (size_t)w; continue; }
         if (w < 0 && errno == EINTR) continue;
-        return -1;
+        if (!(w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) return -1;
+        if (poll(&pf, 1, msecs) <= 0) return -2;                  /* still stalled */
+        if (pf.revents & (POLLERR | POLLHUP)) return -1;          /* reader gone */
     }
     return 0;
 }
 
-/* Audio: never block.  s16le is self-synchronising on 2-byte boundaries, so a
- * partial write only loses samples - and losing samples is far better than
- * holding up the video path. */
-static void cap_feed_audio(const void *p, size_t n)
+/* ---- audio queue -------------------------------------------------------
+ * The ALSA thread used to write to ffmpeg itself with a non-blocking fd and
+ * count an `audio drop' on EAGAIN.  s16le is self-synchronising on 2-byte
+ * boundaries, so that only lost the samples in flight - which is exactly how a
+ * long tape ends up with audio and video tracks of different lengths, quietly.
+ * Now the PCM callback only copies: 1 MiB = 5.5 s of cushion between the sound
+ * server and the writer thread.  Bytes are released only once they are in the
+ * pipe, and the eviction below can never eat what is in flight. */
+#define AQ_BYTES (1u << 20)
+static unsigned char *aq;
+static size_t aq_head, aq_count, aq_sent;  /* aq_sent = reserved, being written */
+static volatile int aq_closed;            /* drain in progress: refuse more */
+static volatile unsigned long cap_alast_ms;  /* last byte arrived (wall ms) */
+
+static void aq_reset(void)
 {
-    int vfd, afd;
-    if (cap_get(&vfd, &afd) < 0) return;
-    if (afd >= 0) {
-        const unsigned char *b = p;
-        size_t left = n & ~(size_t)1;
-        while (left) {
-            ssize_t w = write(afd, b, left);
-            if (w > 0) { b += w; left -= (size_t)w; continue; }
-            if (w < 0 && errno == EINTR) continue;
-            pthread_mutex_lock(&cap_mtx);
-            cap_adrops++;
-            pthread_mutex_unlock(&cap_mtx);
-            if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) cap_died();
-            break;
-        }
-        pthread_mutex_lock(&cap_mtx);
-        cap_abytes += n - left;
-        pthread_mutex_unlock(&cap_mtx);
-    }
-    cap_put();
+    aq_head = aq_count = aq_sent = 0;
+    cap_alast_ms = 0;
+    aq_closed = 0;
 }
 
-/* ---- video feed: queue + writer thread ---------------------------------
- * A 720x576 UYVY frame is 829 KB and ffmpeg's stdin is a pipe.  Feeding it
- * inline meant the main loop blocked in write() whenever the encoder (or the
- * disk under it) stalled - and while the main loop is blocked it is not
- * draining the probe either, so the whole pipeline hiccups: that is the
- * "picture freezes for up to a second every 10-20 s while recording" bug.
- * Frames now go into a small ring and a dedicated thread does the blocking
- * writes.  The display never waits for the encoder.  If the ring is full the
- * newest frame is dropped whole and counted, which keeps rawvideo framing
- * intact (a partial frame would desynchronise the decoder). */
-#define VQ_SLOTS 4
-static unsigned char *vq[VQ_SLOTS];
-static int vq_head, vq_count, vq_stop, vq_started;
-static pthread_t vq_thr;
-static pthread_mutex_t vq_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  vq_cv = PTHREAD_COND_INITIALIZER;
+/* bytes of s16le stereo per millisecond at the negotiated rate (192 at 48 kHz);
+ * also the divisor that turns "bytes written" into "the file's audio time" */
+static unsigned long long aq_bytes_per_ms(void)
+{
+    return (unsigned long long)audio_rate * 2u * 2u / 1000ull;
+}
 
+static void cap_feed_audio(const void *p, size_t n)
+{
+    if (!aq || aq_closed) return;
+    n &= ~(size_t)1;
+    if (!n) return;
+    cap_alast_ms = SDL_GetTicks();
+
+    pthread_mutex_lock(&vq_mtx);
+    size_t lost = 0, freeb = AQ_BYTES - aq_count;
+    if (n > freeb) {
+        size_t evictable = aq_count - aq_sent;      /* never touch in-flight */
+        size_t need = n - freeb;
+        size_t ev = need < evictable ? need : evictable;
+        aq_head = (aq_head + ev) % AQ_BYTES;
+        aq_count -= ev;
+        lost = need - ev;                           /* oldest gone, then truncate */
+        if (lost > n) lost = n;
+        n -= lost;
+    }
+    if (n) {
+        size_t tail = (aq_head + aq_count) % AQ_BYTES;
+        size_t first = n < AQ_BYTES - tail ? n : AQ_BYTES - tail;
+        memcpy(aq + tail, p, first);
+        if (n > first) memcpy(aq, (const unsigned char *)p + first, n - first);
+        aq_count += n;
+        pthread_cond_broadcast(&vq_cv);
+    }
+    pthread_mutex_unlock(&vq_mtx);
+
+    if (lost) {
+        pthread_mutex_lock(&cap_mtx);
+        cap_adrops++; cap_adrop_bytes += lost;
+        pthread_mutex_unlock(&cap_mtx);
+    }
+}
+
+/* ---- video queue -------------------------------------------------------
+ * One slot per assembled frame.  12 slots = 480 ms of phase buffer; one of them
+ * is always reserved for the frame the writer owns, so at most 10 queue up
+ * behind it.  The only way to lose a picture then is to evict the oldest
+ * deliberately, counted as cap_vskips.  The producer can never touch the
+ * reserved slot: occupancy stays <= VQ_SLOTS-1, so head+count never reaches the
+ * slot the writer popped (or evicted past) before it. */
+#define VQ_SLOTS 12
+static unsigned char *vq[VQ_SLOTS];
+static int vq_head, vq_count;         /* frames queued, excluding the one held */
+static int vq_held = -1;              /* slot the writer owns (also the dup src) */
+static int vq_stop, vq_started;
+static pthread_t vq_thr;
+static unsigned long vq_next;         /* writer's next feed deadline, master ms */
+static int vq_slot = -1;              /* frame in flight to ffmpeg, -1 = none */
+static size_t vq_off;
+static int vq_slot_dup;
+#define VQ_GRACE_MS 30                  /* be late rather than duplicate */
+static unsigned long vq_anchor;       /* wall ms when the first audio byte came */
+
+/* Producer: one assembled frame in fuv => exactly one slot.  Never blocks,
+ * never waits for the encoder. */
 static void cap_feed_video(void)
 {
-    /* The ring only exists while a capture owns it: vq[] is allocated by
-     * vq_start(), which cap_start() calls.  The main loop feeds every frame it
-     * assembles, capture or no capture, so without this guard the first locked
-     * frame after launch memcpy()s 829 KB into a NULL slot - SIGSEGV seconds
-     * after opening the monitor with no `c' pressed.  vq_started is only
-     * mutated by the main thread (vq_start/cap_stop), which is also the only
-     * caller here, so reading it unlocked is safe. */
     if (!vq_started) return;
+    int evicted = 0;
     pthread_mutex_lock(&vq_mtx);
-    int tail = (vq_head + vq_count) % VQ_SLOTS;
-    if (vq_count >= VQ_SLOTS || !vq[tail]) {
-        pthread_mutex_unlock(&vq_mtx);
-        pthread_mutex_lock(&cap_mtx);
-        cap_vdrops++;
-        pthread_mutex_unlock(&cap_mtx);
-        return;
+    if (vq_count + (vq_held >= 0 ? 1 : 0) >= VQ_SLOTS - 1) {
+        vq_head = (vq_head + 1) % VQ_SLOTS;   /* drop the OLDEST: the newest
+                                               * picture is the one to keep */
+        vq_count--;
+        evicted = 1;
     }
+    int tail = (vq_head + vq_count) % VQ_SLOTS;
+    if (!vq[tail]) { pthread_mutex_unlock(&vq_mtx); return; }
     memcpy(vq[tail], fuv, UV_SIZE);
     vq_count++;
-    pthread_cond_signal(&vq_cv);
+    if (vq_count > cap_qmax) cap_qmax = vq_count;
+    pthread_cond_broadcast(&vq_cv);
     pthread_mutex_unlock(&vq_mtx);
+    if (evicted) {
+        pthread_mutex_lock(&cap_mtx); cap_vskips++; pthread_mutex_unlock(&cap_mtx);
+    }
+}
+
+/* The timeline the file is built on: milliseconds of audio written, anchored to
+ * the wall clock at the moment the first audio byte arrived (so a first video
+ * frame can still go out before the PCM has produced anything).  Falls back to
+ * the wall clock when there is no audio, and when the audio has not delivered a
+ * byte for a second - a dead device must not freeze the picture.  audio_alive
+ * reports which of the two is in force, for the overlay. */
+static unsigned long cap_master_ms(int *audio_alive)
+{
+    unsigned long now = SDL_GetTicks();
+    if (audio_alive) *audio_alive = 0;
+    if (!cap_has_audio) return now;
+
+    unsigned long long ab;
+    unsigned long alast;
+    pthread_mutex_lock(&cap_mtx);
+    ab = cap_abytes;
+    pthread_mutex_unlock(&cap_mtx);
+    alast = cap_alast_ms;
+
+    unsigned long long bpm = aq_bytes_per_ms();
+    if (!bpm || !ab) return now;
+    if (alast && (long)(now - alast) > 1000) return now;    /* audio stalled */
+    if (audio_alive) *audio_alive = 1;
+    if (!vq_anchor) vq_anchor = now;
+    return vq_anchor + (unsigned long)(ab / bpm);
 }
 
 static void *vq_thread(void *unused)
 {
+    int audio_logged = 0;
     for (;;) {
+        /* Wait for work.  The bounded nap IS the writer's clock (5 ms when there
+         * is something to do, 20 ms when idle); the queue is what makes its
+         * granularity free.  (CLOCK_REALTIME because that is what a default
+         * condvar times out on - CLOCK_MONOTONIC waits for nearly forever.) */
         pthread_mutex_lock(&vq_mtx);
-        while (!vq_count && !vq_stop) pthread_cond_wait(&vq_cv, &vq_mtx);
-        if (vq_stop && !vq_count) { pthread_mutex_unlock(&vq_mtx); break; }
-        int slot = vq_head;
-        vq_head = (vq_head + 1) % VQ_SLOTS;
-        vq_count--;
+        int idle = !vq_count && !aq_count && vq_slot < 0;
+        int stopping = vq_stop;
+        if (!stopping) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += (idle ? 20 : 5) * 1000000L;
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_nsec -= 1000000000L; ts.tv_sec++; }
+            pthread_cond_timedwait(&vq_cv, &vq_mtx, &ts);
+        }
+        int work = vq_count || aq_count || vq_slot >= 0;
         pthread_mutex_unlock(&vq_mtx);
+        if (stopping && !work) break;
 
         int vfd, afd;
-        if (cap_get(&vfd, &afd) < 0 || vfd < 0) continue;    /* capture ended */
-        if (pipe_write(vfd, vq[slot], UV_SIZE, 3000) == 0) {
-            pthread_mutex_lock(&cap_mtx); cap_vframes++;
+        if (cap_get(&vfd, &afd) < 0) {         /* capture ended / encoder died */
+            if (stopping) break;
+            usleep(20000);
+            continue;
+        }
+
+        /* ---- audio first: it is small, and the video write below can block.
+         * Bounded per pass (4 x 64 KiB): an infinite drain loop is how this
+         * thread would turn a stall into a busy-spin at SCHED_FIFO. */
+        int passes = 0;
+        while (afd >= 0 && passes++ < 4) {
+            size_t n, first;
+            unsigned char *b;
+            pthread_mutex_lock(&vq_mtx);
+            n = aq_count - aq_sent;
+            if (n > 65536) n = 65536;
+            if (n) {
+                size_t off = (aq_head + aq_sent) % AQ_BYTES;
+                first = n < AQ_BYTES - off ? n : AQ_BYTES - off;
+                b = aq + off;
+                aq_sent = n;                    /* reserve until it is in the pipe */
+            } else first = 0;
+            pthread_mutex_unlock(&vq_mtx);
+            if (!n) break;
+            size_t d1 = 0, d2 = 0;
+            int st = pipe_write(afd, b, first, 3000, &d1);
+            if (st == 0 && n > first) st = pipe_write(afd, b + first, n - first, 3000, &d2);
+            pthread_mutex_lock(&vq_mtx);
+            aq_sent = 0;
+            /* Whatever the pipe did not take is gone with the reservation: getting
+             * here means ffmpeg has stopped reading at all, and holding the tail
+             * back would need the ring to keep bytes it has already released. */
+            aq_head = (aq_head + n) % AQ_BYTES;
+            aq_count -= n;
+            pthread_mutex_unlock(&vq_mtx);
+            if (st != 0) {
+                pthread_mutex_lock(&cap_mtx);
+                cap_adrops++; cap_adrop_bytes += n;
+                pthread_mutex_unlock(&cap_mtx);
+                cap_died();
+                break;
+            }
+            pthread_mutex_lock(&cap_mtx);
+            cap_abytes += n;
             pthread_mutex_unlock(&cap_mtx);
-        } else {
-            pthread_mutex_lock(&cap_mtx); cap_vdrops++;
-            pthread_mutex_unlock(&cap_mtx);
-            cap_died();
+            if (n < 65536) break;
+        }
+
+        /* ---- video: pop one frame on the master clock */
+        int alive = 0;
+        unsigned long m = cap_master_ms(&alive);
+        if (alive && !audio_logged) {
+            audio_logged = 1;
+            fprintf(stderr, "pctv-monitor: capture paced on the audio stream "
+                            "(%llu B = 1 ms)\n", aq_bytes_per_ms());
+        }
+        cap_clock_audio = alive;
+        if (!vq_next) vq_next = m;
+        /* Token bucket, not a periodic poll.  The deadline says how many frames
+         * the file is owed (one per 40 ms of master time); the queue says whether
+         * there is a real picture to owe it with.  A queued frame therefore goes
+         * out the moment it exists - no waiting for the next boundary, which is
+         * what used to line a pop up with an empty buffer and write a duplicate.
+         * And a duplicate is only written VQ_GRACE_MS after the deadline passed
+         * with nothing queued: the timeline advances 40 ms per frame whatever the
+         * writer's phase is, so being a few ms late costs nothing while dropping
+         * 20 ms of motion into a repeat costs a visible hitch. */
+        long late = (long)(m - vq_next);
+        pthread_mutex_lock(&vq_mtx);
+        int queued = vq_count;          /* re-read: the audio drain above can be
+                                         * seconds old in the stall case */
+        pthread_mutex_unlock(&vq_mtx);
+        /* Draining (stop pressed) is not the time to invent pictures: only real
+         * queued frames go out, and when the queue is empty the thread is done.
+         * (Counting the duplicate source as "work" here is what made cap_stop()
+         * hang: the writer re-sent the last frame into ffmpeg forever, the main
+         * loop stopped pumping the probe, and 480 MB of tape went past into a
+         * full stream queue.) */
+        int take = vq_slot < 0 &&
+                   (stopping ? queued > 0
+                             : (late >= 0 && (queued > 0 || late >= VQ_GRACE_MS)));
+        if (take) {
+            int slot = -1, dup = 0;
+            pthread_mutex_lock(&vq_mtx);
+            if (vq_count > 0) {
+                vq_held = vq_head;                   /* the old one is released */
+                vq_head = (vq_head + 1) % VQ_SLOTS;
+                vq_count--;
+                slot = vq_held;
+            } else if (vq_held >= 0) {
+                slot = vq_held;                      /* nothing new: re-send it */
+                dup = 1;
+            }
+            pthread_mutex_unlock(&vq_mtx);
+
+            if (slot >= 0) {
+                vq_slot = slot;                       /* now ours until it is in */
+                vq_off = 0;
+                vq_slot_dup = dup;
+            } else if (!stopping) {
+                vq_next = m;                          /* no picture yet */
+            }
+        }
+        /* One frame in flight, resumed where the pipe last left off. */
+        if (vq_slot >= 0) {
+            size_t done = 0;
+            int st = pipe_write(vfd, vq[vq_slot] + vq_off, UV_SIZE - vq_off, 3000, &done);
+            vq_off += done;
+            if (st == 0) {
+                pthread_mutex_lock(&cap_mtx);
+                cap_vframes++;
+                if (vq_slot_dup) cap_vrepeats++;
+                pthread_mutex_unlock(&cap_mtx);
+                vq_slot = -1; vq_off = 0;
+                vq_next += 40;                        /* 25 fps exactly */
+                /* A long stall is not caught up frame by frame: re-anchor. */
+                if ((long)(m - vq_next) > 2000) vq_next = m;
+            } else if (st == -1) {
+                pthread_mutex_lock(&cap_mtx); cap_vdrops++;
+                pthread_mutex_unlock(&cap_mtx);
+                vq_slot = -1; vq_off = 0;
+                cap_died();
+            }
+            /* st == -2: ffmpeg is behind. Keep the half-written frame and carry on
+             * - the ring in front is what a real backlog belongs in. */
         }
         cap_put();
     }
     return NULL;
 }
 
-/* Returns 0 when the ring is live (slots allocated, writer thread running),
- * -1 if it could not be - capture must then not start, because every feed
- * would have nowhere to put a frame. */
+/* Returns 0 when the queue is live (slots allocated, writer thread running),
+ * -1 if it could not be - capture must then not start, because every frame
+ * would have nowhere to go. */
 static int vq_start(void)
 {
     for (int i = 0; i < VQ_SLOTS; i++)
         if (!vq[i]) vq[i] = malloc(UV_SIZE);
     for (int i = 0; i < VQ_SLOTS; i++)
         if (!vq[i]) return -1;
+    if (!aq) { aq = malloc(AQ_BYTES); if (!aq) return -1; }
+    aq_reset();
     vq_head = vq_count = vq_stop = 0;
+    vq_held = -1;
+    vq_slot = -1; vq_off = 0; vq_slot_dup = 0;
+    vq_next = 0;
+    vq_anchor = 0;
     if (!vq_started) {
         if (pthread_create(&vq_thr, NULL, vq_thread, NULL) != 0) return -1;
         vq_started = 1;
@@ -1688,34 +1943,59 @@ static int vq_start(void)
 static void vq_stop_and_drain(void)
 {
     if (!vq_started) return;
+    /* Refuse new audio FIRST.  The writer exits when the rings are empty, and the
+     * ALSA thread would otherwise keep filling it faster than it can be drained -
+     * it did exactly that for 50 s and hung the whole shutdown (and everything
+     * downstream of it, because the main loop stops pumping the probe while it
+     * waits).  Anything the PCM delivers from here on is discarded, not recorded:
+     * capture is over the moment this is called. */
+    aq_closed = 1;
     pthread_mutex_lock(&vq_mtx);
     vq_stop = 1;
     pthread_cond_broadcast(&vq_cv);
     pthread_mutex_unlock(&vq_mtx);
     pthread_join(vq_thr, NULL);
     vq_started = 0;
+    vq_held = -1;
 }
-
 
 static int cap_start(void)
 {
-    if (vq_start() < 0) {          /* the writer thread that owns the video pipe */
-        fprintf(stderr, "pctv-monitor: cannot start the frame ring "
+    if (vq_start() < 0) {          /* the writer thread that owns both pipes */
+        fprintf(stderr, "pctv-monitor: cannot start the capture queue "
                         "(out of memory?) - not capturing\n");
         return -1;
     }
     int vp[2], ap[2];
     if (pipe(vp) < 0) return -1;
     if (pipe(ap) < 0) { close(vp[0]); close(vp[1]); return -1; }
-    /* 8 MiB = 10 frames of cushion between the 829 KB/frame memcpy and ffmpeg's
+    /* 8 MiB = 10 frames of cushion between the writer thread and ffmpeg's
      * encoder; the old unchecked 4 MiB request was silently refused (it is
      * above fs.pipe-max-size), leaving the default 64 KiB = two frames. */
     pipe_slack(vp[1], 8, "encoder video");
     pipe_slack(ap[1], 1, "encoder audio");
-    {   /* the audio write end is non-blocking: drop rather than stall video */
-        int fl = fcntl(ap[1], F_GETFL, 0);
-        fcntl(ap[1], F_SETFL, fl | O_NONBLOCK);
+    /* Both ends stay BLOCKING now: the writer thread is the only writer, it is
+     * nobody's deadline, and a stalled encoder should cost queue depth rather
+     * than samples or pictures.  Dropping on EAGAIN was the old design's way of
+     * keeping the main loop responsive; 5.5 s of audio ring and 480 ms of video
+     * queue keep it far better than that ever did. */
+
+    /* Both ends are NON-BLOCKING and stay that way: pipe_write() polls, waits up
+     * to its deadline and then reports a drop, which is bounded; a blocking write
+     * is not (see pipe_write).  The cushion against a slow encoder is the two
+     * rings in front of it - 5.5 s of audio and 480 ms of video - plus the 8 MiB
+     * pipe, not a thread parked in the kernel.
+     *
+     * And aq_closed matters at stop: ffmpeg's s16le input will happily wait for
+     * samples it is never going to get, so refusing new audio at stop time must
+     * be paired with writes that cannot block, or the muxer deadlocks against the
+     * writer thread (observed: SIGTERM at 90 s, still hung 2 minutes later with
+     * the writer parked in write() on a full video pipe). */
+    {   int fl2;
+        if ((fl2 = fcntl(vp[1], F_GETFL, 0)) >= 0) fcntl(vp[1], F_SETFL, fl2 | O_NONBLOCK);
+        if ((fl2 = fcntl(ap[1], F_GETFL, 0)) >= 0) fcntl(ap[1], F_SETFL, fl2 | O_NONBLOCK);
     }
+
     /* Only mux audio if the capture stream is actually up.  The audio thread
      * opens the PCM asynchronously, so give it a moment rather than silently
      * producing a video-only file. */
@@ -1789,15 +2069,19 @@ static int cap_start(void)
          * picture coding extension, so no lossless remux can change it either:
          * `-c copy -field_order tt` rewrites only the container label, and the
          * frames keep reading 1,0.  So a .mpg master has to be *told* to be TFF
-         * downstream (AssumeTFF() in AviSynth+, `AssumeTFF().SeparateFields()` /
-         * SetFieldBased(1) in VapourSynth) - which is what tape digitisation
-         * always did anyway - or recaptured as PCTV_MASTER=uyvy|ffv1, which
-         * stamps the frame flag itself. */
+         * downstream (AssumeTFF() in AviSynth+, SetFieldBased(1) in VapourSynth)
+         * - which is what tape digitisation always did anyway - or recaptured as
+         * PCTV_MASTER=uyvy|ffv1, which stamps the frame flag itself.  And played
+         * back with the order declared: `ffplay -top 1 FILE`, because a player
+         * that believes the wrong order deinterlaces every moving object in the
+         * wrong temporal order, which is exactly the "drags then catches up" that
+         * this recording used to be famous for. */
         av[n++] = "-field_order"; av[n++] = "tt";
         av[n++] = "-aspect"; av[n++] = "4:3";
         if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "mp2"; av[n++] = "-b:a"; av[n++] = "192k"; }
         else av[n++] = "-an";
         av[n++] = "-sn";
+        av[n++] = "-fps_mode"; av[n++] = "cfr";
         av[n++] = "-f"; av[n++] = "mpeg";
     } else {
         /* A lossless master, for post-processing on a fast machine.
@@ -1812,7 +2096,10 @@ static int cap_start(void)
          * colourspace conversion, because that pixel format is what the deframer
          * already produces.
          *
-         * Audio is PCM for the same reason MP2 is not: free and lossless. */
+         * Audio is PCM for the same reason MP2 is not: free and lossless.  And
+         * nothing in this branch is rate-controlled, which is the property that
+         * keeps a hard scene from costing a frame: detail makes the file bigger,
+         * never the encoder late. */
         av[n++] = "-c:v";
         av[n++] = cap_master == MASTER_UYVY ? "rawvideo" : "ffv1";
         if (cap_master == MASTER_FFV1) { av[n++] = "-g"; av[n++] = "1"; }
@@ -1820,6 +2107,7 @@ static int cap_start(void)
         if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "pcm_s16le"; }
         else av[n++] = "-an";
         av[n++] = "-sn";
+        av[n++] = "-fps_mode"; av[n++] = "cfr";
         av[n++] = "-f"; av[n++] = "matroska";
     }
     av[n++] = cap_path;
@@ -1848,11 +2136,16 @@ static int cap_start(void)
     pthread_mutex_lock(&cap_mtx);
     cap_pid = pid; cap_vfd = vp[1]; cap_afd = ap[1]; cap_on = 1;
     cap_vframes = cap_vdrops = cap_adrops = cap_abytes = 0;
-    cap_vrepeats = 0;
-    cap_feed_next = SDL_GetTicks();   /* feed the first frame immediately */
+    cap_vrepeats = cap_vskips = cap_adrop_bytes = 0;
+    cap_qmax = 0;
+    cap_clock_audio = 0;
     cap_t0 = time(NULL);
     cap_t0_tick = SDL_GetTicks();
     pthread_mutex_unlock(&cap_mtx);
+    if (cap_master == MASTER_DVD)
+        fprintf(stderr, "pctv-monitor: note: 'dvd' is the watching format - rate-"
+                        "controlled (%d kbps, 1.8 MB VBV), so a hard scene can cost "
+                        "a frame; --master ffv1 cannot\n", mpeg2_kbps);
     fprintf(stderr, "pctv-monitor: %s capture -> %s (audio %s, %s, pid %d)\n",
             MASTER_NAME[cap_master], cap_path,
             cap_has_audio ? srcs[cur_src].label : "OFF",
@@ -1862,7 +2155,7 @@ static int cap_start(void)
 
 static void cap_stop(void)
 {
-    vq_stop_and_drain();          /* flush the frame ring to ffmpeg, then reap it */
+    vq_stop_and_drain();   /* flush both rings to ffmpeg, then reap the writer */
     pthread_mutex_lock(&cap_mtx);
     if (!cap_on && cap_pid < 0) { pthread_mutex_unlock(&cap_mtx); return; }
     cap_closing = 1;
@@ -1871,8 +2164,9 @@ static void cap_stop(void)
     pid_t pid = cap_pid;
     cap_on = 0; cap_vfd = cap_afd = -1; cap_pid = -1;
     unsigned long long vf = cap_vframes, vd = cap_vdrops, ad = cap_adrops,
-                       rp = cap_vrepeats;
+                       rp = cap_vrepeats, sk = cap_vskips, adb = cap_adrop_bytes;
     unsigned long long ab = cap_abytes;
+    int qmax = cap_qmax;
     cap_closing = 0;
     pthread_cond_broadcast(&cap_cv);
     pthread_mutex_unlock(&cap_mtx);
@@ -1893,12 +2187,17 @@ static void cap_stop(void)
     off_t sz = -1;
     struct stat sb;
     if (stat(cap_path, &sb) == 0) sz = sb.st_size;
+    /* dup/skip are the two numbers that say whether the recording kept every
+     * picture: dup counts frames the card did NOT deliver when the clock asked
+     * (so one was written twice), skip counts pictures the clock did not come
+     * round for (so one was written never).  A clean capture reads dup 0, skip
+     * 0; anything else says how much of the tape the file is missing, and at
+     * what rate the two clocks disagree. */
     fprintf(stderr, "pctv-monitor: capture stopped: %s (%lld B, %llu frames "
-                    "(%llu repeated), %llu B audio, %llu video drops, "
-                    "%llu audio drops)\n",
-            cap_path, (long long)sz, vf, rp, ab, vd, ad);
+                    "[dup %llu, skip %llu, qmax %d], %llu B audio, "
+                    "%llu video drops, %llu audio drops/%llu B)\n",
+            cap_path, (long long)sz, vf, rp, sk, qmax, ab, vd, ad, adb);
 }
-
 /* ------------------------------------------------------------- audio meter */
 
 /* Map a dBFS value to a 0..1 position on a -60..0 dB scale. */
@@ -2360,25 +2659,19 @@ int main(int argc, char **argv)
         }
         if (parity_mask == 3 || field_repeat) {
             parity_mask = 0; field_repeat = 0;
-            frame_new = 1;
             /* Start the encoder on the first frame, not on the key press: both
              * streams then get PTS 0 at the same instant, and the audio cannot
              * run ahead by the decoder's lock time (8 s with no source). */
             if (cap_pending && !cap_on) { cap_pending = 0; cap_start(); }
-        }
-        /* Feed the encoder on the clock, not on arrivals (see cap_feed_next). */
-        if (cap_on && (long)(SDL_GetTicks() - cap_feed_next) >= 0) {
+            /* Hand the frame to the capture queue the moment it exists: exactly
+             * one slot per assembled frame, so nothing can ever be overwritten
+             * before the writer comes round - that poll was the whole cadence
+             * bug (see the capture-path comment).  The 25 fps clock lives in the
+             * writer thread now, paced by the audio stream, not by this loop. */
             unsigned long t_feed = SDL_GetTicks();
             cap_feed_video();
             unsigned long d = SDL_GetTicks() - t_feed;
             if (d > stage_max[1]) stage_max[1] = d;
-            if (!frame_new) cap_vrepeats++;
-            frame_new = 0;
-            cap_feed_next += 40;                       /* 25 fps exactly */
-            /* If the loop stalled (or the source stopped), do not try to catch
-             * up frame by frame: re-anchor the clock instead. */
-            if ((long)(SDL_GetTicks() - cap_feed_next) > 2000)
-                cap_feed_next = SDL_GetTicks();
         }
 
         if (frame_ready) {
@@ -2472,12 +2765,15 @@ int main(int argc, char **argv)
             const char *lines[2];
             char l1[200], l2[200];
             pthread_mutex_lock(&cap_mtx);
-            snprintf(l1, sizeof l1, "%llu frames  %llu B  drops %llu/%llu",
-                     cap_vframes, (unsigned long long)cap_abytes,
-                     cap_vdrops, cap_adrops);
+            snprintf(l1, sizeof l1, "%llu frames  dup %llu  skip %llu  drops %llu/%llu",
+                     cap_vframes, cap_vrepeats, cap_vskips, cap_vdrops, cap_adrops);
             pthread_mutex_unlock(&cap_mtx);
-            snprintf(l2, sizeof l2, "audio %s  queue %d/%d",
-                     cap_has_audio ? srcs[cur_src].label : "OFF", vq_count, VQ_SLOTS);
+            pthread_mutex_lock(&vq_mtx);
+            int qd = vq_count;
+            pthread_mutex_unlock(&vq_mtx);
+            snprintf(l2, sizeof l2, "audio %s  q %d/%d  %s clock",
+                     cap_has_audio ? srcs[cur_src].label : "OFF", qd, VQ_SLOTS - 2,
+                     cap_clock_audio ? "audio" : "wall");
             lines[0] = l1; lines[1] = l2;
             int wpx = text_w(l1, 1) > text_w(l2, 1) ? text_w(l1, 1) : text_w(l2, 1);
             draw_panel_lines(ren, W - wpx - 24, 8 + 16 * 2 + 10, lines, 2, 1);
@@ -2513,14 +2809,19 @@ int main(int argc, char **argv)
                      recording ? " [RAW]" : "", recmode, fps);
             SDL_SetWindowTitle(win, title);
             if (getenv("PCTV_VERBOSE")) {
+                pthread_mutex_lock(&vq_mtx);
+                int qdbg = vq_count;
+                pthread_mutex_unlock(&vq_mtx);
                 pthread_mutex_lock(&amtx);
                 fprintf(stderr, "monitor: %s | in %llu B rlen %zu | maxgap %lums "
-                                "(%s %lums %s %lums %s %lums) vq %d/%d | "
+                                "(%s %lums %s %lums %s %lums) q %d/%d dup %llu "
+                                "skip %llu | "
                                 "held %llu/%llu | "
                                 "audio %s ok=%d L %.1f R %.1f pk %.1f clips %u gain %+.1f dB\n",
                         title, bytes_in, rlen, gap_max,
                         stage_name[0], stage_max[0], stage_name[1], stage_max[1],
-                        stage_name[2], stage_max[2], vq_count, VQ_SLOTS,
+                        stage_name[2], stage_max[2], qdbg, VQ_SLOTS - 2,
+                        cap_vrepeats, cap_vskips,
                         frames_held, frames,
                         srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
                         hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips,
@@ -2543,10 +2844,10 @@ int main(int argc, char **argv)
     free(rbuf);
     fprintf(stderr, "pctv-monitor: %llu fields (%llu short = lines lost, "
                     "%llu stale-field feeds, %llu stream gaps, %llu fields "
-                    "dropped), %llu encoded frames, %llu held (gate), "
-                    "%llu B from the probe\n",
+                    "dropped), %llu encoded frames (%llu dup, %llu skip), "
+                    "%llu held (gate), %llu B from the probe\n",
             frames, fields_short, fields_repeat, fields_gap, fields_dropped,
-            cap_vframes, frames_held, bytes_in);
+            cap_vframes, cap_vrepeats, cap_vskips, frames_held, bytes_in);
     fprintf(stderr, "pctv-monitor: anomalies (S=short field, R=stale field, "
                     "G=stream gap, D=field dropped, H=frame held): ");
     for (int i = 0; i < nanom; i++) fprintf(stderr, " %c@%lums", anom[i].kind, anom[i].t);

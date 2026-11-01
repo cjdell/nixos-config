@@ -77,7 +77,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    $CC -O2 -Wall -o pctv_probe probe.c $(pkg-config --cflags --libs libusb-1.0)
+    $CC -O2 -Wall -o pctv_probe probe.c $(pkg-config --cflags --libs libusb-1.0) -lpthread
     $CC -O2 -Wall -o pctv-monitor pctv-monitor.c \
       $(pkg-config --cflags --libs sdl2 alsa) -lm -lpthread
     runHook postBuild

@@ -2,13 +2,19 @@
  *
  * Why this exists: the only way this box loses a frame is by not being
  * scheduled.  The card delivers 27 MB/s of BT.656 in 32 KiB URBs (19 lines,
- * ~1.2 ms apart); probe.c writes each one into a pipe *non-blocking* and throws
- * away the rest of the URB on EAGAIN, and the parser then splices a field
- * across the hole - the "one interlaced field is misaligned" glitch in the live
- * view and in the recorded .mpg (see TRUTH.md and pipe_slack() in
- * pctv-monitor.c).  Every cushion on the path is measured in time, not
- * priority: 24 URBs in flight (~29 ms), the 32 MiB stream pipe (1.2 s) and the
- * 8 MiB encoder pipe (400 ms).  This is a 2-core box that simultaneously runs
+ * ~1.2 ms apart).  Since 2026-11-01 nothing on the path throws tape away when it
+ * is late: probe.c copies each URB into a 64 MiB ring (2.4 s) that a writer
+ * thread drains, pctv-monitor queues every assembled frame (10 deep) and every
+ * audio sample (5.5 s), and both encoder pipes are non-blocking and resume a
+ * partial write.  Losing data now costs seconds of stall rather than a field; what
+ * scheduling still buys is that the queues stay empty.  (Before that change
+ * probe.c wrote each URB into a pipe *non-blocking* and threw away the rest of it
+ * on EAGAIN, and the parser spliced a field across the hole - the "one interlaced
+ * field is misaligned" glitch in the live view and in the recorded .mpg; see
+ * TRUTH.md and docs/pctv-analog-capture.md §11.)  Every cushion on the path is
+ * measured in time, not priority: 24 URBs in flight (~29 ms), the 64 MiB stream
+ * queue (2.4 s), the 32 MiB stream pipe (1.2 s) and the 8 MiB encoder pipe
+ * (400 ms).  This is a 2-core box that simultaneously runs
  * kwin, PipeWire, Dolphin and whatever else the user started; measured during a
  * capture with a Plasma session up: load average 6.5 against ~1.15 cores of
  * real demand, i.e. the capture chain is regularly runnable-but-not-running.
@@ -21,7 +27,7 @@
  *                          and the one with the least buffer in front of it
  *                          (the URB pool); it also runs as root via `sudo -n`,
  *                          so it always gets what it asks for
- *   pctv-monitor  FIFO  8  has 1.2 s of cushion behind it and 400 ms in front:
+ *   pctv-monitor  FIFO  8  has seconds of cushion behind it and 400 ms in front:
  *                          it needs to beat the desktop, not the probe
  *   ffmpeg        none     throughput-only, and forked from the monitor, so it
  *                          inherits our class unless pctv-monitor.c drops it

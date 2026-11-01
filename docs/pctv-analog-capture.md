@@ -257,9 +257,107 @@ honestly reports that the frames kept their own flag. For the `.mpg` masters
 recorded before this patch the fix is one line in the post script — AviSynth+
 `AssumeTFF()`, VapourSynth `core.video.AssumeTFF(clip)` / `SetFieldBased(1)`.
 Tape digitising has always declared its field order; trusting the tag was the
-experiment.
+experiment.  The same applies at *playback*: a player that believes the wrong
+order deinterlaces every moving object backwards, which looks like motion that
+draggs and then catches up.  `ffplay -top 1 FILE` forces the MPEG-2 decoder's
+field order when the bitstream (as here) says the wrong thing.
 
-## 11. Where to look
+## 11. Cadence: why a recording was less fluid than the live view (2026-11-01)
+
+Reported symptom: the live monitor is smooth, the recorded file is not - the
+frame rate "drags a bit then catches up", audio sometimes a second out, worse as
+a long tape runs.  Reproducible, measurable, and the cause was not the USB link,
+the encoder or the disk.  All numbers below are from this box.
+
+**The 2 h tape** (`pctv-cap-20261101-155418.mpg`, 184 854 frames):
+
+| reading | value | what it means |
+| --- | --- | --- |
+| video stream duration | 7394.160 s | CFR: 184 837 PTS deltas of exactly 0.040 s |
+| audio stream duration | **7396.536 s** | **2.376 s = 59 frames of picture gone** |
+| PTS deltas of 0.080 s | 8 | eight hard 40 ms jumps in 2 h |
+| decode-only speed | 22x (12x with `bwdif`, 7x with `yadif`) | the player was never the limit |
+| probe / ring / queue drops | 0 | the byte stream was intact |
+
+So the file is a perfectly regular 25 fps that is quietly **shorter than its own
+sound**, and a file that is short against its audio is a file whose picture
+creeps ahead of the speech: exactly "up to a second out, sometimes".
+
+**A 120 s capture of a moving tape, old code:** 2991 frames written, of which
+`374` were `repeated` (12.5 %), while ~375 freshly assembled frames never
+reached the file at all - and nothing counted that second direction.  Decoding
+the file and comparing neighbouring frames at 80x60 grey: **17.9 % of consecutive
+frame pairs are near-identical** (mean abs diff 2.24, against 11.30 for real
+motion).  One frame in five-and-a-bit is the previous one again.
+
+### The cause
+
+Two clocks and one buffer. `fuv` holds "the newest assembled frame", and the
+encoder was fed by polling it whenever **40 ms of host time** had passed, from
+the main loop - whose iteration period is 17-28 ms, i.e. half the frame period.
+A poll has only two ways to be wrong and it had both: fire before the card
+finished the next frame and you write a **duplicate** ("drags"); fire after two
+frames arrived and one is overwritten unfed, a **skip** ("catches up") that also
+shortens the video track by 40 ms *forever*, because the container is CFR and the
+sound is counted in samples. The card is a third crystal again (CX25843 13.5
+MBaud / 1728 B / 625 lines), so no fixed offset between them survives a tape.
+
+### The fix (same day)
+
+1. **Every frame is queued where it is born.** `field_commit()` pushes into a
+   12-slot ring (one slot reserved for the frame in flight, so 10 deep = 400 ms);
+   nothing can be overwritten any more, and an eviction is a deliberate, counted
+   event (`skip`).
+2. **The clock moved to the consumer and onto the audio stream.** One writer
+   thread owns every write to ffmpeg and pops one frame per 40 ms **of audio
+   track** (`cap_abytes / 192`), not of host time - because that byte count *is*
+   the file's audio timeline, so feeding frame k when the audio reaches 40 ms x k
+   makes the two streams in one file consistent by construction. With no audio it
+   falls back to the wall clock, and after a 1 s audio stall too.
+3. **Be late rather than duplicate:** a queued frame goes out the moment it
+   exists (no aligning to a boundary), and a duplicate is only written 30 ms after
+   the deadline passed with nothing queued.
+4. **Audio is queued too** (1 MiB = 5.5 s) instead of `O_NONBLOCK`-and-drop, the
+   capture PCM asks for 60 ms of latency instead of 20 ms, and both encoder pipes
+   are non-blocking with `pipe_write()` resuming a partial frame - rawvideo has no
+   framing, so half a frame is not a lost frame but a corrupted stream.
+5. **The probe no longer destroys data on EAGAIN**: the libusb callback fills a
+   64 MiB ring (2.4 s) and a writer thread drains stdout, so a slow consumer costs
+   latency instead of 32 KiB of BT.656 per hiccup. `PCTV_STREAM_BUF=<MiB>`, `=0`
+   restores the old behaviour for an A/B run.
+
+**A 60 s capture, new code:** 1509 frames written, `dup 1`, `skip 0`, queue
+high-water 1, 0 stream drops; video 60.360 s against audio 60.336 s (one mp2
+frame); and **0.00 %** near-identical consecutive frames, mean abs diff 11.30.
+
+### Two traps that cost an hour each
+
+* **The writer must not count its duplicate source as "work".** It holds the last
+  frame so it can re-send it when the card has not produced a new one; treating
+  that as pending work made the drain loop re-send the last frame into ffmpeg
+  forever, so `cap_stop()` never returned, the main loop never pumped the probe
+  again, and 480 MB of tape went past into a full stream queue on every stop.
+  Draining also has to refuse *new* audio (`aq_closed`) - and refuse to block,
+  because ffmpeg's s16le input will wait for samples that a closed queue will
+  never send, which deadlocks the muxer against the writer.
+* `pthread_cond_timedwait` times out on **CLOCK_REALTIME**; build the abstime with
+  `clock_gettime(CLOCK_REALTIME, ...)`, not `CLOCK_MONOTONIC`.
+
+### How to check a capture
+
+```
+PCTV_VERBOSE=1 pctv-monitor ...      # per second: q <depth> dup N skip N
+pctv-field-order FILE                # what the file claims about field order
+ffprobe -show_entries stream=codec_type,duration -of default=nw=1 FILE
+```
+
+The line at the end of a capture is the summary: a clean one reads
+`[dup 0, skip 0, qmax 1], 0 video drops, 0 audio drops`. `dup` and `skip` grow
+only if the card and the host actually disagree; anything else is a regression.
+Compare the two stream durations the same way: they should agree to one audio
+frame (24 ms mp2, 1 ms pcm), not to seconds.
+
+## 12. Where to look
 
 | path | what |
 | --- | --- |
