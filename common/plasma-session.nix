@@ -42,16 +42,45 @@
   ...
 }:
 
+let
+  # `kbuildsycoca6` lives in kservice; getExe' keeps the path pinned.
+  kbuildsycoca = "${lib.getExe' pkgs.kdePackages.kservice "kbuildsycoca6"} --noincremental";
+in
 lib.mkIf config.services.desktopManager.plasma6.enable {
-  systemd.user.services.plasma-plasmashell = {
-    # Also cover the session-level variant of the same deletion (plasma6.nix:407
-    # `nixos-rebuild-sycoca.service`, WantedBy=graphical-session-pre.target).
-    # Ordering against a unit that is not running is a no-op, so this is safe.
-    after = [ "nixos-rebuild-sycoca.service" ];
-
+  # NOT `systemd.user.services.plasmashell-plasma... = { ... }`!  Declaring the
+  # unit itself makes NixOS render a *complete* unit file for it, which then
+  # shadows the package's own `plasma-plasmashell.service` in
+  # /run/current-system/etc/systemd/user/ - with no ExecStart in it, because
+  # NixOS cannot see the package's ExecStart.  systemd rejects that
+  # (`plasma-plasmashell.service: bad unit file setting`), user activation
+  # fails, `switch-to-configuration` exits 4, and the next login would come up
+  # with no desktop at all.  Ask for the drop-in *file* instead and the package
+  # unit stays where it is.  (This is different from e.g. dbus-broker.service.d,
+  # where NixOS owns the unit and legitimately writes both.)
+  systemd.user.units."plasma-plasmashell.service.d/override.conf" = {
     # `--noincremental` = re-read everything rather than patch the existing file.
     # Runs as the session user (no `+`), and kbuildsycoca6 locks the cache, so a
     # concurrent krunner/ksmserver rebuild serialises instead of interleaving.
-    serviceConfig.ExecStartPre = "${lib.getExe' pkgs.kdePackages.kservice "kbuildsycoca6"} --noincremental";
+    #
+    # Also covers the session-level variant of the same deletion (plasma6.nix:
+    # 407 `nixos-rebuild-sycoca.service`, WantedBy=graphical-session-pre.target).
+    # Ordering against a unit that is not running is a no-op, so this is safe.
+    text = ''
+      [Unit]
+      After=nixos-rebuild-sycoca.service
+
+      [Service]
+      # Rebuild the KDE service-type cache synchronously before the shell starts,
+      # so its ExecStart reads a finished file.  ~1 s at login.
+      #
+      # The leading `-` is not decoration: a non-zero ExecStartPre fails the unit,
+      # and failing this unit means logging in to a desktop with no panel.  A
+      # skipped cache rebuild is a degraded start; a dead one is a broken session.
+      # (Found the hard way: an earlier revision of this file declared the unit
+      # instead of dropping into it, systemd rejected the result - and because
+      # the restart job stops the running service before failing to start it,
+      # the panel went down until the unit was fixed and started by hand.)
+      ExecStartPre=-${kbuildsycoca}
+    '';
   };
 }
