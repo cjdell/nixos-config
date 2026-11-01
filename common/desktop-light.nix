@@ -50,6 +50,8 @@
 }:
 
 {
+  imports = [ ./plasma-session.nix ];
+
   # --- the basics ------------------------------------------------------------
 
   networking.networkmanager.enable = true;
