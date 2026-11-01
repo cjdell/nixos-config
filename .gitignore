@@ -24,6 +24,7 @@ __pycache__/
 # The driver source lives in pctv-linux/driver/ (tracked); everything below
 # is generated capture data, extracted firmware or compiled probe binaries.
 /pctv-linux/captures/
+/captures/
 /pctv-linux/frames/
 /pctv-linux/frames2/
 /pctv-linux/logs/

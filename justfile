@@ -213,6 +213,16 @@ reboot-all:
 format:
     ./format.sh
 
+# --- footage cleanup -------------------------------------------------------
+# Video cleanup toolkit (VapourSynth + video2x + FFmpeg), see footage/README.md.
+# Pass through to footage-clean, e.g.: just footage --test 12 file.mp4
+footage +args:
+    @out=$(nix build .#footage-kit --no-link --print-out-paths); "$out/bin/footage-clean" {{args}}
+
+# Report what a video file is + the suggested cleanup command.
+probe +args:
+    @out=$(nix build .#footage-kit --no-link --print-out-paths); "$out/bin/footage-probe" {{args}}
+
 # --- managing secrets --------------------------------------------------------
 # The recipes below use `sops`, which is installed on sops hosts via
 # common/sops.nix (`environment.systemPackages`).

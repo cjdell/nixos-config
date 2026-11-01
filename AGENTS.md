@@ -56,6 +56,7 @@ workstation, etc.). Key layout:
 | `users/` | User configs (home-manager) |
 | `machines/` | Legacy configs for older machines (referenced from `flake.nix`) |
 | `crates/` | Every Rust crate in this repo (`llama-log-viewer`, `sd-gate`, `gpu-panel`, `ollama-bridge`, `meter-relay-rs`), built by the root flake (see below) |
+| `footage/` | Video cleanup kit: `footage-clean`/`footage-probe` CLI (VapourSynth deint+denoise → video2x RealESRGAN/RIFE on Vulkan → FFmpeg encode). `nix build .#footage-kit`, usage in `footage/README.md` |
 | `llama-logs/` | Live `llama-server --log-prompts-dir` output consumed by the viewer |
 | `docs/recallium.md` | How to use the Recallium memory server (APIs, MCP, examples) |
 | `docs/klipper-3d-printer.md` | 3d-printer-server / Klipper (Smoothieboard LPC1768): boot-race fix, `klipper-firmware-update` + SD-flash runbook, and the **open** thermistor/ADC fault |

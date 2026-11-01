@@ -463,6 +463,9 @@
         (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-package.nix
           { };
 
+      # Video cleanup toolkit (footage-clean / footage-probe); see footage/README.md.
+      packages.x86_64-linux.footage-kit = (mkPkgs nixpkgs).callPackage ./footage/kit.nix { };
+
       nixosConfigurations =
         # Find configs in `hosts` folder and use the folder name as the host name
         (
