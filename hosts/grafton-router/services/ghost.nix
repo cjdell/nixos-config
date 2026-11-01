@@ -102,6 +102,45 @@ in
       http_port = CLICKHOUSE_HTTP_PORT;
       tcp_port = CLICKHOUSE_TCP_PORT;
     };
+
+    # ClickHouse's `system.*_log` tables have NO TTL by default, so they grow
+    # without bound. On 2026-11-01 that filled `/` (92 GiB of trace_log /
+    # metric_log parts, oldest from Feb 2026 -> 2.05 billion trace rows):
+    # zigbee2mqtt, plausible and dnsmasq lease writes all died with ENOSPC and
+    # even podman could not create containers. Plausible (the only user of this
+    # ClickHouse) never reads these tables, so keep a week (3 days for the
+    # sampling profiler) and stop sampling stack traces altogether.
+    extraServerConfig = ''
+      <clickhouse>
+        <!-- System log retention. Applied to the existing tables on start. -->
+        <trace_log><ttl>event_time + INTERVAL 3 DAY</ttl></trace_log>
+        <!-- No <ttl> here: opentelemetry_span_log has an <engine> in the stock
+             config and ClickHouse rejects a separate ttl element for those. -->
+        <query_log><ttl>event_time + INTERVAL 7 DAY</ttl></query_log>
+        <query_thread_log><ttl>event_time + INTERVAL 7 DAY</ttl></query_thread_log>
+        <query_views_log><ttl>event_time + INTERVAL 7 DAY</ttl></query_views_log>
+        <query_metric_log><ttl>event_time + INTERVAL 7 DAY</ttl></query_metric_log>
+        <part_log><ttl>event_time + INTERVAL 7 DAY</ttl></part_log>
+        <metric_log><ttl>event_time + INTERVAL 7 DAY</ttl></metric_log>
+        <asynchronous_metric_log><ttl>event_time + INTERVAL 7 DAY</ttl></asynchronous_metric_log>
+        <asynchronous_insert_log><ttl>event_time + INTERVAL 7 DAY</ttl></asynchronous_insert_log>
+        <processors_profile_log><ttl>event_time + INTERVAL 7 DAY</ttl></processors_profile_log>
+        <text_log><ttl>event_time + INTERVAL 7 DAY</ttl></text_log>
+        <error_log><ttl>event_time + INTERVAL 7 DAY</ttl></error_log>
+        <session_log><ttl>event_time + INTERVAL 7 DAY</ttl></session_log>
+      </clickhouse>
+    '';
+
+    # These are user-level settings (they live in users.xml profiles, not in
+    # config.xml — putting them in extraServerConfig above makes the server die
+    # at startup with UNKNOWN_ELEMENT_IN_CONFIG). 0s = no periodic stack
+    # sampling, which is what generated 2 billion trace_log rows.
+    usersConfig = {
+      profiles.default = {
+        query_profiler_real_time_period_ns = 0;
+        query_profiler_cpu_time_period_ns = 0;
+      };
+    };
   };
 
   services.postgresqlBackup.databases = [ "plausible" ];
