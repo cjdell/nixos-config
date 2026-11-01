@@ -53,7 +53,12 @@
       # Friend tunnel experiment (services/friend-tunnel.nix +
       # virtual-machines/friend-router.nix): the two wg-friend private halves
       # and the VM's base64-encoded sshd host key.
-      friend_tunnel_wg_key = { };
+      # friend_tunnel_wg_key is read by systemd-networkd (the wg-friend
+      # netdev), whose service user must be able to open it.
+      friend_tunnel_wg_key = {
+        group = "systemd-network";
+        mode = "0440";
+      };
       friend_router_wg_key = { };
       friend_vm_host_key = { };
     };
