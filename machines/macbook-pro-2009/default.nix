@@ -1,4 +1,9 @@
-{ config, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 {
   imports = [
@@ -8,14 +13,47 @@
 
   networking.hostName = "macbook-pro-2009-nixos"; # Define your hostname.
 
-  # Remote Nix builds: zen3-nixos via common/build-client.nix (imported
-  # through common/system.nix); root key authorized in
-  # hosts/zen3-nixos/default.nix.  This box is a 2-core Core 2 Duo T9800 with
-  # 7 GiB RAM, and building the pctv320cx driver used to mean building
-  # nixpkgs' whole kernel tree + Rust bindings here - hours locally, minutes
-  # on zen3, cached there for further iterations.  max-jobs = 1 in the client
-  # module keeps local builds as a fallback when zen3 is down (raise it with
-  # `nixos-rebuild ... --max-jobs N` if zen3 stays down).
+  # --- what this box is -------------------------------------------------------
+  #
+  # A Pinnacle PCTV 320cx capture station: Plasma + VLC + the userspace PCTV
+  # stack, and deliberately little else.  Since 2026-11-01 it runs
+  # `common/desktop-light.nix` (Plasma and VLC kept, everything else that
+  # `common/desktop.nix` ships by default dropped) instead of the full desktop,
+  # and turns off `common/system.nix`'s fleet-wide CLI set for the same reason.
+  # Measured closure before: 19.8 GB (`nix path-info -S /run/current-system`);
+  # the single biggest contributors were obs-studio's `cef-binary` (2.0 GB),
+  # qemu from the libvirt/virt-manager host modules (1.0 GB, the Win7 VM is
+  # gone), rustc/cargo + clang/llvm + deno from the shared package set (2.3 GB),
+  # orca's speech synthesiser voices (0.7 GB), chrome/firefox/zed (1.2 GB) and
+  # khelpcenter's qtwebengine (0.5 GB).
+  #
+  # What the desktop still has to carry for the capture job: PipeWire (the
+  # monitor records via ALSA `default` and monitors through it), `ffmpeg` (the
+  # MPEG-2 encoder pctv-monitor pipes into), the `pctv-linux/live-module.nix`
+  # bridge handoff, and `sudo -n` for the probe (wheel is passwordless via
+  # common/system.nix).
+  #
+  # Remote Nix builds: zen3-nixos via common/build-client.nix (imported through
+  # common/system.nix); root key authorized in hosts/zen3-nixos/default.nix.
+  # This box is a 2-core Core 2 Duo T9800 with 7 GiB RAM.  nix.conf still says
+  # `max-jobs = 0`, so `nixos-rebuild switch --flake . --max-jobs 1` is the
+  # invocation to use: the toplevel and the `system-path` buildEnv (and any
+  # wrapped package) are always built *locally*, and with 0 local jobs that
+  # fails with "local builds are disabled" before zen3 is even asked.  One job
+  # is enough - the real work goes to zen3, whose parallelism comes from
+  # nix.buildMachines.maxJobs, not from max-jobs.
+
+  # common/system.nix's CLI/dev set (cargo, rustup, deno, nixd, flashrom,
+  # stress-ng, the GPU inspectors, ...): a few GB, none of it needed here.
+  # common/desktop-light.nix keeps `git` + `just` so this host can still
+  # rebuild itself from ~/nixos-config.
+  sharedPackages.enable = false;
+
+  # common/system.nix's container-image update notifier: it has nothing to
+  # watch here (no containers) and it is what keeps podman and nushell in this
+  # box's closure. mkForce because common/system.nix assigns it plainly.
+  system.updateContainers.enable = lib.mkForce false;
+
   # Pinnacle PCTV 320cx (2304:022e) in the ExpressCard slot.
   #
   # The card's analog side used to be Windows-only, and was captured by
@@ -37,6 +75,11 @@
   # and is unbound by pctv-bridge-handoff once the bridge is warm.
   # See pctv-linux/TRUTH.md §2.1.
 
+  # Only for pctv-linux/i2cprobe.c (walking the CX25843 over the bridge's i2c
+  # gate by hand).  The live stack itself is pure libusb.  This used to come
+  # from common/desktop.nix for ddcutil's sake.
+  boot.kernelModules = [ "i2c-dev" ];
+
   # --- watching / recording the analog inputs -------------------------------
   #
   # The card is NOT a V4L2 device any more.  With the pctv320cx module retired
@@ -55,23 +98,11 @@
   # pctv-linux/pctv-view.sh is from the V4L2 era and only works if the module is
   # re-enabled (pctv-linux/README.md "The driver").
   #
-  # mpv / obs-studio / v4l-utils stay installed for the iSight and general use:
-  #   mpv av://v4l2:/dev/video0    zero-setup webcam preview
-  #   qv4l2                        capture panel + controls (qvidcap is broken
-  #                                here: "OpenGL Error ... InitializeGL Part 2")
-  #   obs-studio                   needs OpenGL 3.3 core: the 9400M IGP (NVAC,
-  #                                renderD128) reports exactly that, the 9600M GT
-  #                                is nv50 (2.1) - keep OBS on card0.
-  #
-  # These packages are all substitutes, but mpv/obs-studio end in a wrapper
-  # derivation (buildEnv) that Nix insists on building *locally*, and this
-  # host runs with nix.settings.max-jobs = 0 - so a plain `just rebuild` dies
-  # with "local builds are disabled".  Pass --max-jobs 1: it only re-enables
-  # the tiny local wrappers, the real work still goes to zen3 (its parallelism
-  # comes from nix.buildMachines.maxJobs, not from max-jobs).
-  environment.systemPackages = with pkgs; [
-    mpv
-    obs-studio
-    v4l-utils
-  ];
+  # vlc (playback) / mpv / ffmpeg come from common/desktop-light.nix.  OBS and
+  # v4l-utils went with common/desktop.nix: OBS could only ever see the iSight
+  # now, and it cost 2.1 GB of that (cef-binary); for the iSight `mpv
+  # av://v4l2:/dev/video0` is enough, and `nix shell nixpkgs#v4l-utils` is one
+  # command when a capture-panel check is actually wanted.  The 9400M IGP
+  # (NVAC, card0) is the one with OpenGL 3.3 core if OBS ever comes back - the
+  # 9600M GT is nv50 (2.1).
 }

@@ -314,6 +314,34 @@
                 # redundant (and now failing) since nixpkgs ships wl-kmod-036:
                 # perl ${hybridFix} src/wl/sys/wl_cfg80211_hybrid.c
               '';
+              # nixpkgs (since the kmodigest module-signing work, ~2026-10) gives
+              # every module in the tree a single-module certificate: the kernel
+              # build concatenates `<mod>.cer` for each line of modules.order
+              # into modules.cer (pkgs/os-specific/linux/kernel/build.nix), and
+              # the kmod aggregator that merges boot.extraModulePackages into the
+              # booted module tree
+              # (pkgs/os-specific/linux/kmod/aggregator.nix) then appends the
+              # `.cer` of every *extra* module listed in modules.dep. wl.ko has
+              # none, because broadcom-sta's installPhase is a bare
+              # `cp wl.ko $binDir` instead of `make modules_install` - so no
+              # sign rule ever ran on it, and it has never been signed. The
+              # aggregator's `xargs cat` then dies with:
+              #   cat: kernel/net/wireless/wl.ko.cer: No such file or directory
+              #   error: Cannot build '…-linux-<ver>-modules.drv' (exit 123)
+              # (that drv *is* the aggregator). It blocks *any* rebuild of
+              # machines/macbook-pro-2009, the fleet's only extraModulePackages
+              # user. An empty file is exactly the right answer here: `cat >> modules.cer` then contributes no
+              # bytes, so the kernel's .system_extra_cert keyring is unchanged
+              # and wl.ko loads unsigned and module-tainting the kernel - as it
+              # already did on every kernel before this change (MODULE_SIG is on,
+              # MODULE_SIG_FORCE is not). Upstream's real fix is to sign it; when
+              # nixpkgs ships that it creates the file itself and the `[ -e ]`
+              # guard below stops touching it.
+              postInstall = (old.postInstall or "") + ''
+                find "$out/lib/modules" -name 'wl.ko' | while read -r ko; do
+                  [ -e "$ko.cer" ] || : > "$ko.cer"
+                done
+              '';
             });
         in
         builtins.mapAttrs (
@@ -635,9 +663,12 @@
           macbook-pro-2009-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
             modules = [
-              ./common/desktop.nix
+              # Lean desktop (Plasma + VLC + the capture toolchain, no browsers
+              # / OBS / editors / VM host) - see common/desktop-light.nix for
+              # what it drops versus common/desktop.nix and why. The container
+              # host module is off here too: nothing on this box runs one.
+              ./common/desktop-light.nix
               ./common/nfs.nix
-              ./common/podman.nix
               ./common/system.nix
               ./machines/macbook-pro-2009
               ./users/cjdell

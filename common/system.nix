@@ -1,7 +1,37 @@
-{ pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
+let
+  cfg = config.sharedPackages;
+in
 {
   imports = [
+    # The `sharedPackages.enable` switch that gates this module's package list
+    # (see the option doc below and `environment.systemPackages` further down).
+    # Declared as a nested module rather than as a top-level `options` here
+    # because a NixOS module may not mix `options`/`config` with shorthand
+    # option assignments: adding `options` on the top level would force every
+    # setting in this file under a `config = { ... }` wrapper for no gain.
+    (
+      { lib, ... }:
+      {
+        options.sharedPackages.enable = lib.mkEnableOption ''
+          the fleet-wide CLI toolset common/system.nix installs (git, tmux, wget,
+          flashrom, smartmontools, stress-ng, cargo/rustup, deno, nixd, the GPU
+          inspectors, ...). Several GB of closure. It is a convenience set and
+          nothing else in this repo depends on it, so a lean box that declares
+          its own short package list - machines/macbook-pro-2009, the PCTV 320cx
+          capture station running common/desktop-light.nix - switches it off and
+          keeps just what it uses (`git` + `just`, so it can still rebuild
+          itself from the checkout).
+        '';
+      }
+    )
+
     # zen3-nixos as this machine's remote Nix build server, with local
     # builds kept as a fallback (self-disabling on zen3 itself).
     ./build-client.nix
@@ -12,6 +42,11 @@
     # services.dshWebHarness on the host that should serve it.
     ./dsh-web-service.nix
   ];
+
+  # Every host gets the fleet CLI set unless it says otherwise (see the option
+  # doc in the nested module above); `mkDefault` so a host can turn it off with
+  # a plain `sharedPackages.enable = false;`.
+  sharedPackages.enable = lib.mkDefault true;
 
   system.updateContainers = {
     enable = true;
@@ -56,57 +91,60 @@
   # Configure console keymap
   console.keyMap = "uk";
 
-  environment.systemPackages = with pkgs; [
-    dmidecode
-    git
-    nmap
-    inetutils
-    wget
-    tmux
-    screen
-    efibootmgr
-    unzip
-    direnv
-    x264
-    pciutils
-    usbutils
-    lsof
-    speedtest-rs
-    tio
-    dig
-    lm_sensors
-    stress-ng
-    iotop
-    p7zip
-    _7zz
-    ethtool
-    flashrom
-    ch341eeprom
-    smartmontools
-    gptfdisk
-    just
+  environment.systemPackages = lib.optionals cfg.enable (
+    with pkgs;
+    [
+      dmidecode
+      git
+      nmap
+      inetutils
+      wget
+      tmux
+      screen
+      efibootmgr
+      unzip
+      direnv
+      x264
+      pciutils
+      usbutils
+      lsof
+      speedtest-rs
+      tio
+      dig
+      lm_sensors
+      stress-ng
+      iotop
+      p7zip
+      _7zz
+      ethtool
+      flashrom
+      ch341eeprom
+      smartmontools
+      gptfdisk
+      just
 
-    # GPU Related Stuff
-    intel-gpu-tools
-    radeontop
-    amdgpu_top
-    mesa-demos
-    clinfo
-    vulkan-tools
-    vdpauinfo
-    libva-utils
+      # GPU Related Stuff
+      intel-gpu-tools
+      radeontop
+      amdgpu_top
+      mesa-demos
+      clinfo
+      vulkan-tools
+      vdpauinfo
+      libva-utils
 
-    # Programming
-    deno
-    cargo
-    cargo-binutils
-    rustup
-    gh # GitHub CLI
-    nixfmt
-    alejandra
-    nil
-    nixd
-  ];
+      # Programming
+      deno
+      cargo
+      cargo-binutils
+      rustup
+      gh # GitHub CLI
+      nixfmt
+      alejandra
+      nil
+      nixd
+    ]
+  );
 
   # This value determines the NixOS release from which the default
   # settings for stateful data, like file locations and database versions
