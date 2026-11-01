@@ -102,7 +102,8 @@ nix-build -E 'with import <nixpkgs> {}; callPackage ./pctv-linux/package.nix {}'
 Monitor keys: `1`/`2` switch video input (Composite, S-Video), `Tab` cycles,
 `a` cycles the **audio input**, `A` toggles **automatic gain control**,
 `-`/`+` capture gain, `b` input boost, `m` mute, **`o` monitors the input on the
-speakers**, `c` **MPEG-2 capture**, `r`
+speakers**, `c` **capture** (MPEG-2 by default, `--master` for the lossless
+masters), `r`
 raw BT.656 dump, `s` snapshot, `g` colour/grey, space pause the display,
 `q`/ESC quit (Ctrl-C works too and still
 finalises the `.mpg`).  The active input is named in an on-screen banner (and
@@ -234,13 +235,44 @@ meter and your ears judge the same signal, before committing to a recording.
 ### MPEG-2 capture (`c`)
 
 The deframed UYVY is piped to `ffmpeg` on stdin and the ALSA PCM on fd 3; the
-result is a plain PAL-DVD-style program stream - `mpeg2video` 720×576
-interlaced (top field first) at 25 fps, `-b:v`/`-maxrate` 6000k, `-bufsize`
-1835008, `-g 15`, `+ilme+ildct`, 4:3, plus `mp2` 48 kHz stereo 192k.
+default result is a plain PAL-DVD-style program stream - `mpeg2video` 720×576
+interlaced at 25 fps (`-b:v`/`-maxrate` 6000k, `-bufsize` 1835008, `-g 15`,
+`+ilme+ildct`, 4:3) plus `mp2` 48 kHz stereo 192k.  The *pixels* are
+top-field-first; that stream is not tagged as such, and cannot be - see
+"Which master to write" below and `docs/pctv-analog-capture.md` §10.3.
 
-* Files land in `~/Videos/pctv-cap-<timestamp>.mpg` (`--out-dir`,
-  `PCTV_OUT_DIR`, falls back to `/tmp`); bitrate via `--bitrate <kbps>` /
-  `PCTV_MPEG2_BITRATE`.
+#### Which master to write (`--master`, `PCTV_MASTER`)
+
+`dvd` (the above) is for burning and watching.  For an archive, `--master uyvy`
+or `--master ffv1` writes a **lossless Matroska master** instead:
+
+| mode | what it is | size | encoder speed measured on this box |
+| --- | --- | --- | --- |
+| `dvd` | MPEG-PS `mpeg2video` 6 Mbps, `-g 15` | ~0.7 MB/s | 4.5× realtime |
+| `uyvy` | `rawvideo`, the deframer's own UYVY, no conversion at all | 20.7 MB/s (~1.2 GB/min) | 8.0× |
+| `ffv1` | `ffv1 -g 1` (yuv422p), same bits | content-dependent: 0.1 MB/s clean, a few MB/s on grainy tape | 2.7× on test pattern — its cost tracks picture entropy, so time it on a noisy tape before trusting it |
+
+(ffmpeg `speed=` from the same raw UYVY source the capture feeds it, so the
+numbers are comparable; >1× = keeps up.  `uyvy` is the mode that structurally
+cannot fall behind.)  Both lossless modes are intra-only with **no rate
+control**, so a detailed scene makes the file bigger instead of making the
+encoder miss a deadline - and unlike `-g 15` MPEG-2, a lost frame would cost one
+frame.  Audio rides along as `pcm_s16le`.  The window title reads
+`[REC uyvy]` while recording, because archiving a tape in the wrong mode by
+reflex is worth seeing.  Nothing is deinterlaced, scaled or cropped in any mode:
+the fields *are* the 50 Hz information, and interpolating them to 50p is a job
+for a machine with more cores than this one
+(`docs/pctv-analog-capture.md` §10.2).
+
+`pctv-field-order FILE...` prints what a capture claims about field order in
+three readings - container element, decoded-frame flags, `idet`'s pixel vote -
+and what to do when they disagree; `--relabel` stream-copies a container-tagged
+Matroska twin (which fixes the label, never the MPEG-2 bitstream).
+
+* Files land in `~/Videos/pctv-cap-<timestamp>.mpg` (`.mkv` for the lossless
+  masters); `--out-dir` / `PCTV_OUT_DIR` chooses the directory (else `/tmp`),
+  `--bitrate <kbps>` / `PCTV_MPEG2_BITRATE` the DVD bitrate, and
+  `--master dvd|uyvy|ffv1` / `PCTV_MASTER` the format.
 * The encoder starts on the **first decoded frame**, not on the key press, so
   both streams share PTS 0 - otherwise a capture started while the decoder is
   still hunting carries up to 8 s of extra audio (the lock poll, see below).

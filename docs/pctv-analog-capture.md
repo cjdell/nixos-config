@@ -166,14 +166,107 @@ wrapped so the firmware paths survive `sudo`'s `env_reset`.
 * **Never let `pctv-monitor` be the first downloader** after a cold plug (§2.1); and
   after an invalid I²C probe, only a ≥ 60 s pull revives the ROM (§4).
 
-## 10. Where to look
+## 10. Capture masters, field order, and getting 50p
+
+A capture is 25 frames/s of **625/50 interlaced** video — 720×576, 4:2:2, 50
+fields/s. Every choice in this section follows from that: the card already hands
+us 50 temporally distinct images per second, so the only questions are what gets
+written and what happens later.
+
+### 10.1 The three masters (`--master`, `PCTV_MASTER`)
+
+| mode | container / codec | disk rate | encoder, measured¹ | for |
+| --- | --- | --- | --- | --- |
+| `dvd` (default) | MPEG-PS, `mpeg2video` `-b:v 6000k -g 15 +ilme+ildct` | ~0.7 MB/s | 4.5× realtime | burning, watching, keeping years of tape cheap |
+| `uyvy` | Matroska, `rawvideo` (uyvy422) | 20.7 MB/s (1.2 GB/min, ~35 GB per tape) | 8.0× | **the bit-exact master**: the deframer's own bytes, no colourspace conversion, no rate control |
+| `ffv1` | Matroska, `ffv1 -g 1` (yuv422p) | content-dependent: 0.1 MB/s on a noiseless test pattern, a few MB/s on grainy tape | 2.7× test pattern | the same bits at a fraction of the disk, for the price of a real encoder |
+
+¹ ffmpeg's own `speed=` with every mode fed the *same* raw UYVY the capture
+pipeline produces, so the figures are comparable; >1× means it keeps up. FFV1's
+cost tracks picture entropy, which is why grainy tape is the number to plan on —
+and why `uyvy` is the safe archival default when disk is cheap (a tape costs
+35 GB, which is one HDD shelf-load).
+
+`uyvy` is bit-exact *by construction*: `cmp` of 40 frames before and after the
+muxer is identical. Audio is `pcm_s16le` there rather than `mp2`, for the same
+reason — free and lossless. Both lossless modes are intra-only with **no rate
+control**, so a busy scene makes the file bigger instead of making the encoder
+miss a deadline; `dvd` is the only mode where a rate-controlled VBV can fall
+behind, and the only one where a dropped frame costs the rest of a 15-frame GOP.
+
+### 10.2 Why the capture box must not deinterlace
+
+The ask was 50 fps smoothness, a less-lossy codec, and post-processing for
+de-interlacing on a fast machine. The first two are §10.1; the third is why the
+capture stays dumb. At full 576 lines, 50 distinct images/s and progressive
+frames are mutually exclusive — a field is 288 lines, so 50p means inventing 288
+lines fifty times a second:
+
+* **bob** (`yadif`/`bwdif` single-rate) is real-time and throws half the vertical
+  resolution away *permanently*. Doing it at capture is irreversible.
+* **motion-compensated interpolation** (QTGMC, `nnedi3`) is quality, not speed — a
+  many-pass VapourSynth job, and this box is a 2-core T9800 whose whole job is to
+  never drop a field.
+* **fields are not damage.** They *are* the 50 Hz information; the archive keeps
+  them and the post box decides. Verified on this very ffmpeg: 50 interlaced
+  frames through `bwdif=mode=send_field:parity=tff` → 100 frames at 50/1 fps and
+  the full 576 lines. QTGMC on the same fields is the archival answer.
+
+So no `-vf`, no crop to 702, no `scale`, in any mode — and `uyvy`/`ffv1` are the
+modes to archive a tape in, with `dvd` for the copy you actually play.
+
+### 10.3 Field order: the pixels are TFF, and only one of the three tags says so
+
+* **By construction, and by the standard.** The deframer (`pctv-monitor.c`, the
+  `F`-bit branch of the BT.656 parser) puts field 1 on the *even* lines. ITU-R
+  625/50 numbers the field containing line 1 as field 1 — so field 1 *is* the top
+  field — and displays the field it transmitted first. That is the same reason
+  DV-PAL files are always TFF; an analog camcorder's field sequence is the
+  broadcast sequence it came from.
+* **It cannot be measured with `idet`, which is a trap worth writing down.**
+  Field-order *lean* from `idet` looks like an instrument and is not one on this
+  material: two synthetic clips built identically except that in one the even
+  lines sample the earlier instant and in the other the odd lines — i.e. TFF vs
+  BFF by pure construction — voted `TFF: 9 BFF: 10` and `TFF: 10 BFF: 9`, with
+  116 of 150 frames `Undetermined`. ffmpeg also prints a spurious all-zero idet
+  summary *before* the real one, so a `head -1` on that output silently reads the
+  zeros (an earlier revision of this section quoted `TFF 817 / BFF 183` from
+  exactly that kind of mis-read; `pctv-field-order` now takes the last summary).
+  What idet *does* answer is whether the picture is interlaced at all: over 100
+  frames five minutes into a tape, `Repeated Fields: Neither: 58 Top: 19 Bottom:
+  23` — 58 % non-repeating is interlaced, not progressively encoded.
+* **Then contradicted by the file.** The `.mpg` masters report
+  `field_order=bb`/`top_field_first=0` — `mpeg2video` **ignores `-field_order`**
+  and writes the bitstream flag itself, and MPEG-PS has no container element to
+  overrule it. Because that flag is a *syntax element of the picture coding
+  extension*, no lossless operation changes it either: `ffmpeg -c copy
+  -field_order tt` rewrites the Matroska label while the decoded frames go on
+  reading `1,0` (measured; the remux also needs `-fflags +genpts` or the muxer
+  dies on an audio packet with no valid timestamp).
+
+Which is why the lossless modes pass `-field_order tt` **on the input side**:
+with a raw source that is the only place ffmpeg listens, and it puts the value
+where consumers actually look — every decoded frame carries
+`interlaced_frame=1, top_field_first=1`, the flags `idet`, `yadif`/`bwdif`, ffms2
+and l-smash consult. (ffprobe then *spells* the stream-level tag `tb`; that is an
+ffmpeg quirk, the frame flag is the operative one.)
+
+`pctv-field-order` (same package) prints all three readings for a file and what
+to do about each; `--relabel` stream-copies a container-tagged Matroska twin and
+honestly reports that the frames kept their own flag. For the `.mpg` masters
+recorded before this patch the fix is one line in the post script — AviSynth+
+`AssumeTFF()`, VapourSynth `core.video.AssumeTFF(clip)` / `SetFieldBased(1)`.
+Tape digitising has always declared its field order; trusting the tag was the
+experiment.
+
+## 11. Where to look
 
 | path | what |
 | --- | --- |
 | `pctv-linux/TRUTH.md` | **the authority** on hardware behaviour (§2.1 download order, §4 state machine, §6 analog path, §8 retracted claims) |
 | `pctv-linux/probe.c` | the userspace driver: vendor request map, `analog2_bringup`, `stream` |
-| `pctv-linux/pctv-monitor.c` | BT.656 parser, SDL2 view, MPEG-2 + audio capture, AGC |
-| `pctv-linux/live-module.nix`, `package.nix` | deployment: handoff unit, udev, sysctl, firmware, wrappers |
+| `pctv-linux/pctv-monitor.c` | BT.656 parser, SDL2 view, capture masters (§10), AGC |
+| `pctv-linux/live-module.nix`, `package.nix` | deployment: handoff unit, udev, sysctl, RT limits, firmware, wrappers |
 | `pctv-linux/README.md` | usage, keys, options; and why `driver/` (the V4L2 module) is retired |
 | `pctv-linux/COLD-BOOT-NOTES.md` | cold-boot runbook and symptom → cause → fix table |
 | `docs/pctv-320cx.md` | the superseded Win7-VM route |

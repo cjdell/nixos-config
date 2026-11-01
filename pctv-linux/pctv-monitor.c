@@ -102,6 +102,47 @@ static FILE *rec_file = NULL;
 static char  out_dir[512];
 static int   mpeg2_kbps = 6000;
 
+/* What a capture is *written as*.  Not to be confused with the `r` key, which
+ * dumps the raw BT.656 byte stream before it is deframed at all.
+ *
+ *   dvd   the PAL-DVD-style MPEG-2 program stream this box has always produced:
+ *         4:2:2, `-b:v 6000k`, plays on a DVD player and is small enough to keep
+ *         years of tape.  It is also the only mode with a rate-controlled
+ *         encoder: on detailed tape the 1.8 MB VBV cannot always hold 6 Mbps, so
+ *         quality collapses exactly when the picture is hardest, and a dropped
+ *         frame costs the rest of the `-g 15` GOP.  Fine for watching; not what
+ *         you want as the archive of a camcorder tape.
+ *   uyvy  the deframed picture, uncompressed, in Matroska: bit-exact by
+ *         construction (verified with cmp through the muxer), stored in the very
+ *         pixel format the deframer produces - no colourspace conversion at all
+ *         - so the encoder drops out of the critical path entirely.  ~1.2 GB/min.
+ *   ffv1  the same bits, lossless-coded, ~1/3 the size and ~1/4 the disk rate,
+ *         for the price of a real encoder (which is SCHED_FIFO since 6fdd651).
+ *
+ * Both lossless modes are intra-only with no rate control, so a busy scene makes
+ * the file bigger instead of making the encoder fall behind, which is the
+ * property an archive of a one-shot tape capture wants.  Deinterlacing (50p) is
+ * deliberately NOT done here: the only thing this box could do live is bob, and
+ * that throws away half the vertical resolution permanently - see the comment in
+ * cap_start() and docs/pctv-320cx.md. */
+#define MASTER_DVD  0
+#define MASTER_UYVY 1
+#define MASTER_FFV1 2
+static int cap_master = MASTER_DVD;
+static const char *const MASTER_NAME[] = { "dvd", "uyvy", "ffv1" };
+
+static int master_from_name(const char *s)
+{
+    if (!s || !*s) return MASTER_DVD;
+    if (!strcasecmp(s, "uyvy") || !strcasecmp(s, "raw") || !strcasecmp(s, "lossless"))
+        return MASTER_UYVY;
+    if (!strcasecmp(s, "ffv1")) return MASTER_FFV1;
+    if (!strcasecmp(s, "dvd") || !strcasecmp(s, "mpeg2") || !strcasecmp(s, "mpg"))
+        return MASTER_DVD;
+    fprintf(stderr, "pctv-monitor: unknown master '%s' (dvd|uyvy|ffv1) - using dvd\n", s);
+    return MASTER_DVD;
+}
+
 /* Overlay: draw the big input banner until this SDL tick; the controls hint
  * is shown alongside it. */
 static unsigned long long overlay_until = 0;
@@ -369,8 +410,11 @@ static void usage(const char *p)
         "                      samples out of the host's speakers (key: o)\n"
         "  --out-dir <dir>     where captures go (default ~/Videos, else /tmp)\n"
         "  --bitrate <kbps>    MPEG-2 video bitrate (default 6000)\n"
+        "  --master <mode>     capture format: dvd (MPEG-2, default), or the\n"
+        "                      lossless Matroska masters uyvy / ffv1 for\n"
+        "                      deinterlacing to 50p on another machine\n"
         "  --ffmpeg <path>     ffmpeg binary (default PCTV_FFMPEG or 'ffmpeg')\n"
-        "  --capture           start an MPEG-2 capture immediately\n"
+        "  --capture           start a capture immediately (format: --master)\n"
         "  --capture-seconds N stop after N seconds and exit (headless test)\n"
         "\n"
         "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
@@ -1689,7 +1733,8 @@ static int cap_start(void)
     cap_has_audio = audio_ok;
     pthread_mutex_unlock(&amtx);
 
-    stamp_name(cap_path, sizeof cap_path, "pctv-cap", "mpg");
+    stamp_name(cap_path, sizeof cap_path, "pctv-cap",
+               cap_master == MASTER_DVD ? "mpg" : "mkv");
 
     char vsize[32], br[32], ar[32];
     snprintf(vsize, sizeof vsize, "%dx%d", W, H);
@@ -1704,23 +1749,79 @@ static int cap_start(void)
     av[n++] = "-pix_fmt"; av[n++] = "uyvy422";
     av[n++] = "-s"; av[n++] = vsize;
     av[n++] = "-r"; av[n++] = "25";
+    /* The picture is top-field-first (see the dvd branch below), and for a raw
+     * source the command line is the only place ffmpeg will take that from.
+     * Measured on this box: on the OUTPUT side both lossless encoders ignore it
+     * (rawvideo -> `tb`, ffv1 -> `progressive`), while on the INPUT side it lands
+     * where it actually counts - every decoded frame carries
+     * `interlaced_frame=1, top_field_first=1`, which is what idet, yadif/bwdif,
+     * ffms2 and l-smash consult (ffprobe's stream-level spelling `tb` for it is a
+     * separate ffmpeg quirk; the frame flag is the operative one).  Without this
+     * the master is 50 fields/s of correct pixels that nothing knows how to lay
+     * out in time. */
+    if (cap_master != MASTER_DVD) {
+        av[n++] = "-field_order"; av[n++] = "tt";
+    }
     av[n++] = "-i"; av[n++] = "pipe:0";
     if (cap_has_audio) {
         av[n++] = "-f"; av[n++] = "s16le"; av[n++] = "-ar"; av[n++] = ar;
         av[n++] = "-ac"; av[n++] = "2"; av[n++] = "-i"; av[n++] = "pipe:3";
     }
-    av[n++] = "-c:v"; av[n++] = "mpeg2video";
-    av[n++] = "-b:v"; av[n++] = br;
-    av[n++] = "-maxrate"; av[n++] = br;
-    av[n++] = "-bufsize"; av[n++] = "1835008";
-    av[n++] = "-g"; av[n++] = "15";
-    av[n++] = "-flags"; av[n++] = "+ilme+ildct";
-    av[n++] = "-field_order"; av[n++] = "tt";
-    av[n++] = "-aspect"; av[n++] = "4:3";
-    if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "mp2"; av[n++] = "-b:a"; av[n++] = "192k"; }
-    else av[n++] = "-an";
-    av[n++] = "-sn";
-    av[n++] = "-f"; av[n++] = "mpeg";
+    if (cap_master == MASTER_DVD) {
+        av[n++] = "-c:v"; av[n++] = "mpeg2video";
+        av[n++] = "-b:v"; av[n++] = br;
+        av[n++] = "-maxrate"; av[n++] = br;
+        av[n++] = "-bufsize"; av[n++] = "1835008";
+        av[n++] = "-g"; av[n++] = "15";
+        av[n++] = "-flags"; av[n++] = "+ilme+ildct";
+        /* NOTE: mpeg2video IGNORES -field_order.  Measured: encoding with this
+         * exact flag set still produces `top_field_first=0` / field_order=bb,
+         * while the picture is top-field-first: the deframer's F-bit branch puts
+         * BT.656 field 1 on the EVEN lines, 625/50 numbers the field containing
+         * line 1 as field 1 (so field 1 IS the top field) and displays the field
+         * it transmitted first - the same reason DV-PAL is always TFF.  That is a
+         * standards argument, not an observation, because it cannot be observed
+         * with idet: two synthetic clips differing only in which field is
+         * temporally first voted TFF 9/BFF 10 and TFF 10/BFF 9, and ffmpeg also
+         * prints a spurious all-zero summary before the real one
+         * (docs/pctv-analog-capture.md §10.3 - measured, do not trust idet here).
+         * Worse, `top_field_first` is a bitstream syntax element of the MPEG-2
+         * picture coding extension, so no lossless remux can change it either:
+         * `-c copy -field_order tt` rewrites only the container label, and the
+         * frames keep reading 1,0.  So a .mpg master has to be *told* to be TFF
+         * downstream (AssumeTFF() in AviSynth+, `AssumeTFF().SeparateFields()` /
+         * SetFieldBased(1) in VapourSynth) - which is what tape digitisation
+         * always did anyway - or recaptured as PCTV_MASTER=uyvy|ffv1, which
+         * stamps the frame flag itself. */
+        av[n++] = "-field_order"; av[n++] = "tt";
+        av[n++] = "-aspect"; av[n++] = "4:3";
+        if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "mp2"; av[n++] = "-b:a"; av[n++] = "192k"; }
+        else av[n++] = "-an";
+        av[n++] = "-sn";
+        av[n++] = "-f"; av[n++] = "mpeg";
+    } else {
+        /* A lossless master, for post-processing on a fast machine.
+         *
+         * Deliberately no -vf of any kind: no bob, no yadif/bwdif, no scale, no
+         * crop.  50 Hz temporal smoothness and progressive scan cannot both be
+         * had from an interlaced source at full height without expensive
+         * motion-compensated interpolation, and this box can afford neither; the
+         * fields *are* the 50 Hz information, so the capture's job is to keep
+         * them untouched and let QTGMC/bwdif on the big machine produce 50p at
+         * full 576 lines (docs/pctv-320cx.md).  uyvy additionally avoids any
+         * colourspace conversion, because that pixel format is what the deframer
+         * already produces.
+         *
+         * Audio is PCM for the same reason MP2 is not: free and lossless. */
+        av[n++] = "-c:v";
+        av[n++] = cap_master == MASTER_UYVY ? "rawvideo" : "ffv1";
+        if (cap_master == MASTER_FFV1) { av[n++] = "-g"; av[n++] = "1"; }
+        av[n++] = "-aspect"; av[n++] = "4:3";
+        if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "pcm_s16le"; }
+        else av[n++] = "-an";
+        av[n++] = "-sn";
+        av[n++] = "-f"; av[n++] = "matroska";
+    }
     av[n++] = cap_path;
     av[n] = NULL;
 
@@ -1752,8 +1853,10 @@ static int cap_start(void)
     cap_t0 = time(NULL);
     cap_t0_tick = SDL_GetTicks();
     pthread_mutex_unlock(&cap_mtx);
-    fprintf(stderr, "pctv-monitor: MPEG-2 capture -> %s (audio %s, %d kbps, pid %d)\n",
-            cap_path, cap_has_audio ? srcs[cur_src].label : "OFF", mpeg2_kbps, pid);
+    fprintf(stderr, "pctv-monitor: %s capture -> %s (audio %s, %s, pid %d)\n",
+            MASTER_NAME[cap_master], cap_path,
+            cap_has_audio ? srcs[cur_src].label : "OFF",
+            cap_master == MASTER_DVD ? br : "lossless", pid);
     return 0;
 }
 
@@ -1981,6 +2084,8 @@ int main(int argc, char **argv)
         if (env && *env) snprintf(ffmpeg_path, sizeof ffmpeg_path, "%s", env);
         env = getenv("PCTV_CAPTURE_SECS");
         if (env) capture_secs = strtol(env, NULL, 0);
+        env = getenv("PCTV_MASTER");
+        if (env) cap_master = master_from_name(env);
     }
 
     for (int i = 1; i < argc; i++) {
@@ -2022,6 +2127,8 @@ int main(int argc, char **argv)
             mkdir(out_dir, 0755);
         } else if (!strcmp(argv[i], "--bitrate") && i + 1 < argc) {
             mpeg2_kbps = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--master") && i + 1 < argc) {
+            cap_master = master_from_name(argv[++i]);
         } else if (!strcmp(argv[i], "--ffmpeg") && i + 1 < argc) {
             snprintf(ffmpeg_path, sizeof ffmpeg_path, "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--capture")) {
@@ -2394,11 +2501,16 @@ int main(int argc, char **argv)
             }
             pthread_mutex_unlock(&amtx);
 
+            char recmode[32] = "";
+            if (cap_on)
+                snprintf(recmode, sizeof recmode, " [REC %s]",
+                         MASTER_NAME[cap_master]);
+
             char title[256];
             snprintf(title, sizeof title,
                      "PCTV 320cx - %s%s%s%s - %.0f fields/s",
                      INPUT_LABEL[cur_input], grey ? " [grey]" : "",
-                     recording ? " [RAW]" : "", cap_on ? " [MPEG2 REC]" : "", fps);
+                     recording ? " [RAW]" : "", recmode, fps);
             SDL_SetWindowTitle(win, title);
             if (getenv("PCTV_VERBOSE")) {
                 pthread_mutex_lock(&amtx);

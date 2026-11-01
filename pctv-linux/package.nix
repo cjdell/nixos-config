@@ -2,7 +2,9 @@
 # `pctv-monitor` (SDL2 live/capture GUI).  No kernel module involved; the GUI
 # spawns the probe, which does the bridge/decoder bring-up and streams raw
 # BT.656 on stdout.  The GUI deframes that into UYVY and pipes it to ffmpeg for
-# MPEG-2 capture, and records the audio from ALSA (the card's own audio-over-USB
+# capture - a PAL-DVD-style MPEG-2 stream by default, or a lossless uyvy/ffv1
+# Matroska master (`--master uyvy|ffv1`) for deinterlacing on a faster machine -
+# and records the audio from ALSA (the card's own audio-over-USB
 # path is still undecoded - see TRUTH.md 9.6).
 #
 #   pkgs.callPackage ./pctv-linux/package.nix { }
@@ -27,10 +29,26 @@
   SDL2,
   alsa-lib,
   ffmpeg,
+  replaceVarsWith,
   libreelec-dvb-firmware,
   noSudo ? false,
 }:
 
+# Field-order reporter/relabeler for the captures this package produces.  Built
+# with replaceVarsWith rather than a PATH lookup so it works from a plain terminal
+# and from a post-processing script alike.  Why a whole tool for one tag: see
+# docs/pctv-analog-capture.md, "Capture masters, field order, and getting 50p".
+let
+  pctvFieldOrder = replaceVarsWith {
+    src = ./pctv-field-order.sh;
+    replacements = {
+      ffmpeg = "${ffmpeg}/bin/ffmpeg";
+      # nixpkgs' ffmpeg default output *is* the -bin output, which has ffprobe.
+      ffprobe = "${ffmpeg}/bin/ffprobe";
+    };
+    isExecutable = true;
+  };
+in
 stdenv.mkDerivation {
   pname = "pctv-live";
   version = "0.1";
@@ -69,6 +87,7 @@ stdenv.mkDerivation {
     runHook preInstall
     install -Dm755 pctv_probe "$out/bin/pctv_probe"
     install -Dm755 pctv-monitor "$out/bin/pctv-monitor"
+    install -Dm755 ${pctvFieldOrder} "$out/bin/pctv-field-order"
 
     # Wrap the probe as well, not just the GUI.  Without this the firmware
     # paths only live in pctv-monitor's environment, and the default GUI path
