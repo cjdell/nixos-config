@@ -26,6 +26,93 @@ Built binaries: `result/bin/footage-clean`, `result/bin/footage-probe`.
 The pipeline script lives at `share/footage/clean.vsh` (editable copy in
 this repo; rebuild to apply changes).
 
+## How to use it
+
+Two commands. `footage-probe` only reports; `footage-clean` does the
+work. Both run with zero setup — every tool is a baked-in store path,
+so neither needs PATH, Nix shell or root.
+
+```sh
+just probe FILE          # or: result/bin/footage-probe FILE
+just footage [flags] FILE [OUT]
+```
+
+`just` rebuilds the kit on every invocation (seconds when unchanged);
+`result/bin/...` uses the last `nix build .#footage-kit` output. Output
+defaults to `<input>-cleaned.mp4`. `footage-clean --help` lists every
+flag with its default.
+
+### The workflow, every time
+
+1. **`footage-probe FILE`** — reads resolution, bitrate per pixel,
+   field order (container tag *and* ffmpeg `idet` counts, and says
+   which one it trusts) and colour tags, then prints suggested
+   commands. The probe answer is the flag list for step 2.
+2. **`footage-clean --test 12 ... FILE /tmp/t.mp4`** — renders ~12
+   seconds (keyframe-snapped) with the real flags. Always. A wrong
+   `--deint`/`--crop`/field-order guess costs hours on a 29-minute
+   capture, 8 seconds on a test.
+3. **Full render.** Stages run in the canonical order — crop →
+   deinterlace → denoise → (GPU upscale → RIFE) → encode — stages 3-5
+   skipped unless asked for. Intermediates are visually-lossless
+   (crf 12); the final encode is what you keep. Audio is stream-copied.
+   Progress prints per stage; temp dir auto-deletes (`--keep-temp`
+   keeps it).
+4. **Check the result**: ffprobe the output (size, fps, tags) and pull
+   one frame from near the end — banding, cropping or field-order
+   mistakes show up there.
+
+### Choosing the flags
+
+* **Interlaced (tape, PCTV, DVD rips)?** `--deint auto` is right 95 %
+  of the time: it believes `idet` over the container tag (the PCTV
+  driver writes a bogus `bb`; idet found TFF=250/BFF=0 and the kit
+  overrode it correctly). Override with `--deint qtgmc|znedi3|eedi3` +
+  `--field tff|bff` when you know better. Interlaced sources come out
+  as full-rate 50p, never 25p.
+* **Overscan / head-switching band / pillar bars?** `--crop WxH+X+Y`,
+  found with `ffmpeg -vf cropdetect`. Applied *before* deinterlacing.
+* **Noise level?** `--denoise light` for tape (MDegrain keeps detail),
+  `standard` default for digital, `strong/stronger` for bad sensor
+  noise, `none` for clean sources going straight to upscale.
+* **Washed-out analog colour?** `--grade` (saturation 1.18 / contrast
+  1.04) — the single biggest win on VHS-era captures. `--deband` for
+  banded skies; `--sharpen 0.4` if the source is soft and you are not
+  upscaling with a net anyway.
+* **Upscale?** `--upscale 2|3|4` on the GPU. **Default model
+  `realesr-animevideov3` — chosen deliberately** (see the experiments
+  section: best natural detail per second on video content;
+  `--processor realcugan --model models-pro` when you want maximum
+  sharpness and will check faces). Stay at ×2 and let the player
+  finish to ×4: realesrgan-plus ×4 costs ~30× for no visible gain.
+* **Frame rate?** `--interp` doubles it with RIFE (25p→50p, 50p→100p).
+* **GPU choice?** GPU stages default to Vulkan device 0 = the RX 580,
+  so renders run *while Strata holds the R9700*. `--gpu 1` after
+  `gpu-mode game` for the fast card (see *GPU etiquette*).
+* **Delivery vs archive?** `--crf` (20 default; 16 for master-grade,
+  24 for space) and `--codec x265|x264|av1|gpu-*`. x265 medium on the
+  5950X ≈ 2.2× realtime; `gpu-h265` offloads VCN to the RX 580.
+* **Colour tags:** output is stamped bt709; `--source-color` keeps the
+  source's (broken) tags instead. Mislabelled `bt2020c` sources get an
+  automatic normalising pass — that's a fix, not a bug.
+
+### Recipes that are known good
+
+```sh
+# PCTV/VHS MPEG capture -> clean 50p HEVC (the 2026-11-01 render):
+just footage --deint qtgmc --denoise light --grade --crop 700x556+10+2 captures/x.mpg
+
+# ...same, upscaled x2 for the collection, on the RX 580 (~4.5 h per 29 min):
+just footage --deint qtgmc --denoise light --grade --crop 700x556+10+2 \
+  --upscale 2 captures/x.mpg        # add --gpu 1 when the R9700 lease is free
+
+# digital travel clip: denoise banding, sharper, small file:
+just footage --denoise standard --deband --crf 22 n265.mp4
+
+# SD DVD rip to a crisp 2x with the sharper net:
+just footage --deint auto --denoise light --upscale 2 --processor realcugan vob.mkv
+```
+
 ## How the standard workflow maps onto this kit
 
 The usual advice is *FFmpeg + VapourSynth + QTGMC → BM3D/KNLMeans →
@@ -94,6 +181,11 @@ GPU upscalers (RX 580, 5 s/250-frame clips, all at x2 of the sample):
 | `--model realesr-animevideov3` (default) | natural detail, no artefacts seen | ~45 s | **best all-rounder, the kit default** |
 | `--processor realcugan --model models-pro` | sharpest, nicest texture on foliage/set | ~50 s | runner-up; occasionally over-crisp on edges — spot-check faces |
 | realesrgan-plus x4 → lanczos ½ | ~indistinguishable from animevideov3 at x2 | ~23 min | **not worth ~30× the cost**; reserve for hero stills/clips |
+
+**Decision (2026-11-01): `realesr-animevideov3` ×2 is the kit's default
+upscale recipe** — natural detail, no artefacts in stills or motion,
+and ~the same cost as RealCUGAN. Use `--processor realcugan` only when
+maximum sharpness is wanted and faces/edges get eyeballed first.
 
 libplacebo is **not** in this nixpkgs' video2x build (`Filter
 'libplacebo' not found`) — no RAISR/Animeweb upscalers via this route.
