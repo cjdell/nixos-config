@@ -272,8 +272,13 @@ in
       # (127.0.0.1:51830 -> grafton's wg-friend) inside wss://…:443.
       # timeout_sec=0 is mandatory or wstunnel reaps the idle WG flow at
       # 30 s; pings keep NAT and the ISP's "web connection" state warm.
-      # Literal-IP dial + SNI override skips wstunnel's internal resolver —
-      # the strict link deliberately has no DNS.
+      # Literal-IP dial because the strict link deliberately has no DNS.
+      # The SNI override names the vhost for the TLS handshake, but nginx
+      # routes on the Host header FIRST — without the -H the dial arrives as
+      # `Host: 192.168.99.1`, falls to the default vhost (2FAuth) and its
+      # cheerful `200 OK` is what the client reports as
+      # `Invalid status code: 200`. SNI + Host must agree (same trap the
+      # --tls-sni-override help warns about for CDNs).
       systemd.services.wstunnel-client = {
         description = "Friend tunnel WebSocket carrier (wstunnel client)";
         wantedBy = [ "multi-user.target" ];
@@ -283,6 +288,7 @@ in
             ${lib.getExe pkgs.wstunnel} client \
               -L 'udp://127.0.0.1:${toString guestConstants.WG_FRIEND_PORT}:127.0.0.1:${toString guestConstants.WG_FRIEND_PORT}?timeout_sec=0' \
               --http-upgrade-path-prefix ${guestConstants.FRIEND_TUNNEL_WS_PREFIX} \
+              -H 'host: ${guestConstants.FRIEND_TUNNEL_HOST}' \
               --tls-sni-override ${guestConstants.FRIEND_TUNNEL_HOST} \
               --websocket-ping-frequency 20s \
               wss://${guestConstants.STRICT_IPV4}
