@@ -40,6 +40,11 @@
  *     cc -O2 -Wall -o pctv_probe probe.c $(pkg-config --cflags --libs libusb-1.0)
  */
 
+/* pctv-rt.h calls sched_setscheduler(2), a GNU extension. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +57,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <libusb-1.0/libusb.h>
+#include "pctv-rt.h"
 
 #define VID 0x2304
 #define PID 0x022e
@@ -2737,6 +2743,14 @@ int main(int argc, char **argv)
 
     const char *c = argv[1];
     int rc = 0;
+
+    /* The streaming path is the one that destroys data when it is late: every
+     * URB it misses is 19 BT.656 lines spliced out of the recording.  Join
+     * SCHED_FIFO before any worker thread exists so they all inherit it.
+     * Diagnostics (`romwin`, `i2c*, `replay', ...) stay at normal priority -
+     * they are timing-sensitive to run *without* a boosted class. */
+    if (!strcmp(c, "stream"))
+        pctv_become_rt("pctv_probe", 10);
 
     if (!strcmp(c, "ver")) {
         rc = cmd_version();

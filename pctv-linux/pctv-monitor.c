@@ -55,6 +55,8 @@
 #include <alsa/asoundlib.h>
 #include <SDL.h>
 
+#include "pctv-rt.h"
+
 #include "font5x7.h"
 
 #define W 720
@@ -422,8 +424,21 @@ static void child_start(int input)
         /* keep stderr for the driver's diagnostics */
         if (geteuid() == 0 || getenv("PCTV_NO_SUDO"))
             execlp(probe_path, probe_path, "stream", INPUTS[input], NULL);
-        else
-            execlp("sudo", "sudo", "-n", probe_path, "stream", INPUTS[input], NULL);
+        else {
+            /* `sudo -n` runs its env_reset, so PCTV_RT_PRIO (the RT escape
+             * hatch, pctv-rt.h) would die at this boundary and the probe would
+             * silently keep its default class.  Carry it over explicitly. */
+            const char *rt = getenv("PCTV_RT_PRIO");
+            char rtv[32];
+            if (rt) {
+                snprintf(rtv, sizeof rtv, "PCTV_RT_PRIO=%s", rt);
+                execlp("sudo", "sudo", "-n", "env", rtv, probe_path, "stream",
+                       INPUTS[input], NULL);
+            } else {
+                execlp("sudo", "sudo", "-n", probe_path, "stream",
+                       INPUTS[input], NULL);
+            }
+        }
         fprintf(stderr, "pctv-monitor: exec failed: %s\n", strerror(errno));
         _exit(127);
     }
@@ -1715,6 +1730,13 @@ static int cap_start(void)
         dup2(vp[0], STDIN_FILENO);          /* ffmpeg reads the video pipe */
         if (cap_has_audio) dup2(ap[0], 3);  /* ...and the audio pipe on fd 3 */
         close(vp[0]); close(vp[1]); close(ap[0]); close(ap[1]);
+        /* We are SCHED_FIFO, so the encoder inherits it - and an RT encoder on
+         * 2 cores starves the thread feeding it (and PipeWire), which is the
+         * one thing that guarantees a stall.  It is the only stage on the path
+         * that is throughput-bound rather than deadline-bound, so drop it back
+         * to normal scheduling and let the 8 MiB encoder pipe (10 frames) be
+         * its cushion. */
+        pctv_drop_rt("pctv-monitor/ffmpeg");
         execvp(ffmpeg_path, av);
         fprintf(stderr, "pctv-monitor: exec %s failed: %s\n", ffmpeg_path, strerror(errno));
         _exit(127);
@@ -1919,6 +1941,10 @@ int main(int argc, char **argv)
     long capture_secs = 0;
     int gain_pct = -1, boost_step = -1, agc_cli = -1, mon_cli = 0;
     const char *audio_arg = NULL;
+
+    /* Outrank the desktop before SDL, the ALSA capture thread and the probe
+     * exist, so every one of them inherits SCHED_FIFO (pctv-rt.h). */
+    pctv_become_rt("pctv-monitor", 8);
 
     /* input: saved choice, then PCTV_INPUT, then -i/--input (highest priority) */
     if (cfg_read("input", saved, sizeof saved)) {

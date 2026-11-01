@@ -40,6 +40,7 @@ stdenv.mkDerivation {
     fileset = lib.fileset.unions [
       ./probe.c
       ./pctv-monitor.c
+      ./pctv-rt.h
       ./font5x7.h
     ];
   };

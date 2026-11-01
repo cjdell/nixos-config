@@ -125,6 +125,55 @@ in
     # 32 MiB (1.2 s of slack) instead of 1 MiB.
     boot.kernel.sysctl."fs.pipe-max-size" = lib.mkDefault "67108864";
 
+    # ...and the per-user half of the same arithmetic.  `F_SETPIPE_SZ` charges
+    # the buffer to the *user* that created the pipe, against
+    # `fs.pipe-user-pages-soft` (default 16384 pages = 64 MiB, enforced for
+    # unprivileged users only).  pctv-monitor alone asks for 32 MiB (stream) +
+    # 8 MiB (encoder video) + 1 MiB (encoder audio) = 41 MiB, and every other
+    # pipe in the Plasma session - Qt's QProcess pairs, Wayland event fds,
+    # konsole, PipeWire - draws on the same 64 MiB.  When the budget runs out
+    # the request is refused with EPERM and pipe_slack() quietly halves its way
+    # down to 16 MiB (0.6 s) with nothing but one stderr line to say so.  Give
+    # it 256 MiB so the cushion the code asks for is the cushion it gets.
+    boot.kernel.sysctl."fs.pipe-user-pages-soft" = lib.mkDefault "65536";
+
+    # --- never drop a frame: RT scheduling for the capture path --------------
+    #
+    # Buffers only buy time; the guarantee comes from not being preempted.  Both
+    # binaries now ask for SCHED_FIFO at startup (`pctv-linux/pctv-rt.h` for the
+    # reasoning and the per-stage priorities: probe FIFO 10, monitor FIFO 8,
+    # ffmpeg deliberately demoted back to SCHED_OTHER by the monitor because an
+    # RT encoder on a 2-core box starves the thread that feeds it).
+    #
+    # The probe gets there by itself - it runs as root through `sudo -n`.
+    # pctv-monitor runs as the user, and sched_setscheduler(2) to SCHED_FIFO
+    # wants CAP_SYS_NICE or RLIMIT_RTPRIO > 0, so the login limit goes here.
+    # 20 rather than 8 leaves room to raise PCTV_RT_PRIO without another PAM
+    # change.  Needs a fresh login (or reboot) to apply: the value is read by
+    # pam_limits when the session is opened, not by `nixos-rebuild switch`.
+    # To check: `ssh cjdell@localhost 'ulimit -r'` must print 20, and
+    #   ps -c -o pid,cls,rtprio,ni,comm -C pctv-monitor,pctv_probe,ffmpeg
+    # must show `FF` (not `TS`) for the first two and `TS` for ffmpeg.
+    # If RT is ever refused the programs say so on stderr and run anyway, and
+    # PCTV_RT_PRIO=0 switches the whole thing off for an A/B run.
+    security.pam.loginLimits = [
+      {
+        domain = "@wheel";
+        type = "-";
+        item = "rtprio";
+        value = "20";
+      }
+    ];
+
+    # Safety net for that: kernel 7.2 with CONFIG_RT_GROUP_SCHED=n ships with RT
+    # throttling *off* (`sched_rt_runtime_us == sched_rt_period_us`, verified on
+    # this box), so a runaway RT thread used to mean a machine you cannot even
+    # ssh into - and an RT loop is exactly the failure mode an SDL render loop
+    # could reach.  Restore the upstream 95 % cap: the capture path wants ~0.7
+    # of 2 cores, so it cannot bite, and the other 5 % is what keeps a live
+    # session alive if one of these processes ever spins.
+    boot.kernel.sysctl."kernel.sched_rt_runtime_us" = lib.mkDefault "950000";
+
     # `pctv-monitor` is the SDL2 live view + MPEG-2 capture GUI: it spawns
     # pctv_probe, deframes BT.656 to UYVY, shows it, and pipes it - together
     # with the selected ALSA audio input - to ffmpeg for a PAL-DVD-style .mpg.
