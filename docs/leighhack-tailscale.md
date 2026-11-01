@@ -1,6 +1,8 @@
 # The leighhack tailscale bridge (grafton-hackspace-client)
 
-**Status: resolved 2026-10-21.** Three outages: 2026-10-09 → 2026-10-14 (5 days),
+**Status: resolved 2026-10-21; fourth failure 2026-11-01 also resolved — that
+one was the router's own static route, not tailscale.** Three outages:
+2026-10-09 → 2026-10-14 (5 days),
 a 3-hour one on 2026-10-16 caused by the **hackspace's headscale deleting our
 node** — see [2026-10-16: logged out by the control plane](#2026-10-16-logged-out-by-the-control-plane)
 — and 3.5 hours on 2026-10-21, where the same server-side deletion happened
@@ -27,12 +29,17 @@ know when debugging.
 | what it is for | our own machines | the hackspace LAN + their services (`services1` = `10.3.1.1`) |
 
 The VM is a **client** of leighhack and advertises `192.168.49.0/24` (plus an
-exit node) into it. The router reaches the leighhack side through a
-hand-written static route installed by `grafton-hackspace-client-routes.service`:
+exit node) into it. The router reaches the leighhack side through a static
+route **declared on the `lan` network and owned by systemd-networkd**
+(`networking/interface.nix`):
 
 ```
 10.3.0.0/16 via 192.168.49.15 dev lan
 ```
+
+(Not a boot-time script: until 2026-11-01 it was installed once at boot by
+`grafton-hackspace-client-routes.service`, a `RemainAfterExit` oneshot — see
+[2026-11-01: a networkd restart flushed the route](#2026-11-01-a-networkd-restart-flushed-the-route).)
 
 `192.168.49.15` is the VM (`constants.nix: GRAFTON_HACKSPACE_CLIENT_IP`, MAC
 `02:00:00:00:00:15`). No masquerade on the VM's bridge: return traffic to grafton
@@ -492,6 +499,38 @@ the fix failed inside that window — re-run the check. This is also why
 Finally: if the hackspace is tidying up, ask them to **delete the stale
 `grafton-hackspace-client` nodes** from their headscale — every pre-fix restart
 registered a fresh node key, so there are several dead ones.
+
+## 2026-11-01: a networkd restart flushed the route
+
+Fourth failure of the path, and a new failure mode: **the tunnel was healthy
+the whole time.** `10.3.1.20` would not ping; the check script's first line was
+the only honest one — `no route for 10.3.0.0/16` — and everything below it
+("10.3.1.1 unreachable", "ONE-WAY TUNNEL", DNS down) was that one missing route
+wearing three costumes: with no route, the router's `10.3.x` pings fell through
+to the default route and left via `pppoe-zen`, so a router-side one-way test
+cannot distinguish itself from the real 2026-10-14 one-way tunnel.
+
+Root cause: the route was a runtime kernel route *on `lan`*, added once at boot
+by a `Type=oneshot, RemainAfterExit` unit. The 02:18 switch restarted
+systemd-networkd, which **recreated the `lan` bridge** (`lan: netdev ready`),
+and the kernel flushed every route that lived on the link. Nothing re-added it —
+the unit still reported `active (exited)` and only ran at boot. `hackspace-tunnel-check`
+named the layer within two minutes (`DOWN: route 10.3.0.0/16 is not installed`)
+but deliberately heals nothing, so it paged for 17 h across five switches.
+
+**Fix:** the route is now declared as a networkd route on the `100-lan` network
+(`networking/interface.nix`, with `GatewayOnLink` so a not-yet-started VM never
+blocks installation), which networkd re-installs every time it configures `lan`
+— including when it *is* the switch that recreates the bridge. The oneshot unit
+is deleted; do not move it back. Interim recovery, if this ever recurs:
+`systemctl restart systemd-networkd`.
+
+The October hardening all worked as designed here — BackendState, secrets
+share, disk and tunnel were green, and the timer named the failing layer
+immediately. The lesson is narrower: **a route installed by script is
+undocumented kernel state; anything that recreates its link silently owns its
+life.** Anything else this host installs by `ip route add` at boot deserves the
+same audit.
 
 ## Related
 

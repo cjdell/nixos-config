@@ -8,8 +8,10 @@
 #   * the leighhack tailnet — coordination server https://tailscale.leighhack.org
 #     (the hackspace's headscale). Reached ONLY through the
 #     grafton-hackspace-client microVM, which advertises 192.168.49.0/24 there
-#     and accepts its routes; the host reaches it via a hand-written
-#     `ip route 10.3.0.0/16 via 192.168.49.15` (grafton-hackspace-client-routes).
+#     and accepts its routes; the host reaches it via a static route declared
+#     on the lan network (`10.3.0.0/16 via 192.168.49.15`, networkd, see
+#     networking/interface.nix — 2026-11-01: it must stay networkd-owned, a
+#     boot-time `ip route add` was flushed when networkd recreated the bridge).
 #
 # So "tailscale is fine" (`tailscale status` looks healthy!) says nothing about
 # leighhack, which is why this outage was invisible for days. `*.int.leighhack.org`
@@ -137,8 +139,8 @@ hdr "1. route into the hackspace bridge"
 if ip route show 10.3.0.0/16 | grep -q .; then
   ok "10.3.0.0/16 routed: $(ip route show 10.3.0.0/16 | head -1)"
 else
-  bad "no route for 10.3.0.0/16 — grafton-hackspace-client-routes.service did not install it"
-  note "systemctl status grafton-hackspace-client-routes.service"
+  bad "no route for 10.3.0.0/16 — networkd is not installing the route declared on 100-lan"
+  note "systemctl status systemd-networkd; the route lives in networking/interface.nix (2026-11-01: a boot-time ip-route-add lost to a networkd restart left this black-holed for 17 h)"
 fi
 
 hdr "2. the microVM"
@@ -266,7 +268,8 @@ fi
 cat <<'EOF'
 
   Next step depends on the first FAIL above:
-    route    systemctl restart grafton-hackspace-client-routes
+    route    networkctl reconfigure lan   # networkd owns the route (networking/interface.nix);
+                                          # if even that disagrees, systemctl restart systemd-networkd
     vm       systemctl status microvm@grafton-hackspace-client
     session  the VM re-joins itself (hackspace-tailscale-ensure, 1 min). If it is
              still NeedsLogin the re-join itself is failing, and the unit now says

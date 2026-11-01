@@ -1,5 +1,6 @@
 let
   net = import ./constants.nix;
+  constants = import ../constants.nix;
 in
 {
   systemd.network = {
@@ -92,6 +93,23 @@ in
         ];
         dns = [ net.LAN_IPV4 ];
         domains = [ "grafton.lan" ];
+        routes = [
+          {
+            # Route into the leighhack tailnet via the grafton-hackspace-client
+            # VM (docs/leighhack-tailscale.md). networkd must OWN this: it used
+            # to be added once at boot by grafton-hackspace-client-routes.service,
+            # and on 2026-11-01 a switch that restarted systemd-networkd had it
+            # recreate the lan bridge — the kernel then flushed the runtime route
+            # with it, black-holing 10.3.0.0/16 via the WAN default route for
+            # 17 h while the oneshot sat "active (exited)" forever. A declared
+            # route is re-installed every time networkd configures lan.
+            Destination = net.HACKSPACE_SUBNET;
+            Gateway = constants.GRAFTON_HACKSPACE_CLIENT_IP;
+            # The VM's tap may come up after lan (boot, or a VM restart);
+            # installing the route must not depend on the gateway answering.
+            GatewayOnLink = true;
+          }
+        ];
       };
 
       # Experimental VLAN

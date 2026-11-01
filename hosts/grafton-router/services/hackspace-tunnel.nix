@@ -94,7 +94,7 @@ let
 
         # Name the layer that failed, so the reader knows where to start.
         if [ "$route" = missing ]; then
-          where="route 10.3.0.0/16 is not installed (grafton-hackspace-client-routes.service)"
+          where="route 10.3.0.0/16 is not installed (networkd route on 100-lan, see networking/interface.nix; restart systemd-networkd)"
         elif [ "$vm" = down ]; then
           where="microVM grafton-hackspace-client ($VM_IP) does not answer ping"
         else
