@@ -50,6 +50,12 @@
       # Fixed sshd host key for the grafton-hackspace-client microVM (mounted
       # into the VM's /run/secrets; baked into /var/secrets at activation).
       vm_host_key = { };
+      # Friend tunnel experiment (services/friend-tunnel.nix +
+      # virtual-machines/friend-router.nix): the two wg-friend private halves
+      # and the VM's base64-encoded sshd host key.
+      friend_tunnel_wg_key = { };
+      friend_router_wg_key = { };
+      friend_vm_host_key = { };
     };
   };
 }

@@ -104,6 +104,11 @@ in
           icmp type echo-request limit rate 10/second accept comment "allow ping (rate limited)"
           icmpv6 type != { nd-redirect, 139 } accept comment "Accept all ICMPv6 except redirects and node info queries (type 139). See RFC 4890, section 4.4."
 
+          # --- Friend tunnel experiment ------------------------------------------------
+          # AdGuard serves RDNSS :49::1 to the friend's LAN devices; their queries
+          # arrive decapsulated from wg-friend, destined for us (INPUT, not FORWARD).
+          iifname wg-friend ip6 saddr ${c.FRIEND_V6_SUBNET} udp dport ${toString c.DNS_PORT} accept comment "friend DNS (tunnel experiment)"
+
           # --- DHCPv6 — router is a DHCPv6 *client* on the WAN ------------------------
           # Prefix delegation from the ISP (see pppoe.nix) arrives on UDP 546 (client
           # port), sourced from the server port 547.
@@ -189,6 +194,23 @@ in
           ip6 saddr ${c.DBTHR33_SUBNET}   accept comment "DBTHR33 trusted network"
           ip6 saddr ${c.HACKSPACE_IPV6_SUBNET} accept comment "Hackspace IPv6 trusted network"
 
+          # --- Friend tunnel experiment (services/friend-tunnel.nix) -------------------
+          # Inbound to the shared /64: from the internet (pppoe) and hairpin-ish
+          # from the LAN (so we can demo it from home boxes).
+          iifname ${c.WAN_INTERFACE} ip6 daddr ${c.FRIEND_V6_SUBNET} accept comment "friend /64 inbound from internet"
+          iifname ${c.LAN_INTERFACE} ip6 daddr ${c.FRIEND_V6_SUBNET} accept comment "friend /64 from LAN (demo path)"
+
+          # Management: LAN may reach the VM's strict-side address (SSH).
+          iifname ${c.LAN_INTERFACE} ip daddr ${c.STRICT_SUBNET} accept comment "LAN to strict-sim (VM management)"
+
+          # The strict-ISP simulation itself: the VM may transit ONLY TCP/443
+          # (its wss dial terminates on us = INPUT, exempt by design, same as
+          # any browser reaching a web server through the ISP). Everything else
+          # from that bridge is refused, explicitly, so the demo has a
+          # reject-with-message instead of a silent policy drop.
+          iifname ${c.STRICT_INTERFACE} tcp dport ${toString c.HTTPS_PORT} accept comment "strict sim: TCP/443 transit only"
+          iifname ${c.STRICT_INTERFACE} reject with icmpx type admin-prohibited comment "strict sim: everything else denied"
+
           # ICMP
           icmp type echo-request accept comment "allow ping"
           icmpv6 type != { nd-redirect, 139 } accept comment "Accept ICMPv6 except redirects and queries"
@@ -224,6 +246,10 @@ in
           # Tailscale out
           iifname ${c.TAILSCALE_INTERFACE} oifname ${c.WAN_INTERFACE} masquerade comment "Tailscale to FTTP"
           iifname ${c.TAILSCALE_INTERFACE} oifname ${c.LAN_INTERFACE} masquerade comment "Tailscale to LAN"
+
+          # Strict-ISP simulation: the friend VM is behind double NAT, v4 only
+          # (and the one allowed transit is TCP/443 in forward-allow).
+          iifname ${c.STRICT_INTERFACE} oifname ${c.WAN_INTERFACE} masquerade comment "strict sim: CGNAT the friend VM"
 
           # LAN traffic to remote tailnets (Grafton + Hackspace) — masquerade so
           # replies come back via us instead of the remote network's routes

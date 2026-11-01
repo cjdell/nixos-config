@@ -1,3 +1,6 @@
 {
-  imports = [ ./grafton-hackspace-client.nix ];
+  imports = [
+    ./friend-router.nix
+    ./grafton-hackspace-client.nix
+  ];
 }

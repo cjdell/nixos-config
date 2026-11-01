@@ -45,6 +45,16 @@ in
         };
         vlanConfig.Id = 10;
       };
+
+      # The simulated strict ISP link for the friend-router microVM
+      # (services/friend-tunnel.nix). Its uplink tap rs-friend-up is enslaved
+      # below; deliberately NOT named vm-*, which the lan bridge would eat.
+      "120-strict" = {
+        netdevConfig = {
+          Kind = "bridge";
+          Name = net.STRICT_INTERFACE;
+        };
+      };
     };
 
     networks = {
@@ -99,6 +109,31 @@ in
         };
         address = [
           "${net.VLAN10_IPV4}/24"
+        ];
+      };
+
+      # friend-router VM uplink -> br-strict (strict-ISP simulation).
+      # The microvm host module creates rs-friend-up at VM start; networkd
+      # enslaves it on the ensuing link event.
+      "115-strict-up" = {
+        matchConfig.Name = "rs-friend-up";
+        networkConfig = {
+          DHCP = false;
+        };
+        bridge = [ net.STRICT_INTERFACE ];
+      };
+
+      "120-strict" = {
+        matchConfig.Name = net.STRICT_INTERFACE;
+        linkConfig.RequiredForOnline = "no";
+        networkConfig = {
+          DHCP = false;
+          # v4-only "ISP": no RA, no SLAAC — the friend gets CGNAT like the
+          # real strict upstream gives him, and v6 only ever via the tunnel.
+          IPv6AcceptRA = false;
+        };
+        address = [
+          "${net.STRICT_IPV4}/24"
         ];
       };
 

@@ -70,4 +70,33 @@ rec {
   LAN_DHCP_V4_RANGE = "192.168.49.101,192.168.49.200";
   VLAN10_DHCP_V4_RANGE = "192.168.10.101,192.168.10.200";
   DHCP_LEASE_TIME = "1h";
+
+  # ---------------------------------------------------------------------------
+  # Friend tunnel experiment (services/friend-tunnel.nix + the friend-router
+  # microVM). Sharing one /64 of our delegated /48 with a friend behind a
+  # strict, web-traffic-only ISP: WireGuard rides a UDP tunnel inside a
+  # WebSocket to $FRIEND_TUNNEL_HOST, which nginx proxies to the wstunnel
+  # server on loopback. The microVM sits on $STRICT_INTERFACE, a bridge whose
+  # only transit allowance is TCP/443 — the simulated strict ISP.
+  # ---------------------------------------------------------------------------
+  STRICT_INTERFACE = "br-strict"; # simulated strict-ISP link to the friend VM
+  STRICT_IPV4 = "192.168.99.1"; # router side of the strict link
+  STRICT_SUBNET = "192.168.99.0/24";
+  FRIEND_ROUTER_IP = "192.168.99.2"; # friend-router VM "WAN" (v4, NATed)
+  FRIEND_V6_SUBNET = "2a02:8010:6680:f0::/64"; # the shared /64 from our /48
+  FRIEND_V6_ROUTER = "2a02:8010:6680:f0::1"; # wg-friend on the router
+  FRIEND_V6_VM = "2a02:8010:6680:f0::2"; # wg-friend on the friend VM
+  FRIEND_V6_DEV = "2a02:8010:6680:f0::10"; # static token addr on the VM's demo device
+  WSTUNNEL_PORT = 8087; # wstunnel server, loopback only (nginx fronts it on 443)
+  WG_FRIEND_PORT = 51830; # wg-friend's listen port (51820 is wg0's)
+  FRIEND_TUNNEL_HOST = "homerail.home.chrisdell.info"; # edge name the client dials (wildcard cert covers it)
+  # Shared-secret WebSocket upgrade path. NOT the auth story (WG keys are);
+  # it just keeps random wstunnel clients off the endpoint. Committed on
+  # purpose: nginx `location` cannot read a sops value at runtime.
+  FRIEND_TUNNEL_WS_PREFIX = "hrx9KqL2tWm4Zd7VbN";
+
+  # Public halves of the wg-friend keypair. The private halves are sops
+  # secrets friend_tunnel_wg_key (router) and friend_router_wg_key (VM).
+  FRIEND_TUNNEL_WG_PUBKEY = "P3SQVFg2RFF0e3YDbrKwJLrHiV2Z65U9Bap5YpW9gDA=";
+  FRIEND_ROUTER_WG_PUBKEY = "dVV0xEAiDqiYW3oatJ5oTKQP5aDADXYUWDoSvY4qoCk=";
 }
