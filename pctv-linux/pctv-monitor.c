@@ -1638,12 +1638,21 @@ static int pipe_write(int fd, const void *p, size_t n, int msecs, size_t *done)
 #define AQ_BYTES (1u << 20)
 static unsigned char *aq;
 static size_t aq_head, aq_count, aq_sent;  /* aq_sent = reserved, being written */
+/* The clock the video is paced on: bytes of audio that will end up in the file,
+ * = accepted minus evicted, read at 192 B/ms.  Deliberately NOT "bytes written to
+ * the pipe": a program-stream muxer that is waiting for video stops reading
+ * fd 3, so a clock derived from writes would be waiting for the very frame it is
+ * holding back.  Accepted-minus-evicted still tracks the file's audio content
+ * exactly (an eviction is precisely a sample the file will not contain), and it
+ * can never stall on the encoder. */
+static unsigned long long aq_seq, aq_evict;
 static volatile int aq_closed;            /* drain in progress: refuse more */
 static volatile unsigned long cap_alast_ms;  /* last byte arrived (wall ms) */
 
 static void aq_reset(void)
 {
     aq_head = aq_count = aq_sent = 0;
+    aq_seq = aq_evict = 0;
     cap_alast_ms = 0;
     aq_closed = 0;
 }
@@ -1673,6 +1682,7 @@ static void cap_feed_audio(const void *p, size_t n)
         lost = need - ev;                           /* oldest gone, then truncate */
         if (lost > n) lost = n;
         n -= lost;
+        aq_evict += ev + lost;      /* the file will not contain these samples */
     }
     if (n) {
         size_t tail = (aq_head + aq_count) % AQ_BYTES;
@@ -1680,6 +1690,7 @@ static void cap_feed_audio(const void *p, size_t n)
         memcpy(aq + tail, p, first);
         if (n > first) memcpy(aq, (const unsigned char *)p + first, n - first);
         aq_count += n;
+        aq_seq += n;
         pthread_cond_broadcast(&vq_cv);
     }
     pthread_mutex_unlock(&vq_mtx);
@@ -1692,24 +1703,35 @@ static void cap_feed_audio(const void *p, size_t n)
 }
 
 /* ---- video queue -------------------------------------------------------
- * One slot per assembled frame.  12 slots = 480 ms of phase buffer; one of them
- * is always reserved for the frame the writer owns, so at most 10 queue up
- * behind it.  The only way to lose a picture then is to evict the oldest
- * deliberately, counted as cap_vskips.  The producer can never touch the
- * reserved slot: occupancy stays <= VQ_SLOTS-1, so head+count never reaches the
- * slot the writer popped (or evicted past) before it. */
-#define VQ_SLOTS 12
-static unsigned char *vq[VQ_SLOTS];
-static int vq_head, vq_count;         /* frames queued, excluding the one held */
-static int vq_held = -1;              /* slot the writer owns (also the dup src) */
+ * One slot per assembled frame.  24 slots by default = 960 ms of phase buffer
+ * (PCTV_VQ_SLOTS changes it; VQ_SLOTS_MAX is the ceiling, and each slot costs one
+ * 829 KB UYVY frame, so 32 = 27 MB).  One slot is always reserved for the frame
+ * the writer owns, so vq_n-2 frames can queue behind it, and the only way to lose
+ * a picture is to evict the oldest deliberately - counted as cap_vskips.  The
+ * producer can never touch the reserved slot: occupancy stays <= vq_n-1, so
+ * head+count never reaches the slot the writer popped.
+ *
+ * Why it is deeper than the 4 frames this used to be: fed on arrivals, the queue
+ * is no longer a smoothing buffer, it is the *only* thing between an FFmpeg hiccup
+ * and a lost picture.  On a grainy tape FFV1 encoding runs at about 1.0x on this
+ * Core 2 Duo and stalls in bursts; at 10 slots those bursts evicted ~20 frames a
+ * minute, at 24 they do not.  If it still evicts, the encoder is genuinely slower
+ * than real time and no depth saves it - that is what `--master uyvy` (a memcpy,
+ * structurally incapable of falling behind) is for. */
+#define VQ_SLOTS_MAX 32
+#define VQ_SLOTS_DEFAULT 24
+static unsigned char *vq[VQ_SLOTS_MAX];
+static int vq_n = VQ_SLOTS_DEFAULT;    /* runtime depth, clamped in main() */
+static int vq_head, vq_count;          /* frames queued, excluding the one held */
+static int vq_held = -1;               /* slot the writer owns (also the dup src) */
 static int vq_stop, vq_started;
 static pthread_t vq_thr;
-static unsigned long vq_next;         /* writer's next feed deadline, master ms */
-static int vq_slot = -1;              /* frame in flight to ffmpeg, -1 = none */
+static unsigned long vq_next;          /* writer's next feed deadline, master ms */
+static unsigned long vq_anchor;        /* wall ms when the first audio byte came */
+static int vq_slot = -1;               /* frame in flight to ffmpeg, -1 = none */
 static size_t vq_off;
 static int vq_slot_dup;
-#define VQ_GRACE_MS 30                  /* be late rather than duplicate */
-static unsigned long vq_anchor;       /* wall ms when the first audio byte came */
+#define VQ_GRACE_MS 30                 /* be late rather than duplicate */
 
 /* Producer: one assembled frame in fuv => exactly one slot.  Never blocks,
  * never waits for the encoder. */
@@ -1718,13 +1740,13 @@ static void cap_feed_video(void)
     if (!vq_started) return;
     int evicted = 0;
     pthread_mutex_lock(&vq_mtx);
-    if (vq_count + (vq_held >= 0 ? 1 : 0) >= VQ_SLOTS - 1) {
-        vq_head = (vq_head + 1) % VQ_SLOTS;   /* drop the OLDEST: the newest
+    if (vq_count + (vq_held >= 0 ? 1 : 0) >= vq_n - 1) {
+        vq_head = (vq_head + 1) % vq_n;   /* drop the OLDEST: the newest
                                                * picture is the one to keep */
         vq_count--;
         evicted = 1;
     }
-    int tail = (vq_head + vq_count) % VQ_SLOTS;
+    int tail = (vq_head + vq_count) % vq_n;
     if (!vq[tail]) { pthread_mutex_unlock(&vq_mtx); return; }
     memcpy(vq[tail], fuv, UV_SIZE);
     vq_count++;
@@ -1748,12 +1770,11 @@ static unsigned long cap_master_ms(int *audio_alive)
     if (audio_alive) *audio_alive = 0;
     if (!cap_has_audio) return now;
 
-    unsigned long long ab;
-    unsigned long alast;
-    pthread_mutex_lock(&cap_mtx);
-    ab = cap_abytes;
-    pthread_mutex_unlock(&cap_mtx);
+    unsigned long long ab, alast;
+    pthread_mutex_lock(&vq_mtx);
+    ab = aq_seq - aq_evict;                           /* audio the file will hold */
     alast = cap_alast_ms;
+    pthread_mutex_unlock(&vq_mtx);
 
     unsigned long long bpm = aq_bytes_per_ms();
     if (!bpm || !ab) return now;
@@ -1766,6 +1787,11 @@ static unsigned long cap_master_ms(int *audio_alive)
 static void *vq_thread(void *unused)
 {
     int audio_logged = 0;
+    int saw_capture = 0;            /* cap_on has been seen on: it is a teardown,
+                                     * not the few milliseconds between starting
+                                     * the writer thread and cap_start() setting
+                                     * cap_on (clearing the rings there would
+                                     * silently shave the head off the audio). */
     for (;;) {
         /* Wait for work.  The bounded nap IS the writer's clock (5 ms when there
          * is something to do, 20 ms when idle); the queue is what makes its
@@ -1788,9 +1814,20 @@ static void *vq_thread(void *unused)
         int vfd, afd;
         if (cap_get(&vfd, &afd) < 0) {         /* capture ended / encoder died */
             if (stopping) break;
+            /* Nothing can be written any more (cap_died() has already said so),
+             * but the frames keep arriving.  Release them here rather than let
+             * the queue fill up: a dead encoder used to be reported as thousands
+             * of `skip's, which reads like the capture path lost the tape. */
+            if (saw_capture) {
+                pthread_mutex_lock(&vq_mtx);
+                vq_head = 0; vq_count = 0; vq_held = -1;
+                aq_head = aq_count = aq_sent = 0;
+                pthread_mutex_unlock(&vq_mtx);
+            }
             usleep(20000);
             continue;
         }
+        saw_capture = 1;
 
         /* ---- audio first: it is small, and the video write below can block.
          * Bounded per pass (4 x 64 KiB): an infinite drain loop is how this
@@ -1810,28 +1847,38 @@ static void *vq_thread(void *unused)
             } else first = 0;
             pthread_mutex_unlock(&vq_mtx);
             if (!n) break;
-            size_t d1 = 0, d2 = 0;
+            size_t d1 = 0, d2 = 0, written = 0;
             int st = pipe_write(afd, b, first, 3000, &d1);
-            if (st == 0 && n > first) st = pipe_write(afd, b + first, n - first, 3000, &d2);
+            written = d1;
+            if (st == 0 && n > first) {
+                st = pipe_write(afd, b + first, n - first, 3000, &d2);
+                written += d2;
+            }
+            /* Release only what reached the pipe.  This matters: a program-stream
+             * muxer that is waiting for VIDEO stops reading fd 3, so "the audio
+             * write did not finish" is what an encoder running at about 1.0x looks
+             * like from here - and the old code answered it by declaring the encoder
+             * dead, throwing the samples away and ending a healthy capture.  Keep the
+             * bytes: the 5.5 s ring in front is where that backlog belongs, and if it
+             * really fills, cap_feed_audio's eviction counts the loss. */
             pthread_mutex_lock(&vq_mtx);
             aq_sent = 0;
-            /* Whatever the pipe did not take is gone with the reservation: getting
-             * here means ffmpeg has stopped reading at all, and holding the tail
-             * back would need the ring to keep bytes it has already released. */
-            aq_head = (aq_head + n) % AQ_BYTES;
-            aq_count -= n;
+            aq_head = (aq_head + written) % AQ_BYTES;
+            aq_count -= written;
             pthread_mutex_unlock(&vq_mtx);
-            if (st != 0) {
+            if (written) {
                 pthread_mutex_lock(&cap_mtx);
-                cap_adrops++; cap_adrop_bytes += n;
+                cap_abytes += written;
+                pthread_mutex_unlock(&cap_mtx);
+            }
+            if (st == -1) {          /* the reader is gone: EPIPE, EBADF */
+                pthread_mutex_lock(&cap_mtx);
+                cap_adrops++; cap_adrop_bytes += n - written;
                 pthread_mutex_unlock(&cap_mtx);
                 cap_died();
                 break;
             }
-            pthread_mutex_lock(&cap_mtx);
-            cap_abytes += n;
-            pthread_mutex_unlock(&cap_mtx);
-            if (n < 65536) break;
+            if (written < n) break;  /* behind, not dead: try again next pass */
         }
 
         /* ---- video: pop one frame on the master clock */
@@ -1872,7 +1919,7 @@ static void *vq_thread(void *unused)
             pthread_mutex_lock(&vq_mtx);
             if (vq_count > 0) {
                 vq_held = vq_head;                   /* the old one is released */
-                vq_head = (vq_head + 1) % VQ_SLOTS;
+                vq_head = (vq_head + 1) % vq_n;
                 vq_count--;
                 slot = vq_held;
             } else if (vq_held >= 0) {
@@ -1908,6 +1955,12 @@ static void *vq_thread(void *unused)
                 pthread_mutex_unlock(&cap_mtx);
                 vq_slot = -1; vq_off = 0;
                 cap_died();
+            } else if (stopping) {
+                /* Draining: a frame that will not fit in 3 s is not going to fit,
+                 * and shutdown must not queue up behind a stalled encoder. */
+                pthread_mutex_lock(&cap_mtx); cap_vdrops++;
+                pthread_mutex_unlock(&cap_mtx);
+                vq_slot = -1; vq_off = 0;
             }
             /* st == -2: ffmpeg is behind. Keep the half-written frame and carry on
              * - the ring in front is what a real backlog belongs in. */
@@ -1922,9 +1975,9 @@ static void *vq_thread(void *unused)
  * would have nowhere to go. */
 static int vq_start(void)
 {
-    for (int i = 0; i < VQ_SLOTS; i++)
+    for (int i = 0; i < vq_n; i++)
         if (!vq[i]) vq[i] = malloc(UV_SIZE);
-    for (int i = 0; i < VQ_SLOTS; i++)
+    for (int i = 0; i < vq_n; i++)
         if (!vq[i]) return -1;
     if (!aq) { aq = malloc(AQ_BYTES); if (!aq) return -1; }
     aq_reset();
@@ -2021,7 +2074,13 @@ static int cap_start(void)
     snprintf(br, sizeof br, "%dk", mpeg2_kbps);
     snprintf(ar, sizeof ar, "%d", audio_rate);
 
-    char *av[48]; int n = 0;
+    /* 64 slots, and the count is checked below: 48 looked like plenty until
+     * -fps_mode pushed the DVD branch to exactly 49 argv entries and the NULL
+     * terminator landed past the end of the array.  gcc -O0/-O2 disagree about
+     * what that breaks - the nix-built binary then handed ffmpeg `-s ""` and died
+     * with `Unable to parse "video_size" option value ""`, while the locally
+     * built one happened to work.  Build the way it ships. */
+    char *av[64]; int n = 0;
     av[n++] = ffmpeg_path;
     av[n++] = "-y";
     av[n++] = "-loglevel"; av[n++] = "error";
@@ -2112,6 +2171,17 @@ static int cap_start(void)
     }
     av[n++] = cap_path;
     av[n] = NULL;
+    if (n + 1 >= (int)(sizeof av / sizeof av[0])) {
+        fprintf(stderr, "pctv-monitor: internal error: ffmpeg argument array full "
+                        "(%d entries) - not capturing\n", n);
+        close(vp[0]); close(vp[1]); close(ap[0]); close(ap[1]);
+        return -1;
+    }
+    if (getenv("PCTV_FFMPEG_DEBUG")) {     /* the whole line, quotes and all */
+        fputc('[', stderr);
+        for (int i = 0; i < n; i++) fprintf(stderr, " %s", av[i]);
+        fprintf(stderr, " ] -> %d entries\n", n + 1);
+    }
 
     pid_t pid = fork();
     if (pid < 0) { close(vp[0]); close(vp[1]); close(ap[0]); close(ap[1]); return -1; }
@@ -2475,6 +2545,16 @@ int main(int argc, char **argv)
     if (access(probe_path, X_OK) != 0)
         snprintf(probe_path, sizeof probe_path, "pctv_probe");
 
+    /* Capture queue depth: 24 frames = 960 ms of cushion in front of FFmpeg by
+     * default.  Raise it (to 32) if a lossless master still evicts frames, lower
+     * it if this box ever needs the 20 MB of RAM back. */
+    {   const char *s = getenv("PCTV_VQ_SLOTS");
+        if (s) {
+            int n = atoi(s);
+            vq_n = n < 4 ? 4 : (n > VQ_SLOTS_MAX ? VQ_SLOTS_MAX : n);
+        }
+    }
+
     cfg_write("input", INPUTS[cur_input]);
     /* AGC: command line, then the saved choice, else on */
     if (agc_cli >= 0) agc_on = agc_cli;
@@ -2772,7 +2852,7 @@ int main(int argc, char **argv)
             int qd = vq_count;
             pthread_mutex_unlock(&vq_mtx);
             snprintf(l2, sizeof l2, "audio %s  q %d/%d  %s clock",
-                     cap_has_audio ? srcs[cur_src].label : "OFF", qd, VQ_SLOTS - 2,
+                     cap_has_audio ? srcs[cur_src].label : "OFF", qd, vq_n - 2,
                      cap_clock_audio ? "audio" : "wall");
             lines[0] = l1; lines[1] = l2;
             int wpx = text_w(l1, 1) > text_w(l2, 1) ? text_w(l1, 1) : text_w(l2, 1);
@@ -2820,7 +2900,7 @@ int main(int argc, char **argv)
                                 "audio %s ok=%d L %.1f R %.1f pk %.1f clips %u gain %+.1f dB\n",
                         title, bytes_in, rlen, gap_max,
                         stage_name[0], stage_max[0], stage_name[1], stage_max[1],
-                        stage_name[2], stage_max[2], qdbg, VQ_SLOTS - 2,
+                        stage_name[2], stage_max[2], qdbg, vq_n - 2,
                         cap_vrepeats, cap_vskips,
                         frames_held, frames,
                         srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],

@@ -285,10 +285,28 @@ creeps ahead of the speech: exactly "up to a second out, sometimes".
 
 **A 120 s capture of a moving tape, old code:** 2991 frames written, of which
 `374` were `repeated` (12.5 %), while ~375 freshly assembled frames never
-reached the file at all - and nothing counted that second direction.  Decoding
-the file and comparing neighbouring frames at 80x60 grey: **17.9 % of consecutive
-frame pairs are near-identical** (mean abs diff 2.24, against 11.30 for real
-motion).  One frame in five-and-a-bit is the previous one again.
+reached the file at all - and nothing counted that second direction.  Corroboration
+from the artifact (decode at 80x60 grey, compare neighbouring frames): 17.9 % of
+consecutive frame pairs in that file are near-identical, mean abs diff 2.24
+against 11.30 for real motion - read with the caveat in "how to check a capture",
+because a still scene on tape looks the same way.  The counters said 12.5 % on
+their own.
+
+### The clean A/B (same tape, consecutive minutes, same box)
+
+| | old binary | new binary |
+| --- | --- | --- |
+| frames assembled (fields / 2) | 1509 | 1483 |
+| frames written | 1508 | **1483** |
+| duplicates (`dup`) | **149 = 9.9 %** | **2 = 0.13 %** |
+| assembled but never written | ~150 = 10 % *(inferred, uncounted)* | **0** |
+| video vs audio stream duration | 60.320 / 60.264 s | 59.320 / **59.328** s |
+| stream-queue drops | 0 | 0 |
+
+`frames written == frames assembled` is the property that matters: every picture
+the decoder delivered reached the file exactly once.  The old binary could not say
+that in either direction - it counted the duplicates and not the overwrites, and
+the two together were a fifth of a minute of tape.
 
 ### The cause
 
@@ -310,27 +328,51 @@ MBaud / 1728 B / 625 lines), so no fixed offset between them survives a tape.
    event (`skip`).
 2. **The clock moved to the consumer and onto the audio stream.** One writer
    thread owns every write to ffmpeg and pops one frame per 40 ms **of audio
-   track** (`cap_abytes / 192`), not of host time - because that byte count *is*
-   the file's audio timeline, so feeding frame k when the audio reaches 40 ms x k
-   makes the two streams in one file consistent by construction. With no audio it
-   falls back to the wall clock, and after a 1 s audio stall too.
+   track**, not of host time - because that timeline *is* what the file's PTS ramp
+   encodes, so frame k lands where the audio says 40 ms x k and the two streams in
+   one file are consistent by construction.  The clock is `accepted - evicted`
+   samples, deliberately not "bytes written": a program-stream muxer waiting for
+   video stops reading fd 3, so a clock derived from writes waits on the very frame
+   it is holding back.  With no audio, and after a 1 s audio stall, it falls back
+   to the wall clock.
 3. **Be late rather than duplicate:** a queued frame goes out the moment it
    exists (no aligning to a boundary), and a duplicate is only written 30 ms after
    the deadline passed with nothing queued.
 4. **Audio is queued too** (1 MiB = 5.5 s) instead of `O_NONBLOCK`-and-drop, the
    capture PCM asks for 60 ms of latency instead of 20 ms, and both encoder pipes
    are non-blocking with `pipe_write()` resuming a partial frame - rawvideo has no
-   framing, so half a frame is not a lost frame but a corrupted stream.
+   framing, so half a frame is not a lost frame but a corrupted stream.  Bytes the
+   pipe would not take stay in the ring: that is an encoder running late, not a
+   dead one (see the traps).  The video ring is 24 frames = 960 ms by default,
+   `PCTV_VQ_SLOTS=4..32`.
 5. **The probe no longer destroys data on EAGAIN**: the libusb callback fills a
    64 MiB ring (2.4 s) and a writer thread drains stdout, so a slow consumer costs
    latency instead of 32 KiB of BT.656 per hiccup. `PCTV_STREAM_BUF=<MiB>`, `=0`
    restores the old behaviour for an A/B run.
 
-**A 60 s capture, new code:** 1509 frames written, `dup 1`, `skip 0`, queue
-high-water 1, 0 stream drops; video 60.360 s against audio 60.336 s (one mp2
-frame); and **0.00 %** near-identical consecutive frames, mean abs diff 11.30.
+**60 s after:** 1509 frames written, `dup 1`, `skip 0`, queue high-water 1, 0
+stream drops; video 60.360 s against audio 60.336 s (one mp2 frame), both streams
+starting at PTS 0.000000 - no offset and no accumulation.  **300 s after:** 7515
+frames, `dup 39` (0.5 %), `skip 1`, 0 drops of any kind - and those 39 line up
+with the 74 *stale-field feeds*, the times the decoder itself delivered the same
+field parity twice.  That is the floor: a card that drops a field costs one
+repeated frame, and no buffering prints a picture that was never sent.
 
-### Two traps that cost an hour each
+**All three masters, store-built binary:**
+
+| mode | length | frames | dup | skip | queue max | drops |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dvd` (mpeg2 6 Mbps) | 60 s | 1509 | 4 | 0 | 1 | 0 |
+| `ffv1` (lossless, 422 MB) | 60 s | 1509 | 3 | 0 | 1 | 0 |
+| `uyvy` (uncompressed, 948 MB) | 45 s | 1132 | 4 | 0 | 1 | 0 |
+
+Frames written equals fields assembled in every one.  FFV1 kept up on this tape
+(7 MB/s out) with the queue never even filling; an earlier build fell behind in
+bursts on a grainier passage, which is what the deeper ring and the `skip` counter
+are for - if `skip` climbs, the encoder is slower than real time and `--master
+uyvy` (a memcpy) is the mode that structurally cannot be.
+
+### Traps that cost an hour each
 
 * **The writer must not count its duplicate source as "work".** It holds the last
   frame so it can re-send it when the card has not produced a new one; treating
@@ -342,13 +384,25 @@ frame); and **0.00 %** near-identical consecutive frames, mean abs diff 11.30.
   never send, which deadlocks the muxer against the writer.
 * `pthread_cond_timedwait` times out on **CLOCK_REALTIME**; build the abstime with
   `clock_gettime(CLOCK_REALTIME, ...)`, not `CLOCK_MONOTONIC`.
+* **A stalled encoder is not a dead encoder.** An intermediate version called
+  `cap_died()` when an audio write did not finish in 3 s - and a muxer waiting for
+  video does exactly that, so an FFV1 capture at about 1.0x died at 42 s with
+  "encoder went away", with nothing from ffmpeg because nothing crashed.  Bytes
+  the pipe will not take now stay queued, `-1` means EPIPE and only EPIPE, and the
+  counters say what actually happened.
+* `char *av[48]` with 49 entries writes the NULL off the end of the stack, and it
+  **only showed up in the nix-built binary** (`ffmpeg ... -s ""` →
+  `Unable to parse "video_size" option value ""`), not in the hand-built one.  The
+  array is 64 now and `PCTV_FFMPEG_DEBUG=1` prints the whole command line; build
+  the way it ships before believing a capture works.
 
 ### How to check a capture
 
 ```
 PCTV_VERBOSE=1 pctv-monitor ...      # per second: q <depth> dup N skip N
 pctv-field-order FILE                # what the file claims about field order
-ffprobe -show_entries stream=codec_type,duration -of default=nw=1 FILE
+ffprobe -show_entries stream=codec_type,duration,nb_read_packets \
+        -count_packets -of default=nw=1 FILE     # video packets == fields/2
 ```
 
 The line at the end of a capture is the summary: a clean one reads
@@ -356,6 +410,15 @@ The line at the end of a capture is the summary: a clean one reads
 only if the card and the host actually disagree; anything else is a regression.
 Compare the two stream durations the same way: they should agree to one audio
 frame (24 ms mp2, 1 ms pcm), not to seconds.
+
+And do **not** try to measure dropped or duplicated frames by pixel-comparing
+decoded frames.  Decoding to 80x60 grey and calling a consecutive pair identical
+when the mean difference is under ~1.5/255 works in principle and misleads badly
+in practice on VHS: a still scene, a pause and a tracking fault all read as
+repeats - it reported 30 % on a minute whose own counters said 0.13 %.  Packet
+sizes are no better: a duplicated frame is not reliably cheap on an `+ilme`
+interlaced encode (min 13 kB at 6 Mbps on a detailed tape, 350 B on snow).
+Use the counters and `nb_read_packets`.
 
 ## 12. Where to look
 

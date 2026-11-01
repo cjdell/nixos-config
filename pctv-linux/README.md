@@ -307,6 +307,17 @@ Matroska twin (which fixes the label, never the MPEG-2 bitstream).
   moving object backwards - which is what "the recording is not as fluid as the
   live view" usually was, on top of the cadence work above.  `--master ffv1` and
   `uyvy` stamp the flag correctly.
+
+Knobs for the capture path (all environment, all optional):
+
+| variable | default | what it does |
+| --- | --- | --- |
+| `PCTV_VQ_SLOTS` | 24 | video queue depth, 4..32 frames (each costs 829 KB); raise it if `skip` climbs |
+| `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
+| `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
+| `PCTV_MASTER` | `dvd` | `dvd` / `uyvy` / `ffv1` (`--master` on the command line) |
+| `PCTV_RT_PRIO` | monitor 8, probe 10 | `0` turns RT off for an A/B run |
+| `PCTV_VERBOSE` | - | one status line per second, including `q <depth> dup N skip N` |
 * `ffprobe` reports `field_order=bb` for these files even though the sequence
   extension carries `top_field_first=1` (read the byte after `00 00 01 B5`);
   that is a probe quirk - do not "fix" the encoder flags.  `-top 1` is not even
