@@ -456,7 +456,67 @@ sizes are no better: a duplicated frame is not reliably cheap on an `+ilme`
 interlaced encode (min 13 kB at 6 Mbps on a detailed tape, 350 B on snow).
 Use the counters and `nb_read_packets`.
 
-## 12. Where to look
+## 12. End of tape: stopping the capture, and trimming the tail (2026-11-02)
+
+A camcorder at the end of a tape does not stop the digitiser: it hands the card a
+still frame for ever. The capture box cannot tell the difference — and on the DVD
+master the symptom is not a stalled pipeline but a **collapsed bitrate**, because
+the encoder is rate-capped (`-b:v 6000k -maxrate 6000k`): live programme measures
+774 kB/s of file growth, a frozen frame drops to a trickle (a 10 h 40 m capture of
+a 98 min tape averaged 1.19 Mbit/s against 6.2 Mbit/s for the programme). That
+contrast is what `scripts/pctv-autoend.sh` watches: below `PCTV_END_RATE` (default
+150 kB/s) for `PCTV_END_CONFIRM` (600 s) it sends SIGTERM to the monitor, which is
+the same path Ctrl-C takes — pipes closed, ffmpeg flushes and finalises, probe
+stops, card released. `PCTV_END_MAX` (4 h) is the backstop for decks that answer
+end-of-tape with *static*, where entropy and therefore bitrate goes up and no
+growth-rate detector can see anything. `--status` prints what it is seeing, and
+`--stop-now` performs the clean stop immediately.
+
+**It has already failed once.** The first night's run died 11 min in and the capture
+ran 9½ h past the end of the tape. The loop kept its samples in a bash array,
+read `n=${#TS[@]}`, then trimmed the oldest sample and still indexed
+`TS[n-1]` — one past the shrunken end, unbound under `set -u`, so the script
+exited. It is a one-line fix, but the reason it survived review is that nothing
+tested the loop past its first trim, so `scripts/pctv-autoend-test.sh` now does:
+it fakes a monitor and an encoder (matched by command line, exactly as the watchdog
+matches them), grows a file at 800 kB/s, stops, and asserts the watchdog survives
+the trim and stops the monitor. `./scripts/pctv-autoend-test.sh` — run it after
+editing the watchdog; it also runs against a copy of the old script and reproduces
+the 2026-11-02 crash verbatim (`line 77: TS[$((n-1))]: unbound variable`).
+
+### Finding where the content actually ends
+
+If a capture did run on, the tail is trivially separable, because a frozen
+digitiser frame is **bit-identical** to the next one. Score a short window by mean
+absolute inter-frame difference:
+
+```sh
+ffmpeg -ss T -t 5 -i FILE -an \
+  -vf tblend=all_mode=difference,signalstats,metadata=print:file=- -f null -
+# sum the YAVG lines.  live programme: 3.8-9.5.  end-of-tape hold: exactly 0.0000
+```
+
+Binary-search that predicate and you have the boundary to the second (two orders of
+magnitude of margin, so no threshold fuss). Do not trust a merely *low* score: a
+long 3 min passage at 0.035-0.049 in the same tape was real programme, a still shot
+with tape noise in it. Cross-check the picture itself — the end-of-tape hold read
+Y=16, U=128, V=128 (video-black, and identical PNG hashes at t=5890 s and t=30000 s)
+where the last live frame was Y=42, U=196, V=117.
+
+Trim from the start, so nothing before the cut is re-touched and no re-encode is
+needed:
+
+```sh
+ffmpeg -i in.mpg -t 5896 -map 0 -c copy out.mpg   # keep 10s of tail for a clean end
+```
+
+Then check the copy: both stream durations still equal, `field_order=tt` and
+per-frame `top_field_first=1` intact (§10.3 — a copy carries them, but this is the
+one tag worth re-verifying), the last frame decodes to the black hold rather than
+garbage. A `Header missing` from mp2 on a *seeked* decode is a seek artefact, not
+damage: run the same seek against the original and see the identical two lines.
+
+## 13. Where to look
 
 | path | what |
 | --- | --- |
@@ -466,6 +526,7 @@ Use the counters and `nb_read_packets`.
 | `pctv-linux/live-module.nix`, `package.nix` | deployment: handoff unit, udev, sysctl, RT limits, firmware, wrappers |
 | `pctv-linux/README.md` | usage, keys, options; and why `driver/` (the V4L2 module) is retired |
 | `pctv-linux/COLD-BOOT-NOTES.md` | cold-boot runbook and symptom → cause → fix table |
+| `scripts/pctv-autoend.sh` (+ `-test.sh`) | tape-end watchdog and its harness (§12) |
 | `docs/pctv-320cx.md` | the superseded Win7-VM route |
 
 **The general lesson:** before writing a kernel driver for a USB device, capture what

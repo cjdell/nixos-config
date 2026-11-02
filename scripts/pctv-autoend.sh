@@ -71,10 +71,17 @@ if [ "$1" != "--stop-now" ]; then
         sz=$(stat -c %s "$FILE" 2>/dev/null || echo 0)
         now=$(date +%s)
         TS+=("$now"); SZ+=("$sz")
-        n=${#TS[@]}
-        if [ "$n" -gt $(( CONFIRM / INTERVAL + 2 )) ]; then unset 'TS[0]' 'SZ[0]'; TS=("${TS[@]}"); SZ=("${SZ[@]}"); fi
+        # Drop samples older than the confirmation window. Recompute the element
+        # count AFTER this: reading it before and indexing with it afterwards ran
+        # one past the end, and under `set -u` that killed the watchdog 11 min
+        # into its shift on 2026-11-02 and the capture ran 9h past the tape.
+        while [ "${#TS[@]}" -gt $(( CONFIRM / INTERVAL + 2 )) ]; do
+            unset 'TS[0]' 'SZ[0]'
+            TS=(${TS[@]+"${TS[@]}"}); SZ=(${SZ[@]+"${SZ[@]}"})
+        done
         # rate across the window we have so far
-        el=$(( ${TS[$((n-1))]} - ${TS[0]} )); d=$(( ${SZ[$((n-1))]} - ${SZ[0]} ))
+        last=$(( ${#TS[@]} - 1 ))
+        el=$(( ${TS[$last]} - ${TS[0]} )); d=$(( ${SZ[$last]} - ${SZ[0]} ))
         rate=0; [ "$el" -gt 0 ] && rate=$(( d / el ))
         if [ "$el" -ge $(( CONFIRM - INTERVAL )) ]; then
             say "window ${el}s rate ${rate} B/s size $(( sz / 1048576 )) MB"
