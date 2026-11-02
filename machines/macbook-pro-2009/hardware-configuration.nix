@@ -86,8 +86,17 @@
   # hardware.nvidia-container-toolkit.enable = true;
 
   # blacklist similar modules to avoid collision
+  #
+  # b43-pci-bridge matters most: it (and the ssb it drags in) claims the
+  # BCM4328 at 04:00.0 on a coldplug race, and wl then has no device to
+  # attach - no wireless interface at all.  wl is the driver this card
+  # wants (b43 has no usable N-PHY); blacklisting the bridge makes wl win
+  # deterministically.  (Rebinding a live card from ssb to wl is not an
+  # escape: wl oopses in input_register_handle, Broadcom STA being
+  # Broadcom STA.)
   boot.blacklistedKernelModules = [
     "b43"
+    "b43-pci-bridge"
     "bcma"
   ];
 
