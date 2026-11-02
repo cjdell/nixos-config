@@ -129,9 +129,12 @@
   #     keyboard and everything else are unaffected.
   #   * `lspci` shows 02:00.0 as powered off/vanished after boot;
   #     `cat /sys/kernel/debug/vgaswitcheroo/switch` is the state.
-  #   * if a *warm* reboot ever comes back with a black panel before
-  #     systemd-boot even shows, gmux left the rails down across the reset -
-  #     hold the power button ~10 s (cold boot) and EFI re-initialises them.
+  #   * if gmux ever leaves the rails down across a reset (seen after force-
+  #     power-cycling a hung reboot) the next boot comes up with no dGPU at
+  #     all and a black panel; the unit notices the missing DIS client and
+  #     falls back to `MIGD`, the mux-only command, so the console comes back
+  #     on the MCP79. EFI re-initialises the rails on a true cold boot (~10 s
+  #     power-button hold).
   #   * to get the dGPU back (e.g. to run the fence-hang test against it),
   #     delete this stanza's service - the rest of the config is independent.
   systemd.services.mbp51-igp-only = {
@@ -157,17 +160,30 @@
       mkdir -p /sys/kernel/debug
       [ -e "$sw" ] || "$util/mount" -t debugfs debugfs /sys/kernel/debug || true
 
-      # The switch file appears only once apple-gmux has registered its handler
-      # *and* nouveau has bound both GPUs; coldplug still races this unit, so
-      # give it up to 30 s every boot before deciding anything.
+      # The switch file appears once apple-gmux has registered its handler;
+      # clients show up as nouveau binds each GPU. Coldplug still races this
+      # unit, so give it up to 30 s every boot before deciding anything.
       for ((i = 0; i < 60; i++)); do
         has_line 'DIS:' && has_line 'IGD:' && break
         sleep 0.5
       done
-      if ! has_line 'DIS:' || ! has_line 'IGD:'; then
-        # No gmux, no second client, or nouveau never bound - do not fail the
-        # boot over it, the box is just a normal dual-GPU machine this time.
-        echo "no vgaswitcheroo IGD+DIS pair; leaving both GPUs up" >&2
+      if ! has_line 'IGD:'; then
+        # No gmux/switcheroo at all, or nouveau never bound the MCP79 - do not
+        # fail the boot over it; the box is a normal dual-GPU machine this time.
+        echo "no vgaswitcheroo IGD client; leaving both GPUs up" >&2
+        exit 0
+      fi
+      if ! has_line 'DIS:'; then
+        # The dGPU never enumerated: gmux left its rails down across the last
+        # reset (seen after force-power-cycling a hung reboot), so the panel -
+        # still muxed toward the dead chip - is black, and there is no DIS
+        # client to run the full stage dance with. `MIGD` is the mux-only
+        # command: it just writes gmux's display/DDC switches to the IGP side,
+        # which brings the console back on the MCP79. Boot stays otherwise
+        # dual-GPU minus a dead dGPU; a 10 s power-button hold re-inits EFI.
+        echo "dGPU absent (rails still down); mux-only switch to the panel"
+        echo MIGD > "$sw" || echo "mux-only switch failed" >&2
+        echo "after: $(read_state)"
         exit 0
       fi
 
