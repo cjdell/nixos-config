@@ -304,6 +304,11 @@ in
       pctvLive
       desktopItem
       desktopRaw
+      # The wrapper the raw-master desktop entry runs.  It is on PATH as well,
+      # because that is what `pctv-monitor --help` points at for a terminal run,
+      # and because the mount check belongs in one place - not in a shell line
+      # somebody retypes.
+      masterEnv
       pkgs.alsa-utils
     ];
 
