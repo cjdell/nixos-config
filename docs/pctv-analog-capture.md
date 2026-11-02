@@ -714,7 +714,7 @@ turns it off.
 | `/dev/cpu_dma_latency` = 0 | pins the package out of the deep C-states; exit latency is hundreds of microseconds and this is what "SSHing in stutters it" looks like from the CPU's side |
 | cpufreq governor -> `performance` | one governor for all CPUs, remembered and restored; `ondemand`/`schedutil` spends milliseconds ramping up |
 | `mlock` + pre-fault | 64 MiB stream ring, 4 MiB of URB buffers, 20 MB of frame queue, 1 MiB of audio: a first-touch page fault in the producer is a stall in the one place there is no cushion. The monitor's half is `mlock`ed under the `memlock` login limit `live-module.nix` sets for `@wheel` |
-| `SCHED_FIFO` (probe 10, monitor 8, ffmpeg none) | unchanged from 6fdd651 - this is what stops the desktop from being able to preempt the path at all, and the deeper URB pool is what stops a 100 ms kernel excursion from mattering anyway |
+| `SCHED_FIFO` (probe 10; monitor writer 9, ALSA reader 9, parser/renderer 8; ffmpeg none) | the 2026-11-01 work (6fdd651) - this is what stops the desktop from being able to preempt the path at all, and the deeper URB pool is what stops a 100 ms kernel excursion from mattering anyway. The intra-monitor split is new: SCHED_FIFO threads of equal priority never timeslice, so the two that own a producer's ring sit above the one that draws, which is the only one of the three with seconds of cushion behind it. The ALSA reader's whole cushion is one 60 ms period and an overrun there loses *samples*, which no ring can give back |
 
 ### 14.4 Playing it back is half the complaint
 

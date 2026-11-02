@@ -36,6 +36,12 @@
  *                          feeds it - and PipeWire, which is nice -11 here, not
  *                          RT, so nothing on this box needs to outrank us.
  *
+ * Inside the monitor the threads are ordered too (pctv_thread_prio): the capture
+ * writer and the ALSA reader at 9, the parser/renderer at 8.  SCHED_FIFO threads
+ * of equal priority do not timeslice, and the renderer is the only one of the
+ * three with seconds of cushion behind it - the ALSA reader has one 60 ms period
+ * and an overrun there is lost samples, not late samples.
+ *
  * Prio 1-99; both numbers sit far below the 99 the kernel reserves, and
  * PCTV_RT_PRIO=0 turns the whole thing off for A/B testing (note that the probe
  * is launched through `sudo -n`, whose env_reset drops PCTV_RT_PRIO - the
@@ -101,6 +107,32 @@ static void pctv_drop_rt(const char *who)
     if (sched_setscheduler(0, SCHED_OTHER, &sp) < 0)
         fprintf(stderr, "%s: dropping to SCHED_OTHER failed: %s\n",
                 who, strerror(errno));
+}
+
+/* Put *this thread* at `prio`, never lowering it, and honour PCTV_RT_PRIO=0.
+ *
+ * Why per-thread and not just "inherit from main": SCHED_FIFO threads of equal
+ * priority do not timeslice, so the order between the threads on this path is
+ * the order they run in, and an inherited class cannot express it.  pctv-monitor
+ * has three of them - the parser/renderer (main), the capture writer, and the
+ * ALSA reader - and the two that own a producer's ring belong above the one that
+ * draws, because the renderer is the only one of the three with seconds of
+ * cushion behind it (the 1.2 s stream pipe and the 960 ms frame ring) while the
+ * ALSA reader has a single 60 ms period and an overrun costs *samples*, which no
+ * ring can give back. */
+static void pctv_thread_prio(const char *who, int prio)
+{
+    const char *e = getenv("PCTV_RT_PRIO");
+    struct sched_param cur, sp;
+
+    if (e && atoi(e) <= 0) return;              /* RT off for the whole run */
+    if (sched_getparam(0, &cur) == 0 &&
+        sched_getscheduler(0) == SCHED_FIFO && cur.sched_priority >= prio)
+        return;                                 /* already at least this high */
+    sp.sched_priority = prio;
+    if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0)
+        fprintf(stderr, "%s: SCHED_FIFO prio %d refused: %s\n",
+                who, prio, strerror(errno));
 }
 
 #endif /* PCTV_RT_H */

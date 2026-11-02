@@ -1617,6 +1617,10 @@ static int audio_open_pcm(snd_pcm_t **pcm, char *err, size_t n)
 static void *audio_thread(void *arg)
 {
     (void)arg;
+    /* Above the parser/renderer: this thread's whole cushion is one ALSA period
+     * (60 ms), and an overrun is lost *samples* - which no ring further down the
+     * path can reconstruct.  Everything else on the path has seconds. */
+    pctv_thread_prio("pctv-monitor/audio", 9);
 static snd_pcm_t *pcm = NULL;
     snd_pcm_t *mon = NULL;
     short buf[1024 * 2];
@@ -2334,6 +2338,12 @@ static unsigned long cap_master_ms(int *audio_alive)
 
 static void *vq_thread(void *unused)
 {
+    /* Above the parser/renderer: this is the only consumer of both capture rings
+     * and of ffmpeg's two pipes, so if it cannot run the producers' rings fill
+     * and pictures are evicted.  Its own work is tiny (one 829 KB frame and the
+     * audio backlog per pass) and every loop it has is bounded, so it cannot
+     * starve the parser by being here. */
+    pctv_thread_prio("pctv-monitor/writer", 9);
     int audio_logged = 0;
     int saw_capture = 0;            /* cap_on has been seen on: it is a teardown,
                                      * not the few milliseconds between starting

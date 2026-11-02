@@ -355,7 +355,7 @@ Knobs for the capture path (all environment, all optional):
 | `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
 | `PCTV_LOG` | file when detached | `$XDG_STATE_HOME/pctv-monitor.log` holds every line when there is no terminal (the desktop launcher has none, so `dup`/`skip`/`held` used to vanish with it); `PCTV_LOG=/path` picks the file, `PCTV_LOG=0` keeps stderr as-is |
 | `PCTV_MASTER` | `dvd` | `dvd` / `uyvy` / `ffv1` (`--master` on the command line) |
-| `PCTV_RT_PRIO` | monitor 8, probe 10 | `0` turns RT off for an A/B run |
+| `PCTV_RT_PRIO` | monitor 8, probe 10 | `0` turns RT off for an A/B run.  Inside the monitor the capture writer and the ALSA reader always sit one level above the parser/renderer (9 vs 8), and never below whatever this sets |
 | `PCTV_VERBOSE` | - | one status line per second, including `q <depth> dup N skip N` |
 * `ffprobe` reports `field_order=bb` for these files even though the sequence
   extension carries `top_field_first=1` (read the byte after `00 00 01 B5`);
