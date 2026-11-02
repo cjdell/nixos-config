@@ -217,6 +217,9 @@ static unsigned long long fields_dropped = 0;
  * same hole.  A hole therefore costs two fields of picture - and never a frame
  * that looks like one field slid vertically out of the picture. */
 static int field_state = 0;
+/* Whether the frame just assembled was short, spliced or a repeated parity; read
+ * by whoever feeds it, for the end-of-tape detector. */
+static int frame_bad = 0;
 /* Timestamped log of the two anomaly kinds, so they can be lined up against
  * each other (a lost chunk and a stale-field feed are the same event seen from
  * the two ends of the pipe) and against the capture window. */
@@ -427,6 +430,16 @@ static void usage(const char *p)
         "  --capture           start a capture immediately (format: --master)\n"
         "  --capture-seconds N stop after N seconds and exit (headless test)\n"
         "\n"
+        "  end of tape: the monitor watches for a picture that has stopped moving\n"
+        "  (a frozen frame is bit-identical, live tape never is).  After\n"
+        "  PCTV_HOLD_SECS (default 120) of that the capture closes and the card\n"
+        "  stays claimed, so a blank stretch between two recordings costs a file\n"
+        "  boundary and not the rest of the tape.  PCTV_HOLD_MAX N also ends the\n"
+        "  run N s after the picture stopped (0 = keep watching, the default);\n"
+        "  PCTV_HOLD_SECS=0 turns the whole thing off.  A deck that answers end of\n"
+        "  tape with static is not a frozen frame and is not caught by this - use\n"
+        "  --capture-seconds for that.\n"
+        "\n"
         "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
         "        -/+ gain | b boost | m mute | o monitor input | c MPEG-2 capture |\n"
         "        s snapshot | g grey | space pause display | q/ESC quit\n", p);
@@ -521,6 +534,135 @@ static inline void yuv2rgb(int y, int cb, int cr, unsigned char *o)
 
 /* Commit the assembled field into the interlaced frame, for both the display
  * (RGB24) and the encoder (UYVY). */
+/* ------------------------------------------------------ end-of-tape detector
+ *
+ * A deck that reaches the end of its tape does not stop the digitiser: it hands
+ * us the same field for ever.  That is detectable exactly rather than by
+ * thresholds, because "for ever" means *bit-identical* - the nine hours of
+ * end-of-tape hold on the 2026-11-02 overnight run fold to one hash (and to
+ * Y=16 U=128 V=128, video black) while all 960279 frames of programme before
+ * them differed, and a merely still-looking shot differs too because tape noise
+ * is in it (docs/pctv-analog-capture.md §12 measured the same thing from the
+ * decoder side: 3.8-9.5 mean inter-frame difference live, exactly 0.0000 held).
+ *
+ * So this lives here, next to the pixels, and not in a script watching how fast
+ * the output file grows (scripts/pctv-autoend.sh).  Two reasons: the picture is
+ * the evidence, and a second process can die - that one did, 11 minutes into a
+ * shift, and the capture ran 9h past the tape.
+ *
+ * The response is deliberately NOT "stop".  It is "close this file, keep the
+ * card, open a new one the moment there is a picture again", because nothing can
+ * tell a blank stretch between two recordings apart from the end of a tape: any
+ * rule confident enough to end the run is confident enough to throw the rest of
+ * the tape away.  With auto-resume a wrong guess costs a file boundary and 2 min
+ * of frozen tail (45 kB/s), instead of the programme after the gap.
+ *
+ * Counting is per complete frame, at the same point the frame is handed to the
+ * encoder - so the predicate is "what would go in the file is repeating", which
+ * is the thing worth knowing, and it covers a tape paused into tracking errors
+ * (every fed frame is then the gate holding the last good one) as well as a deck
+ * quietly outputting the same field.
+ */
+#define HOLD_SECS_DEFAULT 120      /* PCTV_HOLD_SECS: how long a still may run
+                                    * inside a file; 0 turns the detector off */
+#define HOLD_RESUME_DEFAULT 25     /* changed FRAMES (1 s) before the picture
+                                    * counts as back - one tracking glitch must
+                                    * not open a file */
+static int hold_secs = HOLD_SECS_DEFAULT;
+static int hold_max_secs;         /* PCTV_HOLD_MAX: end the run this long after
+                                   * the picture stopped; 0 = watch for ever */
+static int hold_resume = HOLD_RESUME_DEFAULT;
+static int hold_have;             /* hold_hash refers to a real frame */
+static unsigned long long hold_hash;
+static int hold_same, hold_diff;  /* run lengths, in frames */
+static int hold_state;            /* 1 = the picture has stopped moving */
+static unsigned long hold_since;  /* SDL ticks on entry to state 1 */
+static int hold_want_stop;        /* the actions belong in the main loop: */
+static int hold_want_start;       /* cap_start() pumps the stream, so it must */
+static int hold_quit;              /* never be called from inside the parser */
+static int hold_stress;           /* PCTV_HOLD_STRESS: see hold_update() */
+static int hold_stress_done;
+
+/* Fold a frame into 64 bits.  Only two failure directions matter: a false
+ * "different" is impossible, and a false "same" needs a 64-bit collision, so the
+ * worst this can do is fail to notice a hold - it can never cut a live picture.
+ *
+ * Four accumulators because the fold is a dependency chain, not a bandwidth
+ * problem: one lane costs 400 us per frame on this box (1% of a core at 25 fps),
+ * four cost 82 us, and eight cost *more* than four again from register pressure
+ * - all measured with the flags it ships with, because 0.2% of a core is worth
+ * paying for a predicate that compares every pixel rather than a sample of them. */
+static unsigned long long hold_fold(const unsigned char *p, size_t n)
+{
+    const unsigned long long K = 0x9E3779B97F4A7C15ULL;
+    unsigned long long h0 = 1, h1 = 2, h2 = 3, h3 = 4, v;
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        memcpy(&v, p + i, 8);      h0 = (h0 ^ v) * K;
+        memcpy(&v, p + i + 8, 8);  h1 = (h1 ^ v) * K;
+        memcpy(&v, p + i + 16, 8); h2 = (h2 ^ v) * K;
+        memcpy(&v, p + i + 24, 8); h3 = (h3 ^ v) * K;
+    }
+    for (; i + 8 <= n; i += 8) { memcpy(&v, p + i, 8); h0 = (h0 ^ v) * K; }
+    return ((h0 * K) ^ (h1 >> 17)) + ((h2 * K) ^ (h3 >> 17));
+}
+
+/* Called once per frame, from the place the frame is handed to the encoder, so
+ * "stopped" means "what would go in the file is repeating" - gate substitutions
+ * included, which is what makes a tape paused into tracking errors (every fed
+ * frame is the gate holding the last good one) read as stopped too.  `bad` is
+ * that frame's own cleanliness: a field that lost lines or arrived twice is the
+ * tape sticking rather than the picture stopping, so when it also differs it
+ * credits neither run. */
+static void hold_update(int bad)
+{
+    unsigned long long h = hold_fold(fuv, UV_SIZE);
+
+    /* PCTV_HOLD_STRESS=<s>: report a constant hash for the first <s> of the run,
+     * then start telling the truth.  A self-test, not a behaviour: the two
+     * transitions (close the file, reopen on motion) otherwise need a tape to run
+     * out at the moment you are watching, and both have to be right for the
+     * overnight case to work.  One run against a live signal proves the first file
+     * is finalised and that a second one opens and records. */
+    if (hold_stress && !hold_stress_done) {
+        if ((int)(SDL_GetTicks() / 1000) < hold_stress) h = 1;
+        else { hold_stress_done = 1; hold_have = 0; }
+    }
+
+    if (hold_have && h == hold_hash) {
+        hold_same++; hold_diff = 0;
+    } else if (!hold_have || !bad) {
+        hold_hash = h; hold_have = 1;
+        hold_diff++; hold_same = 0;
+    }
+
+    if (!hold_state) {
+        if (hold_secs > 0 && hold_same >= hold_secs * 25) {
+            hold_state = 1;
+            hold_since = SDL_GetTicks();
+            hold_want_stop = 1;
+        }
+        return;
+    }
+    if (hold_diff >= hold_resume) {
+        hold_state = 0;
+        hold_want_start = 1;
+        return;
+    }
+    if (hold_max_secs > 0 &&
+        SDL_GetTicks() - hold_since >= (unsigned long)(hold_max_secs * 1000))
+        hold_quit = 1;
+}
+
+/* `c' means someone has decided what to record: the window starts over, and the
+ * detector stops being allowed to second-guess that by reopening a file. */
+static void hold_rearm(void)
+{
+    hold_same = hold_diff = 0;
+    hold_state = 0;
+    hold_want_stop = hold_want_start = 0;
+}
+
 static void field_commit(void)
 {
     if (field_lines <= 0) return;
@@ -544,6 +686,7 @@ static void field_commit(void)
         }
     }
     parity_mask |= 1 << parity;
+    frame_bad = bad;              /* consumed by hold_update() with this frame */
     if (bad && gate_on && have_good) {
         /* Not clean: show and encode the last frame that was. */
         memcpy(fb, good_fb, sizeof fb);
@@ -2659,6 +2802,32 @@ int main(int argc, char **argv)
             vq_n = n < 4 ? 4 : (n > VQ_SLOTS_MAX ? VQ_SLOTS_MAX : n);
         }
     }
+    {   /* end-of-tape policy, see the detector above */
+        const char *s = getenv("PCTV_HOLD_SECS");
+        if (s) hold_secs = atoi(s);
+        if (hold_secs < 0) hold_secs = 0;
+        s = getenv("PCTV_HOLD_RESUME");
+        if (s) hold_resume = atoi(s);
+        if (hold_resume < 2) hold_resume = 2;
+        s = getenv("PCTV_HOLD_MAX");
+        if (s) hold_max_secs = atoi(s);
+        s = getenv("PCTV_HOLD_STRESS");
+        if (s) hold_stress = atoi(s);
+        if (hold_max_secs && hold_max_secs < hold_secs)
+            hold_max_secs = hold_secs;   /* quitting cannot precede the close */
+        if (hold_secs)
+            fprintf(stderr, "pctv-monitor: end-of-tape hold on: %d s of unchanged"
+                            " picture closes the file and resumes on motion%s%s\n",
+                    hold_secs, hold_max_secs ? ", " : "",
+                    hold_max_secs ? "then ends the run" : "");
+        else
+            fprintf(stderr, "pctv-monitor: end-of-tape hold off - a frozen frame"
+                            " will be recorded for as long as it lasts\n");
+        if (hold_stress)
+            fprintf(stderr, "pctv-monitor: PCTV_HOLD_STRESS=%d: SELF-TEST, reporting"
+                            " a frozen picture for the first %d s whatever the"
+                            " deck is doing\n", hold_stress, hold_stress);
+    }
 
     cfg_write("input", INPUTS[cur_input]);
     /* AGC: command line, then the saved choice, else on */
@@ -2706,6 +2875,8 @@ int main(int argc, char **argv)
     if (!rbuf) die("out of memory for the parse buffer");
     rlen = 0;
     int running = 1;
+    int hold_auto = 0;            /* the detector closed the file, not a person:
+                                   * it owes the tape a new one */
     unsigned long long last_frames = 0, snap_after = 0;
     { const char *s = getenv("PCTV_SNAP_AFTER"); if (s) snap_after = strtoull(s, NULL, 0); }
     double last_t = (double)SDL_GetTicks() / 1000.0, fps = 0;
@@ -2754,6 +2925,8 @@ int main(int argc, char **argv)
                 case SDLK_s: snapshot_ppm(); break;
                 case SDLK_r: rec_toggle(); break;
                 case SDLK_c:
+                    hold_rearm();
+                    hold_auto = 0;
                     if (cap_on) cap_stop();
                     else if (cap_pending) {
                         cap_pending = 0;
@@ -2839,6 +3012,47 @@ int main(int argc, char **argv)
         unsigned long t_stage = SDL_GetTicks();
         if (pump()) running = 0;
 
+        /* ------------------------------------------------ end-of-tape hold
+         * Act out here, never from the parser: cap_start() pumps the stream
+         * while it waits for the audio thread and cap_stop() pumps it while it
+         * waits for ffmpeg, so either called from field_commit() would re-enter
+         * the parser that is calling it. */
+        if (hold_want_stop) {
+            hold_want_stop = 0;
+            if (cap_on) {
+                char was[512];
+                snprintf(was, sizeof was, "%s", cap_path);
+                cap_stop();
+                hold_auto = 1;
+                fprintf(stderr, "pctv-monitor: the picture has not changed for %d s"
+                                " - closed %s and still watching; a blank stretch"
+                                " between two recordings resumes by itself"
+                                " (PCTV_HOLD_SECS=0 turns this off)\n",
+                        hold_secs, was);
+                show_overlay(20000);
+            }
+        }
+        if (hold_want_start) {
+            hold_want_start = 0;
+            if (hold_auto) {
+                hold_auto = 0;
+                if (cap_start())
+                    fprintf(stderr, "pctv-monitor: the picture came back but the"
+                                    " encoder would not start - NOT capturing\n");
+                else {
+                    fprintf(stderr, "pctv-monitor: picture again -> %s\n", cap_path);
+                    show_overlay(20000);
+                }
+            }
+        }
+        if (hold_quit) {
+            hold_quit = 0;
+            fprintf(stderr, "pctv-monitor: still the same frame after %d s of"
+                            " holding - ending the run and releasing the card\n",
+                    hold_max_secs);
+            running = 0;
+        }
+
         /* a complete interlaced frame is ready for the encoder */
         {   /* parse stage: stream read + BT.656 decode, top of loop to here */
             unsigned long d = SDL_GetTicks() - t_stage;
@@ -2856,6 +3070,7 @@ int main(int argc, char **argv)
              * bug (see the capture-path comment).  The 25 fps clock lives in the
              * writer thread now, paced by the audio stream, not by this loop. */
             unsigned long t_feed = SDL_GetTicks();
+            hold_update(frame_bad);      /* same frame the queue is about to take */
             cap_feed_video();
             unsigned long d = SDL_GetTicks() - t_feed;
             if (d > stage_max[1]) stage_max[1] = d;
@@ -2966,6 +3181,24 @@ int main(int argc, char **argv)
             draw_panel_lines(ren, W - wpx - 24, 8 + 16 * 2 + 10, lines, 2, 1);
         }
 
+        /* The state that used to be invisible: the deck has stopped, so nothing
+         * is happening, and the only clue was a file that had stopped growing.
+         * Say what it is and what happens next - and say it differently when a
+         * person is in charge (`c') than when the detector is. */
+        if (hold_state && !cap_on) {
+            const char *lines[1];
+            char l0[200];
+            unsigned s = (SDL_GetTicks() - hold_since) / 1000;
+            if (hold_auto)
+                snprintf(l0, sizeof l0, "STILL %02u:%02u - file closed, waiting",
+                         s / 60, s % 60);
+            else
+                snprintf(l0, sizeof l0, "STILL %02u:%02u - not recording (c forces)",
+                         s / 60, s % 60);
+            lines[0] = l0;
+            draw_panel_lines(ren, W - text_w(l0, 2) - 30, 8, lines, 1, 2);
+        }
+
         SDL_RenderPresent(ren);
         {   /* render stage: from the texture update to the present returning */
             unsigned long d = SDL_GetTicks() - t_stage;
@@ -2988,6 +3221,8 @@ int main(int argc, char **argv)
             if (cap_on)
                 snprintf(recmode, sizeof recmode, " [REC %s]",
                          MASTER_NAME[cap_master]);
+            else if (hold_state)
+                snprintf(recmode, sizeof recmode, " [STILL]");
 
             char title[256];
             snprintf(title, sizeof title,
@@ -3003,13 +3238,14 @@ int main(int argc, char **argv)
                 fprintf(stderr, "monitor: %s | in %llu B rlen %zu | maxgap %lums "
                                 "(%s %lums %s %lums %s %lums) q %d/%d dup %llu "
                                 "skip %llu | "
-                                "held %llu/%llu | "
+                                "held %llu/%llu | still %d/%d%s | "
                                 "audio %s ok=%d L %.1f R %.1f pk %.1f clips %u gain %+.1f dB\n",
                         title, bytes_in, rlen, gap_max,
                         stage_name[0], stage_max[0], stage_name[1], stage_max[1],
                         stage_name[2], stage_max[2], qdbg, vq_n - 2,
                         cap_vrepeats, cap_vskips,
                         frames_held, frames,
+                        hold_same, hold_diff, hold_state ? "*" : "",
                         srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
                         hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips,
                         gain_db + boost_db);

@@ -313,6 +313,10 @@ Knobs for the capture path (all environment, all optional):
 | variable | default | what it does |
 | --- | --- | --- |
 | `PCTV_VQ_SLOTS` | 24 | video queue depth, 4..32 frames (each costs 829 KB); raise it if `skip` climbs |
+| `PCTV_HOLD_SECS` | 120 | end-of-tape: how long a **bit-identical** picture may run inside a file before the file is closed; the card stays claimed and a new file opens when the picture moves again. `0` never closes (a frozen frame is then recorded for as long as it lasts) |
+| `PCTV_HOLD_MAX` | 0 (watch for ever) | also end the *run* this many seconds after the picture stopped, releasing the card - the one to set for an unattended overnight tape (`900` = quit 15 min after it ends); clamped up to `PCTV_HOLD_SECS` |
+| `PCTV_HOLD_RESUME` | 25 | changed frames (1 s) needed before the picture counts as back, so one tracking glitch cannot open a file |
+| `PCTV_HOLD_STRESS` | - | self-test: report a frozen picture for the first N seconds whatever the deck is doing, so both transitions (close, reopen) can be exercised without waiting for a tape to end |
 | `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
 | `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
 | `PCTV_LOG` | file when detached | `$XDG_STATE_HOME/pctv-monitor.log` holds every line when there is no terminal (the desktop launcher has none, so `dup`/`skip`/`held` used to vanish with it); `PCTV_LOG=/path` picks the file, `PCTV_LOG=0` keeps stderr as-is |
@@ -358,6 +362,42 @@ With **no source playing** the decoder's lock poll (`poll for a real lock`,
 16 × 500 ms in `analog2_bringup`) delays the first data by ~8 s; the monitor
 just shows no picture until then, and captures queued with `--capture` start at
 the first frame.  Settle time after a cold plug is another ~10 s (TRUTH §1).
+
+### End of tape: the file closes, the card stays, a new file opens on its own
+
+A deck that reaches the end of its tape does not stop the digitiser - it hands the
+card the same field for ever.  That is detectable exactly rather than by thresholds,
+because "for ever" means **bit-identical**: nine hours of end-of-tape hold folded to
+one 64-bit hash of the frame (and to Y=16 U=128 V=128, video black), while every one
+of the 960279 frames of programme before them differed.  Live tape that merely looks
+still - a held shot, a title card - differs too, because tape noise is in it.  The
+monitor folds each frame it would encode into 64 bits (82 us, 0.2 % of this box, four
+accumulators because the fold is a dependency chain and not a bandwidth problem) and
+acts on the run length.
+
+What it does when the picture stops moving is **not** stop: after `PCTV_HOLD_SECS`
+(default 120) it closes the file - cleanly, the same path `c` and Ctrl-C take, so the
+MPEG is finalised - keeps the card claimed, and opens a fresh file once `PCTV_HOLD_RESUME`
+frames (1 s) have changed.  Nothing has to be right about *why* the picture stopped.
+A blank stretch between two recordings on one tape therefore costs a file boundary
+and two minutes of tail (45 kB/s while frozen, against 699 kB/s of programme), where
+a guess that said "end of tape" used to cost the rest of the tape.  The overlay says
+`STILL mm:ss - file closed, waiting`, the window title gains `[STILL]`, and `c` at any
+time takes back control (it re-arms the window and cancels the automatic reopen).
+
+For an unattended tape, `PCTV_HOLD_MAX 900` also ends the run 15 min after the picture
+stopped, which releases the card.  Left at 0 the monitor simply keeps watching, which
+costs nothing on disk because the file is already closed.
+
+What this cannot see is a deck that answers end of tape with *static*: snow changes
+every frame, so it is programme-shaped to every detector here and in
+`scripts/pctv-autoend.sh`.  `--capture-seconds` is the honest answer for that deck.
+
+`PCTV_HOLD_STRESS=<s>` reports a frozen picture for the first `s` of a run whatever
+the deck is doing, so both transitions can be tested without waiting for a tape to
+end - one run proves the first file is finalised and the second opens and records
+(verified 2026-11-02: 151 frames in 6.05 s, then 425 in 17.02 s, both `field_order=tt`,
+`dup 0 skip 0`, zero drops either side).
 
 Notes / current limits:
 

@@ -1,6 +1,12 @@
 #!/run/current-system/sw/bin/env bash
 # Stop a running pctv-monitor capture when the tape ends.
 #
+# SINCE 2026-11-02 THE MONITOR DOES THIS ITSELF, better: it sees the frames, and a
+# frozen one is bit-identical, so it closes the file after PCTV_HOLD_SECS and opens
+# another when the picture moves (docs/pctv-analog-capture.md §12, and the README
+# knobs). This script is the fallback for an older monitor and for anyone who wants
+# the *process* gone rather than idle; PCTV_HOLD_MAX is the knob for the usual case.
+#
 # Why it works by watching the file: the DVD master is rate-CAPPED (-b:v/-maxrate
 # 6000k), so live programme sits at the ceiling - ~776 kB/s measured on
 # 2026-11-02 overnight.  When a camcorder reaches the end of a tape it stops and
@@ -8,7 +14,9 @@
 # target costs a few percent of that.  So "the file has nearly stopped growing"
 # means "the picture has stopped moving", which is the end of the tape.  (If the
 # deck instead fills with static, entropy goes UP, not down, and this detector
-# cannot see it - that is what PCTV_END_MAX is for.)
+# cannot see it - that is what PCTV_END_MAX is for.)  It averages a rate over a
+# window, so it needs ~9 min of frozen frame and cannot tell a mid-tape blank that
+# long from the end; the monitor needs 2 min and does not have to decide.
 #
 # The capture is never interrupted: this only stat()s the output file, and at the
 # end sends SIGTERM to the monitor, which is the same path Ctrl-C takes -
@@ -27,6 +35,14 @@ CONFIRM=${PCTV_END_CONFIRM:-600}       # s the picture must stay still
 THRESH=${PCTV_END_RATE:-150000}        # B/s below which it counts as still
 MAX=${PCTV_END_MAX:-14400}            # s hard backstop
 INTERVAL=${PCTV_END_INTERVAL:-30}     # s between samples
+# A window shorter than ~3 samples measures nothing: the warm-up gate below is
+# then satisfied by the first pair, so one stall of one poll ends the capture.
+# Refuse the configuration instead of honouring it.
+if [ "$PCTV_END_CONFIRM" ] && [ "$PCTV_END_CONFIRM" -lt $(( 3 * INTERVAL )) ]; then
+    echo "PCTV_END_CONFIRM=$PCTV_END_CONFIRM is under 3*PCTV_END_INTERVAL ($INTERVAL):" >&2
+    echo "the window would be a single sample - raise it or leave it at 600" >&2
+    exit 2
+fi
 LOG=${PCTV_END_LOG:-/tmp/pctv-autoend.log}
 VIDEOS=${PCTV_VIDEOS:-$HOME/Videos}
 

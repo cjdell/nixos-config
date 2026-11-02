@@ -456,21 +456,54 @@ sizes are no better: a duplicated frame is not reliably cheap on an `+ilme`
 interlaced encode (min 13 kB at 6 Mbps on a detailed tape, 350 B on snow).
 Use the counters and `nb_read_packets`.
 
-## 12. End of tape: stopping the capture, and trimming the tail (2026-11-02)
+## 12. End of tape: a frame that never changes, and what to do about it (2026-11-02)
 
 A camcorder at the end of a tape does not stop the digitiser: it hands the card a
-still frame for ever. The capture box cannot tell the difference — and on the DVD
-master the symptom is not a stalled pipeline but a **collapsed bitrate**, because
-the encoder is rate-capped (`-b:v 6000k -maxrate 6000k`): live programme measures
-774 kB/s of file growth, a frozen frame drops to a trickle (a 10 h 40 m capture of
-a 98 min tape averaged 1.19 Mbit/s against 6.2 Mbit/s for the programme). That
-contrast is what `scripts/pctv-autoend.sh` watches: below `PCTV_END_RATE` (default
-150 kB/s) for `PCTV_END_CONFIRM` (600 s) it sends SIGTERM to the monitor, which is
-the same path Ctrl-C takes — pipes closed, ffmpeg flushes and finalises, probe
-stops, card released. `PCTV_END_MAX` (4 h) is the backstop for decks that answer
-end-of-tape with *static*, where entropy and therefore bitrate goes up and no
-growth-rate detector can see anything. `--status` prints what it is seeing, and
-`--stop-now` performs the clean stop immediately.
+still frame for ever. The predicate is exact rather than statistical, because "for
+ever" means **bit-identical** - nine hours of end-of-tape hold hash to one value (and
+read Y=16, U=128, V=128, video black, at t=5890 s and again 7 h later), while every
+one of the 960279 frames of programme before them differed. Live tape that merely
+*looks* still differs too: a held shot at 0.035-0.049 mean inter-frame difference
+against exactly 0.0000 for a frozen feed, so two orders of margin separate "nothing is
+happening" from "something is happening very quietly".
+
+### What the monitor does, which is not "stop"
+
+`pctv-monitor` folds every frame it would encode into 64 bits and watches the run
+length. After `PCTV_HOLD_SECS` (default 120) of an unchanged picture it **closes the
+file and keeps the card**, then opens a new file once `PCTV_HOLD_RESUME` frames (1 s)
+have changed. The overlay reads `STILL mm:ss - file closed, waiting`, the window title
+gains `[STILL]`, and `c` re-arms the window and cancels the automatic reopen, because a
+person has then decided what to record.
+
+Closing-instead-of-stopping is the whole point. Nothing can tell a blank stretch
+between two recordings apart from the end of a tape, so any rule confident enough to
+end the run is confident enough to discard the rest of the tape - and the costs are
+nowhere near symmetric: the programme runs at 699 kB/s and a frozen frame at 45 kB/s
+(24 kB/s of that is the CBR mp2 track), so recording through a blank is 1 % of the
+disk while stopping through one loses the programme. `PCTV_HOLD_MAX 900` does end the
+run, 15 min after the picture stopped, for the case where nobody is there and the card
+should be released; at 0 it keeps watching and costs nothing, because the file is
+already shut. Verified the same day with `PCTV_HOLD_STRESS`, which reports a frozen
+picture for the first N seconds whatever the deck is doing: 151 frames in 6.05 s,
+file closed, then 425 frames in 17.02 s in the next file, `field_order=tt` and
+`dup 0 skip 0` on both sides of the boundary.
+
+What it cannot see is a deck that answers end of tape with *static*: snow changes
+every frame, so it is programme-shaped to this and to every growth-rate detector
+below. `--capture-seconds` is the honest answer for that deck.
+
+### The external watchdog: still there, no longer the main line of defence
+
+Before the monitor could see this, the only window onto it was the file. On the DVD
+master the symptom is a **collapsed bitrate**, because the encoder is rate-capped
+(`-b:v 6000k -maxrate 6000k`): live programme measures 774 kB/s of file growth and a
+frozen frame drops to a trickle (a 10 h 40 m capture of a 98 min tape averaged
+1.19 Mbit/s against 6.2 Mbit/s for the programme). `scripts/pctv-autoend.sh` watched
+exactly that - below `PCTV_END_RATE` (150 kB/s) for `PCTV_END_CONFIRM` (600 s) it sent
+SIGTERM to the monitor - and with the detector above it is now the fallback rather
+than the plan, since it has to average a rate across a window (≈9 min of frozen frame
+before it fires, and a mid-tape blank that long is indistinguishable from the end).
 
 **It has already failed once.** The first night's run died 11 min in and the capture
 ran 9½ h past the end of the tape. The loop kept its samples in a bash array,
@@ -482,7 +515,9 @@ it fakes a monitor and an encoder (matched by command line, exactly as the watch
 matches them), grows a file at 800 kB/s, stops, and asserts the watchdog survives
 the trim and stops the monitor. `./scripts/pctv-autoend-test.sh` — run it after
 editing the watchdog; it also runs against a copy of the old script and reproduces
-the 2026-11-02 crash verbatim (`line 77: TS[$((n-1))]: unbound variable`).
+the 2026-11-02 crash verbatim (`line 77: TS[$((n-1))]: unbound variable`). That is
+the same lesson the monitor learned the hard way: the process that watches is the
+one that dies unnoticed, so the watching belongs next to the frames.
 
 ### Finding where the content actually ends
 
