@@ -143,33 +143,46 @@
     serviceConfig.Type = "oneshot";
     script = ''
       set -u
+      # Service scripts get systemd's minimal PATH: util-linux is not in it, and
+      # nothing else in here should depend on what happens to be. grep/tr/seq are
+      # replaced by bash builtins below for the same reason.
+      util="${pkgs.util-linux}/bin"
       sw=/sys/kernel/debug/vgaswitcheroo/switch
+
+      has_dis() {
+        case "$(cat "$sw" 2>/dev/null)" in
+          *DIS*) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
+
+      # NixOS mounts debugfs in stage 2; keep the mount as a fallback.
       mkdir -p /sys/kernel/debug
-      mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
+      [ -e "$sw" ] || "$util/mount" -t debugfs debugfs /sys/kernel/debug || true
 
       # The switch file appears only once apple-gmux has registered its handler
       # *and* nouveau has bound both GPUs; coldplug still races this unit, so
       # give it up to 30 s every boot before deciding anything.
-      for _ in $(seq 1 60); do
-        [ -f "$sw" ] && grep -q DIS "$sw" && break
+      for ((i = 0; i < 60; i++)); do
+        has_dis && break
         sleep 0.5
       done
-      if ! grep -q DIS "$sw" 2>/dev/null; then
+      if ! has_dis; then
         # No gmux, no second client, or nouveau never bound - do not fail the
         # boot over it, the box is just a normal dual-GPU machine this time.
         echo "no vgaswitcheroo discrete client; leaving both GPUs up" >&2
         exit 0
       fi
 
-      echo "before: $(tr '\n' ' ' < "$sw")"
+      echo "before: $(cat "$sw")"
       # IGP is idempotent. vga_switcheroo refuses to power the *active* client
       # down, so if the mux switch were ever rejected, OFF below fails harmlessly
       # instead of killing the panel.
       echo IGP > "$sw" || echo "mux switch refused; leaving dGPU up" >&2
-      if grep -q DIS "$sw"; then
+      if has_dis; then
         echo OFF > "$sw" || echo "dGPU power-off refused" >&2
       fi
-      echo "after:  $(tr '\n' ' ' < "$sw")"
+      echo "after: $(cat "$sw")"
     '';
   };
 
