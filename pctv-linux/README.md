@@ -160,22 +160,41 @@ move ~20 dB inside a single second by itself.  So the AGC drives the **codec**,
 never a software multiply: the meter, the verdict and the recorded file always
 describe the same signal.
 
-* Target: peaks near **-18 dBFS** (`AGC_TARGET_DBFS`), deliberately below the
-  meter's -12..-3 manual zone.  A feedback loop has no lookahead on a live ADC,
-  so the headroom is what keeps the source's step-ups out of the converter.
-* Two loops.  **Attack**: a block arriving above -3 dBFS, or any clipped sample,
-  drops 8 dB at once (up to ~16 times a second).  **Steady state**: every
-  250 ms, move proportionally to the distance from the target (+6 dB only while
-  more than 30 dB away, +2 dB nearer, dead band +-3 dB so it does not pump).
-  It will not hunt a dead input (nothing above -75 dBFS).
+* Target: peaks near **-18 dBFS** (`AGC_TARGET_DBFS`) from the **loudest
+  peak of the last 30 s** (`AGC_WINDOW_S`), deliberately below the meter's
+  -12..-3 manual zone.  A feedback loop has no lookahead on a live ADC, so the
+  headroom is what keeps the source's step-ups out of the converter.
+* Two rates.  **Calibration** moves at 0.5 dB/s (`AGC_RATE_DBPS`), which is
+  what stops it pumping on a source whose level wanders.  **Emergency** is
+  12 dB/s and only ever pulls *down*, latched for 500 ms after a post-gain peak
+  within 1 dB of full scale (`AGC_HOT_DBFS`) or a measured clip.  Keying that on
+  "near full scale" rather than on the clip counter is what matters: the gain
+  staging can be 40 dB hot with the counter at zero for seconds at a time,
+  because it only counts samples that land on the rail.
+* Two guards.  A reference peak **below -50 dBFS** (`AGC_SIGNAL_MIN_DBFS`) is the
+  noise floor, not programme, and the loop holds still for it instead of
+  calibrating to it; an error beyond 24 dB against a reference is treated as an
+  unbelievable measurement and the loop holds (except in the emergency, where
+  the measurement *is* the full-scale peak and cannot be wrong).
+* Total gain is capped at **+36 dB** (`AGC_MAX_TOTAL_DB`).  Past that it is only
+  amplifying its own noise floor, and a line-level deck never needs it.
+* **Why the two guards exist** (2026-11-02).  A capture started while the deck
+  was still paused: staging measured tape hiss at -64 dBFS, and a loop that
+  believed it walked the gain to its +49 dB maximum.  The programme then arrived
+  30-40 dB hot - 4575 clipped samples in the first second, and the 0.5 dB/s
+  calibration needed the whole minute to walk it back down, so the file ramps
+  37 dB from start to finish.  The old "do not hunt a dead input" limit was
+  -75 dBFS, *below* tape hiss, so it never fired.  Now the hiss guard holds the
+  gain and the emergency clears an over-hot start in about a second.  Measured
+  A/B on a noise-only input, both binaries started at +49 dB: the old one climbed
+  to **+56 dB**, the new one holds at the +36 dB cap.  On the next real 60 s take:
+  **0 clipped samples** out of 5.76 M and a flat level.
 * Two gain stages.  The fine `Capture` control is used first; when it runs out
   of headroom the AGC takes a `* Boost` step and re-centres the fine control,
   and when the fine control has drifted below 20 % of its range it trades a
   boost step back for headroom, because the boost stage is the noisier one.
 * Measured on the live source (20 s, source swinging on its own): peaks held in
-  -5..-18 dBFS with **12 clipped samples** in the file.  Triggering the attack
-  on "approaching full scale" rather than "already clipped" is what took that
-  from 4897 samples to 12 - waiting for the clip flag is 3 dB too late.
+  -5..-18 dBFS with **12 clipped samples** in the file.
 * `A` toggles it; `-`, `+` or `b` turn it off (the user's hand wins).  `--agc`
   / `--no-agc` set it from the command line.  Input, gain, boost **and** the
   AGC flag are all remembered in `~/.config/pctv-monitor/audio` (line 1 =
@@ -243,26 +262,36 @@ top-field-first; that stream is not tagged as such, and cannot be - see
 
 #### Which master to write (`--master`, `PCTV_MASTER`)
 
-`dvd` (the above) is for burning and watching.  For an archive, `--master uyvy`
-or `--master ffv1` writes a **lossless Matroska master** instead:
+`dvd` (the above) is for burning and watching.  For an archive, `--master
+utvideo`, `--master ffv1` or `--master uyvy` writes a **lossless Matroska
+master** instead:
 
-| mode | what it is | size | encoder speed measured on this box |
-| --- | --- | --- | --- |
-| `dvd` | MPEG-PS `mpeg2video` 6 Mbps, `-g 15` | ~0.7 MB/s | 4.5× realtime |
-| `uyvy` | `rawvideo`, the deframer's own UYVY, no conversion at all | 20.7 MB/s (~1.2 GB/min) | 8.0× |
-| `ffv1` | `ffv1 -g 1` (yuv422p), same bits | content-dependent: 0.1 MB/s clean, a few MB/s on grainy tape | 2.7× on test pattern — its cost tracks picture entropy, so time it on a noisy tape before trusting it |
+| mode | what it is | size on real tape | encoder speed | field order in the file | quality vs the lossless source |
+| --- | --- | --- | --- | --- | --- |
+| `dvd` | MPEG-PS `mpeg2video` 6 Mbps, `-g 15` | 0.72 MB/s | 5.1× realtime | bitstream, TFF | SSIM 0.970 / PSNR 43.8 dB |
+| `dvd --bitrate 15000` | the same at 15 Mbps (the encoder is quantiser-limited: 25 Mbps gives the same file) | 1.33 MB/s | 4.7× | bitstream, TFF | SSIM 0.985 / PSNR 47.0 dB |
+| **`ffv1`** | Matroska `ffv1 -g 1` (yuv422p) | 4.0 MB/s (240 MB/min) | 4.5× | **frames say TFF** | **lossless** |
+| `utvideo` | Matroska `utvideo` (yuv422p), all-intra | 5.1 MB/s (300 MB/min) | **14×** | **nothing** — needs `pctv-field-order --relabel` | lossless |
+| `uyvy` | `rawvideo`, the deframer's own bytes, no conversion at all | 20.7 MB/s (1.2 GB/min) | 8.0× | frames say TFF | lossless — but see below |
 
-(ffmpeg `speed=` from the same raw UYVY source the capture feeds it, so the
-numbers are comparable; >1× = keeps up.  `uyvy` is the mode that structurally
-cannot fall behind.)  Both lossless modes are intra-only with **no rate
-control**, so a detailed scene makes the file bigger instead of making the
-encoder miss a deadline - and unlike `-g 15` MPEG-2, a lost frame would cost one
-frame.  Audio rides along as `pcm_s16le`.  The window title reads
-`[REC uyvy]` while recording, because archiving a tape in the wrong mode by
-reflex is worth seeing.  Nothing is deinterlaced, scaled or cropped in any mode:
-the fields *are* the 50 Hz information, and interpolating them to 50p is a job
-for a machine with more cores than this one
-(`docs/pctv-analog-capture.md` §10.2).
+**`ffv1` is the archival master.**  It is lossless (verified bit-identical to the
+source through `framemd5`), it costs 4.5× realtime so it keeps up live (measured:
+0 skips), and — the part that decides it — it is the only *fast* lossless codec
+here that **writes the field order into the file**.  `utvideo` is three times
+faster and the same size, but it writes neither a bitstream flag nor a container
+element, so a plain player treats the frames as progressive: it either combs or
+falls back to 25p, which is exactly the smoothness an archive exists to keep.
+Use `utvideo` when you want the lowest CPU, and then run
+`pctv-field-order --relabel FILE` (a stream copy, seconds) on it; the capture
+says so at stop.  **`uyvy` looks free and is not**: at 20.7 MB/s the writer
+outran the encoder on this box and dropped 17 frames in 60 s, so it is the mode
+to pick only when you would rather re-run a capture than trust a codec.
+
+`libx264 -qp 0` is also lossless and writes the flags, but it runs at **0.71×**
+realtime here (`-crf 12` at 0.48×), so x264 is not an option at any quality
+setting on this box.  MPEG-2 has no headroom left to buy either: `-b:v 15000k`
+and `-b:v 25000k` produce the *same* file, because the encoder runs out of
+quantiser before it runs out of bitrate.
 
 `pctv-field-order FILE...` prints what a capture claims about field order in
 three readings - container element, decoded-frame flags, `idet`'s pixel vote -

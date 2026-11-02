@@ -175,24 +175,42 @@ written and what happens later.
 
 ### 10.1 The three masters (`--master`, `PCTV_MASTER`)
 
-| mode | container / codec | disk rate | encoder, measured¹ | for |
+| mode | container / codec | disk rate | encoder, measured¹ | quality² |
 | --- | --- | --- | --- | --- |
-| `dvd` (default) | MPEG-PS, `mpeg2video` `-b:v 6000k -g 15 +ilme+ildct` | ~0.7 MB/s | 4.5× realtime | burning, watching, keeping years of tape cheap |
-| `uyvy` | Matroska, `rawvideo` (uyvy422) | 20.7 MB/s (1.2 GB/min, ~35 GB per tape) | 8.0× | **the bit-exact master**: the deframer's own bytes, no colourspace conversion, no rate control |
-| `ffv1` | Matroska, `ffv1 -g 1` (yuv422p) | content-dependent: 0.1 MB/s on a noiseless test pattern, a few MB/s on grainy tape | 2.7× test pattern | the same bits at a fraction of the disk, for the price of a real encoder |
+| `dvd` (default) | MPEG-PS, `mpeg2video` `-b:v 6000k -g 15 +ilme+ildct` | 0.72 MB/s | 5.1× realtime | SSIM 0.970, PSNR 43.8 dB |
+| `dvd --bitrate 15000` | the same at 15 Mbps | 1.33 MB/s | 4.7× | SSIM 0.985, PSNR 47.0 dB |
+| `utvideo` | Matroska, `utvideo` (yuv422p), all-intra | 5.1 MB/s (300 MB/min) | **14×** | lossless, **no field order written** |
+| `ffv1` | Matroska, `ffv1 -g 1` (yuv422p) | 4.0 MB/s on grainy tape | 4.5× | lossless, frames flagged TFF |
+| `uyvy` | Matroska, `rawvideo` (uyvy422) | 20.7 MB/s (1.2 GB/min, ~35 GB per tape) | 8.0× | lossless, frames flagged TFF, but skipped 17 frames in 60 s |
 
 ¹ ffmpeg's own `speed=` with every mode fed the *same* raw UYVY the capture
-pipeline produces, so the figures are comparable; >1× means it keeps up. FFV1's
-cost tracks picture entropy, which is why grainy tape is the number to plan on —
-and why `uyvy` is the safe archival default when disk is cheap (a tape costs
-35 GB, which is one HDD shelf-load).
+pipeline produces, so the figures are comparable; >1× means it keeps up.
 
-`uyvy` is bit-exact *by construction*: `cmp` of 40 frames before and after the
-muxer is identical. Audio is `pcm_s16le` there rather than `mp2`, for the same
-reason — free and lossless. Both lossless modes are intra-only with **no rate
-control**, so a busy scene makes the file bigger instead of making the encoder
-miss a deadline; `dvd` is the only mode where a rate-controlled VBV can fall
-behind, and the only one where a dropped frame costs the rest of a 15-frame GOP.
+² Measured 2026-11-02 on one 60 s take: capture a `uyvy` reference, transcode it
+with each candidate, compare with `ssim`/`psnr` over the same 1482 frames.  So
+the two lossy rows are the *only* difference between what this card delivered and
+what the file holds.  `ffv1`, `ffvhuff` and `utvideo` decode **bit-identical** to
+the reference (`framemd5` per frame), i.e. the lossless modes are actually
+lossless on 4:2:2 8-bit; `libx264` at `-qp 0` is lossless too but runs at
+**0.71×** realtime here, and `-crf 12` at 0.48×, so x264 is not an option at any
+quality setting on this box.
+
+`ffv1` is the archival master of choice now, and the deciding property is not
+speed or size: it is the only fast lossless codec here that **writes the field
+order into the file** (the decoded frames come back `interlaced_frame=1,
+top_field_first=1`).  `utvideo` is three times faster and the same size, but it
+writes neither a bitstream flag nor a container element - every frame decodes as
+`0,0` - so a plain player shows it as progressive and either combs or falls back
+to 25p, which is precisely the smoothness the archive exists to keep.  If you do
+use `utvideo`, `pctv-field-order --relabel FILE` fixes the container in one
+stream copy (verified: `field_order` goes `tb` → `tt`), and the capture prints a
+reminder when it stops.  `uyvy` keeps the flags but costs 20.7 MB/s of writer
+bandwidth and **lost 17 frames in the same 60 s** on this box.
+
+MPEG-2 has no quality headroom left to buy: `-b:v 15000k` and `-b:v 25000k`
+produce the *same* 83 MB for that minute, because the encoder runs out of
+quantiser (q=2) before it runs out of bitrate.  So `--bitrate 15000` is the
+ceiling for MPEG-2 here, ~47 dB PSNR - good, but not the same thing as lossless.
 
 ### 10.2 Why the capture box must not deinterlace
 

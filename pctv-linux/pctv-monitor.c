@@ -131,18 +131,20 @@ static int   mpeg2_kbps = 6000;
 #define MASTER_DVD  0
 #define MASTER_UYVY 1
 #define MASTER_FFV1 2
+#define MASTER_UTVIDEO 3
 static int cap_master = MASTER_DVD;
-static const char *const MASTER_NAME[] = { "dvd", "uyvy", "ffv1" };
+static const char *const MASTER_NAME[] = { "dvd", "uyvy", "ffv1", "utvideo" };
 
 static int master_from_name(const char *s)
 {
     if (!s || !*s) return MASTER_DVD;
-    if (!strcasecmp(s, "uyvy") || !strcasecmp(s, "raw") || !strcasecmp(s, "lossless"))
+    if (!strcasecmp(s, "uyvy") || !strcasecmp(s, "raw"))
         return MASTER_UYVY;
     if (!strcasecmp(s, "ffv1")) return MASTER_FFV1;
+    if (!strcasecmp(s, "utvideo") || !strcasecmp(s, "ut")) return MASTER_UTVIDEO;
     if (!strcasecmp(s, "dvd") || !strcasecmp(s, "mpeg2") || !strcasecmp(s, "mpg"))
         return MASTER_DVD;
-    fprintf(stderr, "pctv-monitor: unknown master '%s' (dvd|uyvy|ffv1) - using dvd\n", s);
+    fprintf(stderr, "pctv-monitor: unknown master '%s' (dvd|uyvy|ffv1|utvideo) - using dvd\n", s);
     return MASTER_DVD;
 }
 
@@ -150,9 +152,10 @@ static int master_from_name(const char *s)
 static const char *master_name(int m)
 {
     switch (m) {
-    case MASTER_UYVY: return "uyvy";
-    case MASTER_FFV1: return "ffv1";
-    default:          return "dvd";
+    case MASTER_UYVY:    return "uyvy";
+    case MASTER_FFV1:    return "ffv1";
+    case MASTER_UTVIDEO: return "utvideo";
+    default:             return "dvd";
     }
 }
 
@@ -444,10 +447,14 @@ static void usage(const char *p)
         "  --monitor           start with input monitoring on: play the captured\n"
         "                      samples out of the host's speakers (key: o)\n"
         "  --out-dir <dir>     where captures go (default ~/Videos, else /tmp)\n"
-        "  --bitrate <kbps>    MPEG-2 video bitrate (default 6000)\n"
-        "  --master <mode>     capture format: dvd (MPEG-2, default), or the\n"
-        "                      lossless Matroska masters uyvy / ffv1 for\n"
-        "                      deinterlacing to 50p on another machine\n"
+        "  --bitrate <kbps>    MPEG-2 video bitrate (default 6000; the encoder is\n"
+        "                      quantiser-limited near 15000 on grainy tape)\n"
+        "  --master <mode>     capture format: dvd (MPEG-2, default), or a lossless\n"
+        "                      Matroska master - ffv1 (lossless, 4.5x realtime,\n"
+        "                      240 MB/min, and it WRITES the field order), utvideo\n"
+        "                      (14x but no field flag: relabel it after), or uyvy\n"
+        "                      (the probe's own bytes, 1.2 GB/min, and fast enough\n"
+        "                      here to lose the odd field)\n"
         "  --ffmpeg <path>     ffmpeg binary (default PCTV_FFMPEG or 'ffmpeg')\n"
         "  --capture           start a capture immediately (format: --master)\n"
         "  --capture-seconds N stop after N seconds and exit (headless test)\n"
@@ -1280,8 +1287,8 @@ static void audio_apply_controls(void)
  *     AGC_DEADBAND_DB of the target it does not move at all, so a settled
  *     source is left completely alone.
  *
- * One fast path exists and it only ever pulls DOWN: if the ADC actually clipped
- * in this interval, the gain slews at AGC_EMERG_DBPS toward where THIS peak
+ * One fast path exists and it only ever pulls DOWN: while the signal is at the
+ * top of the scale, the gain slews at AGC_EMERG_DBPS toward where THIS peak
  * would sit at the target.  That is damage control for a source measured
  * stepping ~20 dB inside a second, not a way of squeezing the programme;
  * reaching back up is slow again.  A merely loud peak is NOT an emergency - the
@@ -1290,11 +1297,24 @@ static void audio_apply_controls(void)
 #define AGC_TARGET_DBFS   (-18.0)
 /* An error bigger than this is not a level to slew toward, it is a reference
  * that cannot be believed - see agc_tick(). */
-#define AGC_MAX_ERR_DB    (24.0)
-#define AGC_WINDOW_S        30     /* peak window: "average over ~30 s" */
-#define AGC_RATE_DBPS       0.5    /* how fast the calibration may move */
-#define AGC_EMERG_DBPS      4.0    /* only while the ADC is at/over full scale */
-#define AGC_DEADBAND_DB     0.4
+#define AGC_MAX_ERR_DB        (24.0)
+#define AGC_WINDOW_S           30     /* peak window: "average over ~30 s" */
+#define AGC_RATE_DBPS         0.5    /* how fast the calibration may move */
+#define AGC_EMERG_DBPS       12.0    /* only while the signal is at full scale */
+#define AGC_DEADBAND_DB       0.4
+/* A reference peak below this is not programme, it is the noise floor: tape
+ * hiss on a paused deck, the ADC's own hiss with nothing connected.  The loop
+ * holds still for one instead of treating it as a level to correct - see the
+ * cold-start note in agc_tick(). */
+#define AGC_SIGNAL_MIN_DBFS  (-50.0)
+/* Full-scale latch: a post-gain peak this close to 0 dBFS is a clip even when
+ * no sample lands exactly on the rail, and it stays an emergency for
+ * AGC_HOT_MS after the last one. */
+#define AGC_HOT_DBFS         (-1.0)
+#define AGC_HOT_MS            500
+/* No sane line-level source needs more than this, and past it the loop is only
+ * amplifying its own noise floor. */
+#define AGC_MAX_TOTAL_DB      36.0
 
 static double agc_win_pk = -99.0;      /* peak since the last tick */
 static double agc_slot_pk = -99.0;     /* peak of the current 1 s slot */
@@ -1303,6 +1323,8 @@ static int    agc_slot, agc_ring_ready;
 static unsigned long agc_slot_t, agc_last_t;
 static double agc_slow_src = -99.0;    /* the ring's max: the reference peak */
 static double agc_acc;                 /* dB not yet a whole mixer step */
+static double agc_hot_pk = -99.0;      /* the peak that latched full scale */
+static unsigned long agc_hot_t;        /* when it did */
 
 /* Forget the calibration: a different input, or the loop switched back on. */
 static void agc_reset(void)
@@ -1310,6 +1332,7 @@ static void agc_reset(void)
     agc_win_pk = agc_slot_pk = agc_slow_src = -99.0;
     agc_slot = 0; agc_ring_ready = 0; agc_slot_t = agc_last_t = 0;
     agc_acc = 0.0;
+    agc_hot_pk = -99.0; agc_hot_t = 0;
 }
 
 /* AGC lines are worth about one a second, and a flood of them is worth nothing:
@@ -1419,17 +1442,28 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
         agc_slow_src = pk - total;
 
     double want;
-    if (agc_slow_src <= -75.0) want = total;   /* at/below the codec's own noise:
-                                                * do not hunt a dead input */
+    /* A reference the loop is allowed to believe.  Below AGC_SIGNAL_MIN_DBFS it
+     * is the noise floor and there is nothing to calibrate: slewing UP there is
+     * how a session that started on a paused deck reached +49 dB, and the first
+     * frame of real programme was then 30-40 dB hot, clipped for the 30 s the
+     * loop needs to walk back down (measured on the 2026-11-02 13:15 capture:
+     * 4575 clipped samples in second 0, then 37 dB of ramp over the minute).
+     * Hold the gain where it is and wait for programme. */
+    if (agc_slow_src <= AGC_SIGNAL_MIN_DBFS) want = total;
     else want = AGC_TARGET_DBFS - agc_slow_src;
+    if (want > AGC_MAX_TOTAL_DB) want = AGC_MAX_TOTAL_DB;
 
-    /* The fast path is for the ADC actually being at full scale - a measured
-     * clip - and nothing else.  A near-full-scale peak is not an emergency:
-     * the old loop treated anything above -3 dBFS as one and that is what made
-     * it pump. */
-    int emerg = clip_delta > 0;
+    /* The fast path is for the signal being at the top of the scale and nothing
+     * else.  It used to key off the ADC's clip counter, which misses the case
+     * that actually hurts: the staging can be 40 dB hot with that counter at
+     * zero for seconds at a time (the counter only sees samples that land on
+     * the rail), and then the loop is back at 0.5 dB/s.  A post-gain peak
+     * within a dB of full scale is a clip; latch it briefly so one loud
+     * transient does not fall out of the window between two ALSA periods. */
+    if (pk >= AGC_HOT_DBFS) { agc_hot_pk = pk; agc_hot_t = t; }
+    int emerg = (agc_hot_t && t - agc_hot_t <= AGC_HOT_MS) || clip_delta > 0;
     if (emerg) {
-        double want_now = AGC_TARGET_DBFS - (pk - total);
+        double want_now = AGC_TARGET_DBFS - (agc_hot_pk - total);
         if (want_now < want) want = want_now;  /* the fast path only pulls down */
     }
 
@@ -1451,7 +1485,9 @@ static void agc_tick(double win_pk, unsigned long long clips_now)
      * way, which is what filled the console during a capture.  Freeze instead,
      * and say so once. */
     static int insane;
-    if (fabs(err) > AGC_MAX_ERR_DB) {
+    if (!emerg && fabs(err) > AGC_MAX_ERR_DB) {   /* emerg is measured, not modelled:
+                                                   * a clip is a fact whatever the
+                                                   * reference says */
         if (!insane)
             fprintf(stderr, "pctv-monitor: AGC: %.0f dB off target with a %.0f dBFS "
                             "peak - ignoring that reference (no audio, or another "
@@ -2856,7 +2892,8 @@ static int cap_start(void)
          * keeps a hard scene from costing a frame: detail makes the file bigger,
          * never the encoder late. */
         av[n++] = "-c:v";
-        av[n++] = cap_master == MASTER_UYVY ? "rawvideo" : "ffv1";
+        av[n++] = cap_master == MASTER_UYVY ? "rawvideo"
+                : cap_master == MASTER_UTVIDEO ? "utvideo" : "ffv1";
         if (cap_master == MASTER_FFV1) { av[n++] = "-g"; av[n++] = "1"; }
         av[n++] = "-aspect"; av[n++] = "4:3";
         if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "pcm_s16le"; }
@@ -2966,6 +3003,14 @@ static void cap_stop(void)
                     "ADC %+d ppm vs the card)\n",
             cap_path, (long long)sz, vf, rp, sk, qmax, ab, cut, vd, ad, adb,
             (int)lrint((rs_step - 1.0) * 1e6));
+    /* Only ffv1 and rawvideo write the field order into the file; utvideo (and
+     * every other lossless codec available here) writes neither the bitstream
+     * flag nor a container element, so a plain player sees progressive frames
+     * and either combs or drops to 25p.  One stream copy fixes the container. */
+    if (cap_master == MASTER_UTVIDEO)
+        fprintf(stderr, "pctv-monitor: utvideo carries no field-order flag - run "
+                        "`pctv-field-order --relabel %s` to make it top-field-first\n",
+                cap_path);
 }
 /* ------------------------------------------------------------- audio meter */
 
