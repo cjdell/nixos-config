@@ -111,10 +111,11 @@
   # `GMUX_PORT_DISCRETE_POWER` "cut[s] power to the discrete GPU ... the
   # correct sequence to tear down and bring up the power rails for core
   # voltage, VRAM and PCIe", and vga_switcheroo drives it from
-  # `/sys/kernel/debug/vgaswitcheroo/switch`. `IGP` flips the panel (and DDC)
-  # to the MCP79; `OFF` then powers the 9600M GT down *and* tears down its
-  # nouveau client, so the card leaves the bus and can never wedge PGRAPH (or
-  # get selected as the boot GPU's render device) again.
+  # `/sys/kernel/debug/vgaswitcheroo/switch`. Writing `IGD` flips the panel
+  # (and DDC) to the MCP79 *and*, as vga_switcheroo changes the active client,
+  # suspends the dGPU's nouveau instance and runs that gmux power-down, so the
+  # card leaves the bus and can never wedge PGRAPH (or get selected as the
+  # boot GPU's render device) again.
   #
   # Nothing is blacklisted: vga_switcheroo needs nouveau bound to *both* GPUs
   # for the switch file to exist, and the EFI boot console lives on the dGPU.
@@ -149,12 +150,8 @@
       util="${pkgs.util-linux}/bin"
       sw=/sys/kernel/debug/vgaswitcheroo/switch
 
-      has_dis() {
-        case "$(cat "$sw" 2>/dev/null)" in
-          *DIS*) return 0 ;;
-          *) return 1 ;;
-        esac
-      }
+      read_state() { cat "$sw" 2>/dev/null; }
+      has_line() { case "$(read_state)" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 
       # NixOS mounts debugfs in stage 2; keep the mount as a fallback.
       mkdir -p /sys/kernel/debug
@@ -164,25 +161,34 @@
       # *and* nouveau has bound both GPUs; coldplug still races this unit, so
       # give it up to 30 s every boot before deciding anything.
       for ((i = 0; i < 60; i++)); do
-        has_dis && break
+        has_line 'DIS:' && has_line 'IGD:' && break
         sleep 0.5
       done
-      if ! has_dis; then
+      if ! has_line 'DIS:' || ! has_line 'IGD:'; then
         # No gmux, no second client, or nouveau never bound - do not fail the
         # boot over it, the box is just a normal dual-GPU machine this time.
-        echo "no vgaswitcheroo discrete client; leaving both GPUs up" >&2
+        echo "no vgaswitcheroo IGD+DIS pair; leaving both GPUs up" >&2
         exit 0
       fi
 
-      echo "before: $(cat "$sw")"
-      # IGP is idempotent. vga_switcheroo refuses to power the *active* client
-      # down, so if the mux switch were ever rejected, OFF below fails harmlessly
-      # instead of killing the panel.
-      echo IGP > "$sw" || echo "mux switch refused; leaving dGPU up" >&2
-      if has_dis; then
-        echo OFF > "$sw" || echo "dGPU power-off refused" >&2
-      fi
-      echo "after: $(cat "$sw")"
+      echo "before: $(read_state)"
+      # The debugfs command is `IGD` (the enum is VGA_SWITCHEROO_IGP, but the
+      # parser matches "IGD"; an unknown command is accepted silently and does
+      # nothing - which an earlier revision of this script discovered the hard
+      # way, followed by `OFF` dutifully powering the *inactive* IGP down).
+      # One write is all it takes: vga_switcheroo stage2 flips the gmux mux to
+      # the MCP79 and then tears the old active client down - nouveau suspend
+      # for 02:00.0 plus apple-gmux's discrete-power sequence, which cuts its
+      # core/VRAM/PCIe rails. So do NOT add an `OFF` here: it targets whatever
+      # is inactive, which is only the right side when the switch worked.
+      echo IGD > "$sw" || echo "mux switch write failed" >&2
+      sleep 1 # let gmux finish the power teardown
+      state=$(read_state) # file may already be gone if clients < 2 again
+      echo "after:  $state"
+      case "$state" in
+        *"IGD:+"*) ;;
+        *) echo "panel did not switch to the 9400M; dGPU still owns it" >&2 ;;
+      esac
     '';
   };
 
