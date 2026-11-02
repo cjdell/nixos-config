@@ -78,7 +78,106 @@
   # Only for pctv-linux/i2cprobe.c (walking the CX25843 over the bridge's i2c
   # gate by hand).  The live stack itself is pure libusb.  This used to come
   # from common/desktop.nix for ddcutil's sake.
-  boot.kernelModules = [ "i2c-dev" ];
+  #
+  # nouveau + apple_gmux are explicit: the IGP-only handover below wants both
+  # clients registered with vga_switcheroo before anything composites.
+  boot.kernelModules = [
+    "i2c-dev"
+    "nouveau"
+    "apple_gmux"
+  ];
+
+  # --- IGP-only graphics: permanently take the 9600M GT off the bus ---------
+  #
+  # The 2026-11-02 lockup (crash log: `macbook-crash.txt`) was a PGRAPH hang
+  # on the *discrete* GPU, with the whole graphics stack dying behind it:
+  # Xwayland's render channel on 02:00.0 started rejecting compute methods
+  # (`gr: DATA_ERROR 00000004 [INVALID_VALUE] ... class 8297 mthd 0204`, 65x),
+  # then fences stopped completing - `ttm_bo_delayed_delete` workers and
+  # `nv50_disp_atomic_commit_work` all wedged in `dma_fence_wait_timeout`,
+  # `failed to idle channel 7`, a `nouveau ... : timeout` and a WARNING in
+  # `g84_ectx_bind` as VLC closed its channel - and the session died with it.
+  # The 9600M GT (G96) in a MacBookPro5,1 is the textbook dying GPU (Apple ran
+  # a repair program for exactly this chip), and it is also the worse fit for
+  # this box: nv50 stops at OpenGL 2.1 and it owns the only display output the
+  # capture station does not use (the mini-DP), while the MCP79's 9400M does
+  # OpenGL 3.3.
+  #
+  # So the LCD now runs off the 9400M (03:00.0) alone. This is the Linux
+  # equivalent of macOS's "integrated only" mode on this model: the classic
+  # gmux (apple-gmux 1.7.3, detected in that same log) multiplexes the panel
+  # between the two GPUs and, unlike later MacBook Pros, can fully power-gate
+  # the discrete chip - the in-kernel `apple-gmux` driver documents that
+  # `GMUX_PORT_DISCRETE_POWER` "cut[s] power to the discrete GPU ... the
+  # correct sequence to tear down and bring up the power rails for core
+  # voltage, VRAM and PCIe", and vga_switcheroo drives it from
+  # `/sys/kernel/debug/vgaswitcheroo/switch`. `IGP` flips the panel (and DDC)
+  # to the MCP79; `OFF` then powers the 9600M GT down *and* tears down its
+  # nouveau client, so the card leaves the bus and can never wedge PGRAPH (or
+  # get selected as the boot GPU's render device) again.
+  #
+  # Nothing is blacklisted: vga_switcheroo needs nouveau bound to *both* GPUs
+  # for the switch file to exist, and the EFI boot console lives on the dGPU.
+  # The handover is just ordered before any compositor can appear - the unit
+  # runs before the display manager, at a point where only fbcon is on
+  # card0 and the mux switch is cheap.
+  #
+  # Consequences, and what to check:
+  #   * external mini-DisplayPort is dead while the dGPU is off (it is wired
+  #     to it; macOS integrated-only mode drops it too). The internal panel,
+  #     keyboard and everything else are unaffected.
+  #   * `lspci` shows 02:00.0 as powered off/vanished after boot;
+  #     `cat /sys/kernel/debug/vgaswitcheroo/switch` is the state.
+  #   * if a *warm* reboot ever comes back with a black panel before
+  #     systemd-boot even shows, gmux left the rails down across the reset -
+  #     hold the power button ~10 s (cold boot) and EFI re-initialises them.
+  #   * to get the dGPU back (e.g. to run the fence-hang test against it),
+  #     delete this stanza's service - the rest of the config is independent.
+  systemd.services.mbp51-igp-only = {
+    description = "MacBookPro5,1 hybrid graphics: mux panel to 9400M, power off 9600M GT";
+    wantedBy = [ "multi-user.target" ];
+    before = [
+      "display-manager.service"
+      "sddm.service"
+    ];
+    serviceConfig.Type = "oneshot";
+    script = ''
+      set -u
+      sw=/sys/kernel/debug/vgaswitcheroo/switch
+      mkdir -p /sys/kernel/debug
+      mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
+
+      # The switch file appears only once apple-gmux has registered its handler
+      # *and* nouveau has bound both GPUs; coldplug still races this unit, so
+      # give it up to 30 s every boot before deciding anything.
+      for _ in $(seq 1 60); do
+        [ -f "$sw" ] && grep -q DIS "$sw" && break
+        sleep 0.5
+      done
+      if ! grep -q DIS "$sw" 2>/dev/null; then
+        # No gmux, no second client, or nouveau never bound - do not fail the
+        # boot over it, the box is just a normal dual-GPU machine this time.
+        echo "no vgaswitcheroo discrete client; leaving both GPUs up" >&2
+        exit 0
+      fi
+
+      echo "before: $(tr '\n' ' ' < "$sw")"
+      # IGP is idempotent. vga_switcheroo refuses to power the *active* client
+      # down, so if the mux switch were ever rejected, OFF below fails harmlessly
+      # instead of killing the panel.
+      echo IGP > "$sw" || echo "mux switch refused; leaving dGPU up" >&2
+      if grep -q DIS "$sw"; then
+        echo OFF > "$sw" || echo "dGPU power-off refused" >&2
+      fi
+      echo "after:  $(tr '\n' ' ' < "$sw")"
+    '';
+  };
+
+  # Belt and braces: tell KWin explicitly which card is its compositor card.
+  # After the handover there is only one card left anyway, but this keeps the
+  # session pinned to the MCP79 (by PCI path, since card minors flip with
+  # probe order) even if the oneshot above ever lands after sddm.
+  environment.sessionVariables.KWIN_DRM_DEVICE = "/dev/dri/by-path/pci-0000:03:00.0-card";
 
   # --- watching / recording the analog inputs -------------------------------
   #
