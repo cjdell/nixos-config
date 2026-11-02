@@ -27,7 +27,7 @@
  *
  * Keys:
  *   1/2 / Tab  video input (Composite, S-Video)      g  toggle colour/grey
- *   s  snapshot a PPM                                 c  toggle MPEG-2 capture
+ *   s  snapshot a PPM                                 c  start/stop capture
  *   r  toggle raw BT.656 recording                    a  cycle audio input
  *   -/+ capture gain      b input boost      m mute    space pause display
  *   q / ESC quit
@@ -441,9 +441,12 @@ static void pick_out_dir(void)
     snprintf(out_dir, sizeof out_dir, "/tmp");
 }
 
-static void usage(const char *p)
+/* `to' is not always stderr: main() dup2()s stderr onto the run log at startup
+ * (so a menu-launched monitor leaves a trail), which quietly swallowed --help -
+ * it appeared only in ~/.local/state/pctv-monitor.log. Help goes to the terminal. */
+static void usage(const char *p, FILE *to)
 {
-    fprintf(stderr,
+    fprintf(to,
         "usage: %s [options]\n"
         "  -i|--input <in>     video input: composite (default) or svideo\n"
         "  -l|--list           list video inputs and exit\n"
@@ -468,12 +471,30 @@ static void usage(const char *p)
         "                      Matroska master - ffv1 (lossless, 4.5x realtime,\n"
         "                      240 MB/min, and it WRITES the field order), utvideo\n"
         "                      (14x but no field flag: relabel it after), or uyvy\n"
-        "                      (the probe's own bytes, 1.2 GB/min, and fast enough\n"
-        "                      here to lose the odd field)\n"
+        "                      (the probe's own bytes, 1.25 GB/min: zero encode,\n"
+        "                      so nothing on this box can fall behind it)\n"
         "  --ffmpeg <path>     ffmpeg binary (default PCTV_FFMPEG or 'ffmpeg')\n"
         "  --capture           start a capture immediately (format: --master)\n"
         "  --capture-seconds N stop after N seconds and exit (headless test)\n"
         "\n"
+        "  LOSSLESS RAW MASTERS, WITH SOUND\n"
+        "  Every master carries the audio: PCM (pcm_s16le, 48 kHz stereo) inside the\n"
+        "  .mkv for the lossless ones, MP2 inside the .mpg for dvd - from the input\n"
+        "  --audio selects (default: whatever the last run saved, normally Line in).\n"
+        "  --no-audio turns it off and REMEMBERS that choice, so check the first line\n"
+        "  of the summary: 'audio Line (hw:0,0) ...' is the sound being recorded.\n"
+        "    pctv-capture-nas                 the desktop entry's wrapper: --master\n"
+        "                                     uyvy with PCTV_OUT_DIR on the NAS, and\n"
+        "                                     it REFUSES to start if that mount is\n"
+        "                                     not there (a 2 h tape is 151 GB, which\n"
+        "                                     is not a laptop SSD story)\n"
+        "    PCTV_MASTER=uyvy pctv-monitor    the same thing by hand\n"
+        "    PCTV_OUT_DIR=/somewhere          where files land (default ~/Videos); it\n"
+        "                                     exits 3 if the directory is not writable\n"
+        "  A master is the tape as the card saw it: transcode it later\n"
+        "  (pctv-linux/README.md), and check the run against 14.5 in\n"
+        "  docs/pctv-analog-capture.md - or run pctv-linux/queue-selftest.sh, which\n"
+        "  freezes the encoder mid-capture and proves a stall loses nothing.\n"
         "  end of tape: the monitor watches for a picture that has stopped moving\n"
         "  (a frozen frame is bit-identical, live tape never is).  After\n"
         "  PCTV_HOLD_SECS (default 120) of that the capture closes and the card\n"
@@ -485,8 +506,9 @@ static void usage(const char *p)
         "  --capture-seconds for that.\n"
         "\n"
         "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
-        "        -/+ gain | b boost | m mute | o monitor input | c MPEG-2 capture |\n"
-        "        s snapshot | g grey | space pause display | q/ESC quit\n", p);
+        "        -/+ gain | b boost | m mute | o monitor input | c capture (master |\n"
+        "        format, --master), h help on screen | s snapshot | g grey |\n"
+        "        f frame gate | space pause display | r raw BT.656 dump | q/ESC quit\n", p);
 }
 
 /* ------------------------------------------------------------------ child */
@@ -2449,6 +2471,19 @@ static void cap_feed_video(int stale)
 {
     if (!vq_started) return;
     pthread_mutex_lock(&vq_mtx);
+    if (vq_stopping) {
+        /* A drain is already running: capture is over, so this picture belongs to
+         * the tape the file will not contain. Refusing it here is what gives the
+         * drain an END. Without it the parser (pump() runs while the encoder is
+         * being reaped) queued behind the drain as fast as the drain emptied, so
+         * the backlog never shrank and only the wall-clock deadline stopped the
+         * shutdown - a stop that should take a second took 45, and looked from
+         * outside exactly like the lockup this file keeps fixing. */
+        vq_want_stop = 1;
+        cap_vrefused++;
+        pthread_mutex_unlock(&vq_mtx);
+        return;
+    }
     if (vq_count + (vq_held >= 0 ? 1 : 0) >= vq_n - 1) {
         /* Full.  Nothing is thrown away to make room: the capture is over. */
         vq_want_stop = 1;
@@ -3530,11 +3565,11 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--monitor")) {
             mon_cli = 1;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            usage(argv[0]);
+            usage(argv[0], stdout);
             return 0;
         } else {
             fprintf(stderr, "pctv-monitor: unexpected argument '%s'\n", argv[i]);
-            usage(argv[0]);
+            usage(argv[0], stderr);
             return 2;
         }
     }
@@ -3896,7 +3931,8 @@ int main(int argc, char **argv)
                          "1/2/Tab video   a audio   A agc   -/+ gain   b boost   m mute");
                 draw_panel(ren, 10, 8 + 7 * 2 + 12, hint, 1);
                 snprintf(hint, sizeof hint,
-                         "c MPEG-2 capture   o monitor   r raw   s snap   g grey   f frame gate   space pause   q quit");
+                         "c capture (%s)   o monitor   r raw   s snap   g grey   f frame gate   space pause   q quit",
+                         MASTER_NAME[cap_master]);
                 draw_panel(ren, 10, 8 + 7 * 2 + 12 + 12, hint, 1);
             }
         }
@@ -3904,15 +3940,15 @@ int main(int argc, char **argv)
 
         /* `H' - the key reference, left up until H is pressed again */
         if (help_on) {
-            const char *hl[13];
+            const char *hl[14];
             char h0[200], h1[200], h2[200], h3[200], h4[200], h5[200], h6[200],
-                 h7[200], h8[200], h9[200], h10[200], h11[200], h12[200];
+                 h7[200], h8[200], h9[200], h10[200], h11[200], h12[200], h13[200];
             snprintf(h0, sizeof h0, "HELP (press H to close)");
             snprintf(h1, sizeof h1, " 1 / 2 / Tab   video input: Composite, S-Video");
             snprintf(h2, sizeof h2, " a             audio input (cycle)      A  automatic gain");
             snprintf(h3, sizeof h3, " - / +         capture gain             b  input boost");
             snprintf(h4, sizeof h4, " m             mute capture             g  colour / grey");
-            snprintf(h5, sizeof h5, " c             MPEG-2 capture on/off    r  raw BT.656 dump");
+            snprintf(h5, sizeof h5, " c             start/stop capture          r  raw BT.656 dump");
             snprintf(h6, sizeof h6, " s             snapshot frame (PPM)     space  freeze display");
             snprintf(h7, sizeof h7, " o             monitor input on speakers (hear the gain first)");
             pthread_mutex_lock(&amtx);
@@ -3927,10 +3963,22 @@ int main(int argc, char **argv)
                      " f             frame gate (%s): hold the last good frame instead of "
                      "showing one that is spliced, short or 40 ms out of step - held %llu/%llu",
                      gate_on ? "on" : "off", frames_held, frames);
+            /* What `c' will actually write, and what it will cost per minute: the
+             * question is always "am I about to put 151 GB on this disk?" */
+            {
+                static const char *const RATE[] =
+                    { "6 MB/min", "1.25 GB/min", "0.42 GB/min", "0.44 GB/min" };
+                pthread_mutex_lock(&amtx);
+                snprintf(h13, sizeof h13, " master: %s  %s  sound: %s%s",
+                         MASTER_NAME[cap_master], RATE[cap_master],
+                         cap_has_audio ? srcs[cur_src].label : "NONE (--no-audio)",
+                         cap_master == MASTER_DVD ? "  (MPEG-2 + MP2, DVD-shaped)" : "");
+                pthread_mutex_unlock(&amtx);
+            }
             hl[0] = h0; hl[1] = h1; hl[2] = h2; hl[3] = h3; hl[4] = h4; hl[5] = h5;
             hl[6] = h6; hl[7] = h7; hl[8] = h8; hl[9] = h9; hl[10] = h10; hl[11] = h11;
-            hl[12] = h12;
-            draw_panel_lines(ren, 10, 70, hl, 13, 1);
+            hl[12] = h12; hl[13] = h13;
+            draw_panel_lines(ren, 10, 70, hl, 14, 1);
         }
 
         /* capture status, top right: recording has to be unmistakable - a red

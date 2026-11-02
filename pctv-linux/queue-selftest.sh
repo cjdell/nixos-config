@@ -41,18 +41,36 @@ export PCTV_PROBE="$PROBE" PCTV_NO_SUDO=1 REPLAY_UYVY="$UYVY" REPLAY_SECS=3600
 export PCTV_FFMPEG="$FFMPEG" PCTV_LOG=0 SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1
 
 fail=0
+# Is the process actually with us?  `kill -0` answers TRUE for a ZOMBIE (a child
+# that has exited but that this shell has not reaped yet), and that made the
+# "did it ignore SIGTERM?" check report a quit lockup on a run that had already
+# finished cleanly.  Ask for a state that is not Z.
+alive() { local s; s=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+         [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
 # $1 = label, $2 = seconds to freeze ffmpeg (0 = don't freeze), $3 = expect
 # "absorbed" (no loss), "stopped" (capture ended itself, file still complete) or
 # "quit" (SIGTERM arrives WHILE the sink is frozen and must still come back at once)
 run() {
-  local label=$1 freeze=$2 expect=$3 log="$OUT/$1.log"
+  local label=$1 freeze=$2 expect=$3
+  local log="$OUT/$label.log"
   pkill -9 -x replayprobe 2>/dev/null; pkill -9 -x ffmpeg 2>/dev/null; sleep 1
-  ( timeout 300 ./pctv-linux/pctv-monitor --capture --capture-seconds "$SECS" \
-      --master uyvy --out-dir "$OUT" >/dev/null 2>"$log" & )
-  local ff="" mp="" _i
-  for _i in $(seq 1 80); do ff=$(pgrep -x ffmpeg | head -1); [ -n "$ff" ] && break; sleep 0.5; done
-  [ -n "$ff" ] || { echo "$label: ffmpeg never appeared"; fail=1; return; }
-  mp=$(pgrep -x pctv-monitor | head -1)
+  # Start it as OUR child and keep that pid.  `pgrep -x | head -1` picks the
+  # OLDEST match, so a leftover monitor from a previous case (or from a failed
+  # run) becomes the one we freeze and signal while the capture under test runs
+  # unobserved - which is exactly how this script produced a nondeterministic
+  # "quit lockup" FAIL.  Same for ffmpeg: it is a child of the monitor, so ask
+  # pgrep for that relationship instead of guessing by name.
+  ./pctv-linux/pctv-monitor --capture --capture-seconds "$SECS" \
+      --master uyvy --out-dir "$OUT" >/dev/null 2>"$log" &
+  local mp=$!
+  local ff="" _i
+  for _i in $(seq 1 120); do
+    ff=$(pgrep -P "$mp" -x ffmpeg | head -1)
+    [ -n "$ff" ] && break
+    alive "$mp" || { echo "$label: monitor died at once (see $log)"; fail=1; return; }
+    sleep 0.5
+  done
+  [ -n "$ff" ] || { echo "$label: ffmpeg never appeared (see $log)"; fail=1; kill -9 "$mp" 2>/dev/null; return; }
   if [ "$freeze" -gt 0 ] && [ "$freeze" -le "$SECS" ]; then
     sleep 4; kill -STOP "$ff"; sleep $((freeze / 2))
     if [ "$expect" = quit ]; then
@@ -60,9 +78,10 @@ run() {
       # its whole grace period on a window that had stopped responding): press
       # stop while the picture is flowing into a sink that is not reading.
       local t0=$SECONDS; kill -TERM "$mp"
-      local g=0; while kill -0 "$mp" 2>/dev/null && [ $g -lt 25 ]; do sleep 1; g=$((g+1)); done
-      if kill -0 "$mp" 2>/dev/null; then
-        echo "$label: FAIL - frozen sink, quit pressed, still alive after 25 s"; fail=1; kill -9 "$mp"
+      local g=0; while alive "$mp" && [ $g -lt 25 ]; do sleep 1; g=$((g+1)); done
+      if alive "$mp"; then
+        echo "$label: FAIL - frozen sink, quit pressed, still alive after 25 s"; fail=1; kill -9 "$mp" 2>/dev/null
+      wait "$mp" 2>/dev/null
       else
         echo "$label: exited $((SECONDS - t0)) s after SIGTERM with the sink frozen"
         [ $((SECONDS - t0)) -le 12 ] || { echo "$label: FAIL - quitting took too long"; fail=1; }
@@ -79,7 +98,7 @@ run() {
   # monitor stays in the live view for the operator - so wait on the log, not on
   # the process, and then quit it the way the user would.
   local waited=0
-  while kill -0 "$mp" 2>/dev/null && [ "$waited" -lt 120 ]; do
+  while alive "$mp" && [ "$waited" -lt 120 ]; do
     grep -qa 'capture stopped' "$log" && break
     sleep 1; waited=$((waited + 1))
   done
@@ -87,13 +106,14 @@ run() {
   # waitpid behind a probe writer wedged on a full pipe).  It is part of the test.
   local t0=$SECONDS
   kill -TERM "$mp" 2>/dev/null
-  while kill -0 "$mp" 2>/dev/null && [ $((SECONDS - t0)) -lt 15 ]; do sleep 0.5; done
-  if kill -0 "$mp" 2>/dev/null; then
+  while alive "$mp" && [ $((SECONDS - t0)) -lt 15 ]; do sleep 0.5; done
+  if alive "$mp"; then
     echo "$label: FAIL - still alive 15 s after SIGTERM: that is the 2026-11-02 quit lockup"
     kill -9 "$mp" 2>/dev/null; fail=1
   else
     printf '%-22s exited %s s after SIGTERM (quit path ok)\n' "" "$((SECONDS - t0))"
   fi
+  wait "$mp" 2>/dev/null          # reap it, or the next case sees a zombie
   pkill -9 -x replayprobe 2>/dev/null
   local f; f=$(ls -t "$OUT"/pctv-cap-*.mkv 2>/dev/null | head -1)
   [ -n "$f" ] || { echo "$label: no output file"; fail=1; return; }

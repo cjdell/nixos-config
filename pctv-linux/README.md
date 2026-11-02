@@ -251,7 +251,7 @@ meter and your ears judge the same signal, before committing to a recording.
 * If the selected input is a **Mic** or **Internal Mic**, the panel says
   `feedback risk` - speakers into a mic will howl; use line in or headphones.
 
-### MPEG-2 capture (`c`)
+### Capture (`c`) — MPEG-2 by default, lossless with `--master`
 
 The deframed UYVY is piped to `ffmpeg` on stdin and the ALSA PCM on fd 3; the
 default result is a plain PAL-DVD-style program stream - `mpeg2video` 720×576
@@ -283,9 +283,83 @@ element, so a plain player treats the frames as progressive: it either combs or
 falls back to 25p, which is exactly the smoothness an archive exists to keep.
 Use `utvideo` when you want the lowest CPU, and then run
 `pctv-field-order --relabel FILE` (a stream copy, seconds) on it; the capture
-says so at stop.  **`uyvy` looks free and is not**: at 20.7 MB/s the writer
-outran the encoder on this box and dropped 17 frames in 60 s, so it is the mode
-to pick only when you would rather re-run a capture than trust a codec.
+says so at stop.  **`uyvy` was the awkward one and no longer is**: it used to drop
+frames ("17 in 60 s") because the capture queue was 6 pictures deep and evicted the
+oldest when the sink fell behind.  Since the no-eviction change (docs §14.2b) a
+10-minute `uyvy` master measured `qmax 1/150`, `dup 0 skip 0 refused 0` and 0 drops,
+and a 3 s freeze of the encoder mid-capture is now absorbed with nothing lost.  It is
+the archival mode with the *least* that can go wrong, because there is no encoder in
+the path at all - the cost is purely bytes (see "Recording a raw master" below).
+
+#### Recording a raw master - the desktop entry, the audio, and where it goes
+
+The menu has **two** entries, and the difference is the whole question:
+
+| entry | what it runs | format | destination |
+| --- | --- | --- | --- |
+| PCTV 320cx Live | `pctv-monitor` | MPEG-2 DVD (`--master dvd`) | `~/Videos` |
+| **PCTV Capture (raw master to NAS)** | `pctv-capture-nas` | **lossless UYVY + PCM** | **`/ds-public/pctv-masters`** (GEN8, NFS) |
+
+The second one is just the same program with two variables set, so it is also
+available by hand, and they are the only two you need:
+
+```sh
+pctv-capture-nas                                   # the desktop entry, from a terminal
+PCTV_MASTER=uyvy PCTV_OUT_DIR=/ds-public/pctv-masters pctv-monitor   # equivalent
+```
+
+* **Yes, it records audio.** Every master carries sound: `pcm_s16le` 48 kHz stereo
+  inside the `.mkv` (`mp2` inside a `dvd` `.mpg`), taken from the input `a` cycles -
+  normally **Line (hw:0,0)**, which is the pigtail's RCAs, and the choice is *saved*
+  in `~/.config/pctv-monitor/audio`. `--no-audio` turns it off **and remembers that**,
+  so check the line the summary prints: `audio Line (hw:0,0) via default (48000 Hz)`
+  means you are recording sound, `audio none` means you are not. `pctv-monitor -L`
+  lists the inputs.
+* **The NAS is the destination only via that entry** - nothing about the machine's
+  defaults changed, so the plain entry still writes MPEG-2 to `~/Videos`. That is
+  deliberate: a raw master is **20.9 MB/s = 1.25 GB/min = 12.6 GB per 10 min = 151 GB
+  per 2 h tape**, which is not a laptop-SSD number (118 GB free) and is a rounding
+  error on GEN8's 17 TB pool. `pctv-capture-nas` therefore **refuses to start** unless
+  `/ds-public` is genuinely an NFS mount (`findmnt -T … -t nfs4`): a capture pointed at
+  a directory that is only the mount point, locally, would write 12 GB to the SSD and
+  look exactly like success. The monitor itself exits 3 if `PCTV_OUT_DIR` is not
+  writable, for the same reason.
+* **It is not the write path that limits anything**: `ds-public` measured 123 MB/s
+  sustained buffered writes (5-6× what a master needs), and the encoder was never in
+  the picture for `uyvy`.  What the queue is sized against is ffmpeg's 10 s stream
+  interleaving limit, not the disk (docs §14.2b).
+
+Prove a run in ten seconds rather than hoping:
+
+```sh
+f=/ds-public/pctv-masters/pctv-cap-….mkv
+ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 $f
+ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 $f \
+  | awk 'NR==1{p=$1;next}{d=$1-p; if(d<0)d=-d; if(d>0.0401)b++}END{print "steps off 40 ms:", b+0}'
+ffmpeg -nostdin -v error -i $f -map 0:a -c copy -f null - && ffprobe -v error -select_streams a:0 \
+  -show_entries stream=codec_name,sample_rate,channels -of csv=p=0 $f
+```
+
+The monitor's own line says the same thing at stop: `15001 frames [dup 0, skip 0,
+refused 0, qmax 1/150 …], 115416392 B audio (0 B cut …), 0 video drops`.  A *short*
+file that is complete beats a long one with holes in it - that is the whole policy
+(`pctv-linux/queue-selftest.sh` is the test that keeps it true).
+
+**Then transcode it when you have time** - the master is the tape, not the deliverable.
+Verified on this box (30 s of tape → 22.9 MB, `field_order=tt`, every frame
+`top_field_first=1`, mp2 audio):
+
+```sh
+ffmpeg -field_order tt -i master.mkv \
+  -c:v mpeg2video -b:v 6M -maxrate 6M -bufsize 1835008 -g 15 -flags +ilme+ildct \
+  -aspect 4:3 -c:a mp2 -b:a 192k -f mpeg master.mpg
+```
+
+`-field_order tt` **must precede `-i`**: `mpeg2video` records the order the *demuxer*
+reported and a raw demuxer reports nothing unless told (docs §10.3).  This laptop
+encodes MPEG-2 at ~5× realtime, so 2 h of tape is ~25 min here - or run it on
+`zen3-nixos`, which mounts the same `/ds-public` and has 32 cores, while the laptop is
+back on the VCR.
 
 `libx264 -qp 0` is also lossless and writes the flags, but it runs at **0.71×**
 realtime here (`-crf 12` at 0.48×), so x264 is not an option at any quality
