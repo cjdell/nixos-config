@@ -54,6 +54,7 @@
 #include <getopt.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <pthread.h>
@@ -2452,6 +2453,178 @@ static int cmd_analog2(int argc, char **argv)
  */
 static volatile sig_atomic_t stream_stop;
 static int stream_inflight;
+/* ---- keeping the *device* from throwing footage away -------------------
+ *
+ * Everything below is about the one buffer nobody can see: the card's own
+ * FIFO.  This is a bulk-IN endpoint, so the device pushes when the host has a
+ * URB posted and NAKs (and, once its internal FIFO wraps, drops) when it does
+ * not.  The number of URBs in flight is therefore the *whole* cushion at the
+ * hardware level - it is not a buffer we can grow after the fact, and a loss
+ * there is invisible from userspace: no error, no counter, just a field that
+ * never arrives.
+ *
+ * 24 URBs x 32 KiB was ~28 ms, which is less than one scheduling hiccup on a
+ * 2-core Core 2 Duo, and the measured symptom was one lost 32 KiB URB every
+ * few seconds (pctv-monitor counted ~74 "stale field" feeds in 300 s = 0.5 %
+ * of pictures, i.e. a visible repeat every 4 s).  128 URBs is 4 MiB = 155 ms;
+ * the memory is charged against the kernel's usbfs buffer accounting, which
+ * `usbfs_memory_mb` defaults to 16 MiB total, so the limit is raised here
+ * before anything is submitted (the probe is root, this is the one place that
+ * knows both).
+ *
+ * The rest is latency, because 155 ms only helps if the host is not asleep for
+ * longer than that: /dev/cpu_dma_latency pins the package out of the deep
+ * C-states whose exit latency is measured in hundreds of microseconds, and the
+ * cpufreq governor is put on `performance` for the length of the stream (a
+ * Core 2 Duo on `ondemand` spends milliseconds ramping up, and this process
+ * is one of the few things on the box that cannot wait for it).  Both are
+ * restored when streaming stops; PCTV_TUNE=0 skips the lot.
+ */
+#define STREAM_URBS_DEFAULT 128
+#define STREAM_URBS_MAX     512
+
+static int   tune_on = 1;
+static int   dma_lat_fd = -1;
+static char  gov_saved[64];
+static int   gov_tuned;
+
+static int write_str(const char *path, const char *s)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, s, strlen(s));
+    int e = errno;
+    close(fd);
+    errno = e;
+    return n == (ssize_t)strlen(s) ? 0 : -1;
+}
+
+/* Ask the kernel for the lowest possible CPU wake-up latency while we stream.
+ * The request lives as long as this fd is open, and dies with the process, so
+ * there is nothing to undo if we are killed. */
+static void tune_cpu_latency(int on)
+{
+    if (on) {
+        dma_lat_fd = open("/dev/cpu_dma_latency", O_WRONLY);
+        if (dma_lat_fd < 0) {
+            fprintf(stderr, "stream: /dev/cpu_dma_latency: %s (deep C-states stay "
+                            "enabled; wake-up latency is not bounded)\n",
+                    strerror(errno));
+            return;
+        }
+        int32_t zero = 0;
+        if (write(dma_lat_fd, &zero, sizeof zero) != sizeof zero) {
+            fprintf(stderr, "stream: cpu_dma_latency write: %s\n", strerror(errno));
+            close(dma_lat_fd); dma_lat_fd = -1;
+            return;
+        }
+        fprintf(stderr, "stream: cpu_dma_latency 0 (no deep C-states while streaming)\n");
+    } else if (dma_lat_fd >= 0) {
+        close(dma_lat_fd);
+        dma_lat_fd = -1;
+    }
+}
+
+/* One governor for every CPU; remember what it was and put it back. */
+static void tune_governor(int on)
+{
+    char path[128], cur[64] = "";
+    if (on) {
+        int fd = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", O_RDONLY);
+        if (fd < 0) return;                      /* no cpufreq: nothing to do */
+        ssize_t n = read(fd, cur, sizeof cur - 1);
+        close(fd);
+        if (n <= 0) return;
+        cur[n] = 0;
+        char *nl = strchr(cur, '\n'); if (nl) *nl = 0;
+        snprintf(gov_saved, sizeof gov_saved, "%s", cur);
+        if (!strcmp(cur, "performance")) return;   /* already there */
+        int done = 0;
+        for (int cpu = 0; cpu < 32; cpu++) {
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/"
+                                        "scaling_governor", cpu);
+            if (write_str(path, "performance") == 0) done++;
+        }
+        if (done) {
+            gov_tuned = 1;
+            fprintf(stderr, "stream: cpufreq governor %s -> performance on %d cpu(s)\n",
+                    gov_saved, done);
+        } else {
+            fprintf(stderr, "stream: could not set the cpufreq governor (root?)\n");
+        }
+    } else if (gov_tuned) {
+        for (int cpu = 0; cpu < 32; cpu++) {
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/"
+                                        "scaling_governor", cpu);
+            write_str(path, gov_saved);
+        }
+        fprintf(stderr, "stream: cpufreq governor restored to %s\n", gov_saved);
+        gov_tuned = 0;
+    }
+}
+
+/* The kernel caps the total buffer memory it will hold for *all* usbfs URBs
+ * (usbfs_memory_mb, 16 MiB by default).  A 128-URB stream asks for 4 MiB, but
+ * the budget is shared with every other libusb user on the box and a refused
+ * submit is a silently narrower pipe - so raise it to 64 MiB first.  Writable
+ * only as root, which the normal (sudo -n) path is. */
+static void tune_usbfs_memory(size_t need)
+{
+    const char *p = "/sys/module/usbcore/parameters/usbfs_memory_mb";
+    int want = (int)((need + (1u << 20) - 1) >> 20) * 4;
+    char b[32] = "";
+    if (want < 64) want = 64;
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return;
+    ssize_t n = read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n > 0) {
+        b[n] = 0;
+        char *nl = strchr(b, '\n'); if (nl) *nl = 0;
+        if (atoi(b) >= want) return;
+    }
+    char vs[32];
+    snprintf(vs, sizeof vs, "%d\n", want);
+    if (write_str(p, vs) == 0)
+        fprintf(stderr, "stream: usbfs_memory_mb %s->%d MiB\n", n > 0 ? b : "?", want);
+    else
+        fprintf(stderr, "stream: usbfs_memory_mb is %s MiB and not writable "
+                        "(%s) - URB submits may be refused\n",
+                n > 0 ? b : "?", strerror(errno));
+}
+
+static void stream_tune(size_t urb_bytes)
+{
+    const char *e = getenv("PCTV_TUNE");
+    if (e && atoi(e) == 0) { tune_on = 0; return; }
+    tune_usbfs_memory(urb_bytes);
+    tune_cpu_latency(1);
+    tune_governor(1);
+}
+
+static void stream_untune(void)
+{
+    if (!tune_on) return;
+    tune_governor(0);
+    tune_cpu_latency(0);
+}
+
+/* malloc + pre-fault + mlock.  A page fault in the middle of libusb's callback
+ * is a page fault on the one path that must not take one, and the first touch
+ * of 4 MiB of fresh buffer is 1000 minor faults; do them here, while nothing is
+ * streaming.  mlock keeps them resident even if the box is short of RAM.  Both
+ * the pre-fault and the mlock are best-effort: the capture is what matters. */
+static void *locked_alloc(size_t n, const char *what)
+{
+    void *p = malloc(n);
+    if (!p) { fprintf(stderr, "stream: out of memory for %zu B of %s\n", n, what); return NULL; }
+    memset(p, 0, n);
+    if (mlock(p, n) != 0)
+        fprintf(stderr, "stream: mlock %zu B of %s: %s (pre-faulted anyway)\n",
+                n, what, strerror(errno));
+    return p;
+}
+
 /* Data actually lost to a consumer that is not draining stdout fast enough.
  * Every chunk lost here is whole BT.656 lines: the parser resyncs on the next
  * SAV and keeps filling the SAME field, so the lines after the gap land one
@@ -2464,6 +2637,26 @@ static unsigned long long stream_drop_chunks, stream_drop_bytes;
 static double drop_t[DROP_LOG];
 static struct timespec stream_t0;
 static void stream_on_sig(int sig) { (void)sig; stream_stop = 1; }
+
+/* Completion-side diagnostics.  A URB completing late is the only userspace
+ * view of the host having been away from the USB endpoint for too long - and
+ * once the URB pool is exhausted the device drops data with no error at all.
+ * So: the longest gap between two completions (a URB should arrive every ~1.2
+ * ms at 27 MB/s), how many URBs came back short, and how many submits the
+ * kernel refused. */
+static double stream_last_cb_t;
+static double stream_gap_max_ms;
+static unsigned long long stream_short_urbs, stream_late_events;
+static unsigned long long stream_submit_fail;
+#define LATE_LOG 64
+static double late_t[LATE_LOG];
+
+static double mono_s(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
 
 /* ---- the stdout queue: the one place that used to destroy data -----------
  * stream_cb() used to write() each completed URB straight into the pipe and, on
@@ -2623,7 +2816,10 @@ static void sq_start(void)
     if (sq_mib <= 0) return;                 /* inline (old) behaviour */
     size_t cap = (size_t)sq_mib << 20;
     cap = (cap / SQ_CHUNK + 1) * SQ_CHUNK;
-    sq = malloc(cap);
+    /* Pre-faulted and locked: this ring is written from the USB callback, and a
+     * 256 KiB chunk that is not resident yet would page-fault on the one path
+     * that must never wait.  (64 MiB of first touch here, before streaming.) */
+    sq = locked_alloc(cap, "stream ring");
     if (!sq) { fprintf(stderr, "stream: no %d MiB stream queue - writing inline\n",
                         sq_mib); return; }
     sq_cap = cap;
@@ -2673,12 +2869,36 @@ static void stream_write_inline(const unsigned char *buf, size_t len)
 
 static void stream_cb(struct libusb_transfer *t)
 {
+    /* Time this completion against the previous one.  10 ms is ~8 URB periods,
+     * i.e. the box went away for long enough that the pool was half drained;
+     * 20 ms is a field. */
+    double now = mono_s();
+    if (stream_last_cb_t > 0.0) {
+        double gap = (now - stream_last_cb_t) * 1000.0;
+        if (gap > stream_gap_max_ms) stream_gap_max_ms = gap;
+        if (gap >= 10.0 && stream_late_events < LATE_LOG) {
+            late_t[stream_late_events] = now - (stream_t0.tv_sec +
+                                                1e-9 * stream_t0.tv_nsec);
+            stream_late_events++;
+        }
+    }
+    stream_last_cb_t = now;
+
     if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0) {
+        if (t->actual_length < t->length) stream_short_urbs++;
         if (sq) sq_produce(t->buffer, (size_t)t->actual_length);
         else stream_write_inline(t->buffer, (size_t)t->actual_length);
     }
     if (!stream_stop) {
-        if (libusb_submit_transfer(t) < 0) stream_stop = 1;
+        int rc = libusb_submit_transfer(t);
+        if (rc < 0) {
+            stream_submit_fail++;
+            if (stream_submit_fail == 1)
+                fprintf(stderr, "stream: resubmit failed: %s (usbfs buffer "
+                                "budget exhausted? the URB pool is shrinking)\n",
+                        libusb_error_name(rc));
+            stream_stop = 1;
+        }
     } else {
         stream_inflight--;
     }
@@ -2754,43 +2974,97 @@ static int cmd_stream(int argc, char **argv)
     close(saved_out);
     int fl = fcntl(STDOUT_FILENO, F_GETFL, 0);
     if (fl >= 0) fcntl(STDOUT_FILENO, F_SETFL, fl | O_NONBLOCK);
+
+    const char *eu = getenv("PCTV_URB");
+    int bufsz = eu ? atoi(eu) : ACAP_BUFSZ;
+    if (bufsz < 512) bufsz = 512;
+
+    /* How many URBs stay posted on the endpoint.  This is the card's FIFO
+     * cushion (see the block above stream_tune): 24 x 32 KiB is 28 ms, 128 is
+     * 155 ms.  PCTV_URBS overrides; the ceiling is memory, not the protocol. */
+    int nurbs = STREAM_URBS_DEFAULT;
+    {   const char *e = getenv("PCTV_URBS");
+        if (e) {
+            int n = atoi(e);
+            if (n >= 8 && n <= STREAM_URBS_MAX) nurbs = n;
+            else fprintf(stderr, "stream: PCTV_URBS=%d ignored, using %d "
+                                 "(8..%d)\n", n, nurbs, STREAM_URBS_MAX);
+        }
+    }
+
+    struct libusb_transfer **tr = calloc((size_t)nurbs, sizeof *tr);
+    unsigned char **buf = calloc((size_t)nurbs, sizeof *buf);
+    if (!tr || !buf) { fprintf(stderr, "stream: out of memory\n"); return -1; }
+
+    stream_tune((size_t)nurbs * (size_t)bufsz);
+    atexit(stream_untune);          /* also on a signal that unwinds normally */
+
     sq_start();                 /* the queue that replaced drop-on-EAGAIN */
     signal(SIGINT, stream_on_sig);
     signal(SIGTERM, stream_on_sig);
     signal(SIGPIPE, SIG_IGN);
 
-    const char *eu = getenv("PCTV_URB");
-    int bufsz = eu ? atoi(eu) : ACAP_BUFSZ;
-    if (bufsz < 512) bufsz = 512;
-    struct libusb_transfer *tr[ACAP_URBS];
-    unsigned char *buf[ACAP_URBS];
     clock_gettime(CLOCK_MONOTONIC, &stream_t0);
-    for (int i = 0; i < ACAP_URBS; i++) {
-        buf[i] = malloc(bufsz);
+    stream_last_cb_t = 0.0;
+    int submitted = 0;
+    for (int i = 0; i < nurbs; i++) {
+        buf[i] = locked_alloc((size_t)bufsz, "URB buffer");
+        if (!buf[i]) break;
         tr[i] = libusb_alloc_transfer(0);
+        if (!tr[i]) break;
         libusb_fill_bulk_transfer(tr[i], dev, ep, buf[i], bufsz, stream_cb, NULL, 1000);
-        if (libusb_submit_transfer(tr[i]) == 0) stream_inflight++;
+        int rc = libusb_submit_transfer(tr[i]);
+        if (rc == 0) { stream_inflight++; submitted++; }
+        else {
+            if (stream_submit_fail++ == 0)
+                fprintf(stderr, "stream: submit #%d failed: %s (usbfs memory?)\n",
+                        i, libusb_error_name(rc));
+            libusb_free_transfer(tr[i]);
+            tr[i] = NULL;
+            free(buf[i]); buf[i] = NULL;
+        }
     }
-    fprintf(stderr, "stream: ep 0x%02x, %d URBs x %d B -> stdout (Ctrl-C to stop)\n",
-            ep, ACAP_URBS, bufsz);
+    if (!submitted) {
+        fprintf(stderr, "stream: no transfer could be submitted - cannot stream\n");
+        stream_untune();
+        return -1;
+    }
+    fprintf(stderr, "stream: ep 0x%02x, %d/%d URBs x %d B (%.0f ms of device-side "
+                    "cushion) -> stdout (Ctrl-C to stop)\n",
+            ep, submitted, nurbs, bufsz,
+            1000.0 * (double)submitted * (double)bufsz / 27648000.0);
 
     while (!stream_stop && stream_inflight > 0) {
         struct timeval tv = { 0, 100000 };
         libusb_handle_events_timeout_completed(NULL, &tv, NULL);
     }
     stream_stop = 1;
-    for (int i = 0; i < ACAP_URBS; i++) libusb_cancel_transfer(tr[i]);
+    for (int i = 0; i < nurbs; i++)
+        if (tr[i] && tr[i]->dev_handle) libusb_cancel_transfer(tr[i]);
     for (int t = 0; t < 100 && stream_inflight > 0; t++) {
         struct timeval tv = { 0, 50000 };
         libusb_handle_events_timeout_completed(NULL, &tv, NULL);
     }
-    for (int i = 0; i < ACAP_URBS; i++) { libusb_free_transfer(tr[i]); free(buf[i]); }
+    for (int i = 0; i < nurbs; i++) {
+        if (tr[i]) libusb_free_transfer(tr[i]);
+        if (buf[i]) { munlock(buf[i], (size_t)bufsz); free(buf[i]); }
+    }
+    free(tr); free(buf);
     sq_finish();                /* flush what the ring still holds, then join */
+    stream_untune();
     fprintf(stderr, "stream: stopped (%llu drops, %llu B lost to a full stream "
                     "queue / EAGAIN)\n",
             stream_drop_chunks, stream_drop_bytes);
+    fprintf(stderr, "stream: %d URBs posted, max gap between completions %.1f ms, "
+                    "%llu short URBs, %llu late events (>=10 ms), %llu submit "
+                    "failures\n",
+            submitted, stream_gap_max_ms, stream_short_urbs, stream_late_events,
+            stream_submit_fail);
     for (unsigned long long i = 0; i < stream_drop_chunks && i < DROP_LOG; i++)
         fprintf(stderr, "stream: EAGAIN drop at t=%.3f s\n", drop_t[i]);
+    for (unsigned long long i = 0; i < stream_late_events && i < LATE_LOG; i++)
+        fprintf(stderr, "stream: no URB completed for >=10 ms at t=%.3f s\n",
+                late_t[i]);
     return 0;
 }
 

@@ -279,45 +279,79 @@ Matroska twin (which fixes the label, never the MPEG-2 bitstream).
 * **Recording is obvious on screen**: a 4 px red border around the frame, a
   large `REC mm:ss.t` badge with a dot blinking once a second, and a line with
   frames, bytes, the drop counters and the encoder queue occupancy.
-* Frames are queued **where they are born** (a 12-slot ring, one frame per
-  assembled picture) and a single **writer thread** owns every write to ffmpeg's
+* Frames are queued **where they are born** (24 slots, one per assembled
+  picture, 960 ms) and a single **writer thread** owns every write to ffmpeg's
   two pipes.  Writing an 829 KB UYVY frame inline meant the display waited on the
   encoder - and while the main loop waits, nothing drains the probe either, so the
   whole pipeline hiccups.
-* **The 25 fps clock lives in the writer thread, and it is the audio stream's
-  clock**: a frame goes out when the muxed audio reaches 40 ms x n, not when 40 ms
-  of host time has passed.  That is what keeps a two-hour tape from ending with
-  its picture a second ahead of its speech, and it is why the REC overlay says
-  `audio clock` / `wall clock`.  Full reasoning and the measurements:
-  `docs/pctv-analog-capture.md` §11.
+* **The picture is the clock.**  A queued frame goes to ffmpeg the moment it
+  exists, so the file's cadence *is* the card's field cadence and no difference
+  between the two crystals can ever evict a picture.  The wall clock is only a
+  watchdog: if the source stops producing frames for longer than a frame period
+  (+30 ms) the last picture is repeated, so a paused deck or an input switch
+  cannot shorten the video track.  The overlay calls this `card clock`.
+  `PCTV_CLOCK=audio` restores the 2026-11-01 design (the writer paced by the PCM
+  byte count), which is exact in the file and pays with a duplicated/evicted
+  frame every time the clocks disagree by 40 ms.  Full reasoning and the
+  measurements: `docs/pctv-analog-capture.md` §11 and §14.
+* **The audio is resampled onto that timeline.**  The card's 25 fps comes from
+  the incoming video signal and the PCM from the host codec's own crystal; on
+  this box they differ by ~135 ppm = 1 s per two hours.  Rather than let that
+  cost pictures, `rs_update()` measures the ratio against the number of frames
+  written and linearly resamples the audio by it (0.23 cents of pitch - nothing
+  on a tape).  Both tracks are then the same length by construction, and the
+  overlay/stop line print the measured ppm.
 * Nothing is dropped to keep up any more: the audio queue is 1 MiB (5.5 s), the
-  video ring 10 frames (400 ms) and the encoder's own video pipe 8 MiB (10
-  frames), and both pipes are non-blocking with a resume-on-partial write, so a
-  stalled encoder costs latency and, at the very worst, counted drops - never a
-  wedged GUI, a corrupted stream or a hung `c`.
+  video ring 960 ms and the encoder's own video pipe 8 MiB (10 frames), and both
+  pipes are non-blocking with a resume-on-partial write, so a stalled encoder
+  costs latency and, at the very worst, counted drops - never a wedged GUI, a
+  corrupted stream or a hung `c`.
 * **`dup` and `skip` are the two numbers that say whether the recording kept every
-  picture.** `dup` = the clock asked and the card had not delivered (one frame
+  picture.** `dup` = the source delivered no new picture in time (one frame
   written twice - a visible drag); `skip` = the queue filled and the oldest frame
   was evicted (a picture lost - a visible jump).  A clean capture reads
-  `dup 0, skip 0`; the stop line repeats them.  If the card and the host disagree
-  by a few tens of ppm you will see one event every few minutes, and that is the
-  most any two crystals can promise.
+  `dup 0, skip 0`; the stop line repeats them.  With the card as the clock these
+  can only come from the *source* stopping or the encoder falling behind -
+  never from the two clocks, which is what the ppm figure is for.
+* **A hole in the USB stream no longer costs a picture either.**  A guard code at
+  the wrong pitch proves exactly how many BT.656 lines vanished, so the parser
+  advances the row counter by that many and fills the gap from the previous
+  clean frame's same-parity rows (`gap_resync`).  Before 2026-11-02 it threw the
+  field away, which is 25 repeated pictures a second on a marginal USB path.
+  The final line prints `stream gaps of N B/M rows repaired`.
 * Watch a `.mpg` with the field order declared (`ffplay -top 1`, `AssumeTFF()`):
   MPEG-2 cannot carry it, and a player that guesses wrong deinterlaces every
   moving object backwards - which is what "the recording is not as fluid as the
   live view" usually was, on top of the cadence work above.  `--master ffv1` and
   `uyvy` stamp the flag correctly.
+* **Play an interlaced capture *as* interlaced**, or it cannot look as smooth as
+  the live view.  The card's 50 fields/s are two 25 Hz half-pictures; a player
+  that shows 25 whole frames a second (or blends them) throws half of the motion
+  away no matter how perfect the file is.  Bob the fields back to 50 Hz:
+
+  ```sh
+  mpv --deinterlace=yes '--vf=bwdif=parity=tff' FILE      # 50p, full height per field
+  ffplay -vf bwdif=mode=send_field:parity=tff FILE        # same, no mpv
+  ```
+
+  `bwdif`'s `send_field` is the default and is the point: 50 distinct time
+  samples per second, which is what the eye compares against the live picture.
+  For an archive, keep the master interlaced and produce 50p with QTGMC on the
+  fast machine (`footage/README.md`); on this box `bwdif` is the most that fits.
 
 Knobs for the capture path (all environment, all optional):
 
 | variable | default | what it does |
 | --- | --- | --- |
-| `PCTV_VQ_SLOTS` | 24 | video queue depth, 4..32 frames (each costs 829 KB); raise it if `skip` climbs |
+| `PCTV_VQ_SLOTS` | 24 | video queue depth, 4..64 frames (each costs 829 KB); raise it if `skip` climbs |
 | `PCTV_HOLD_SECS` | 120 | end-of-tape: how long a **bit-identical** picture may run inside a file before the file is closed; the card stays claimed and a new file opens when the picture moves again. `0` never closes (a frozen frame is then recorded for as long as it lasts) |
 | `PCTV_HOLD_MAX` | 0 (watch for ever) | also end the *run* this many seconds after the picture stopped, releasing the card - the one to set for an unattended overnight tape (`900` = quit 15 min after it ends); clamped up to `PCTV_HOLD_SECS` |
 | `PCTV_HOLD_RESUME` | 25 | changed frames (1 s) needed before the picture counts as back, so one tracking glitch cannot open a file |
 | `PCTV_HOLD_STRESS` | - | self-test: report a frozen picture for the first N seconds whatever the deck is doing, so both transitions (close, reopen) can be exercised without waiting for a tape to end |
 | `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
+| `PCTV_URBS` | 128 | how many 32 KiB URBs stay posted on the endpoint: the card's *own* FIFO cushion, 8..512 (128 = 4 MiB = 155 ms). 24 (~28 ms) was the old value and cost a field every few seconds on a busy box |
+| `PCTV_TUNE` | 1 | `0` skips the probe's stream-time tuning (cpu_dma_latency, cpufreq `performance`, usbfs_memory_mb) for an A/B run |
+| `PCTV_CLOCK` | `video` | `video` = the card is the clock and the audio is resampled to it (the default, cannot cost a picture); `audio` = the 2026-11-01 audio-paced writer |
 | `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
 | `PCTV_LOG` | file when detached | `$XDG_STATE_HOME/pctv-monitor.log` holds every line when there is no terminal (the desktop launcher has none, so `dup`/`skip`/`held` used to vanish with it); `PCTV_LOG=/path` picks the file, `PCTV_LOG=0` keeps stderr as-is |
 | `PCTV_MASTER` | `dvd` | `dvd` / `uyvy` / `ffv1` (`--master` on the command line) |
@@ -349,6 +383,21 @@ SDL_VIDEODRIVER=dummy ./pctv-monitor -i svideo --monitor --capture-seconds 10
 # or drive the stream directly:
 sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 ```
+
+### Proving the capture path keeps every field, without the card
+
+```sh
+./capture-selftest.sh        # -v for the anomaly timeline
+```
+
+`fakeprobe.c` emits real-time BT.656 in exactly this card's line layout and can
+inject the two things that go wrong - a lost 32 KiB URB (a hole at a mid-line
+byte offset) and a hole aligned to whole lines (which no parser can locate) - and
+the script also `SIGSTOP`s the driver for a second to emulate the desktop being
+away.  Each case is asserted against the counters on the stop line (`dup`,
+`skip`, `short`, `repaired at the seam`, `held`), so a change that starts costing
+a picture fails the script instead of a tape.  Expected output: a list of PASSes,
+the four captures' summaries, and `all checks passed`.
 
 `PCTV_VERBOSE=1` prints one line per second: the codec's gain, the meter peaks,
 the clip count, the byte counters, the encoder queue occupancy, and the **worst

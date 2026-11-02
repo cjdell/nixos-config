@@ -129,6 +129,25 @@ in
     # refused F_SETPIPE_SZ is now a latency regression rather than lost tape -
     # which is why the stream queue is sized from the same arithmetic and why
     # both are declared here instead of being left to chance.
+    #
+    # Since 2026-11-02 the *card's* side has one too: the probe keeps 128 URBs
+    # (4 MiB = 155 ms) posted on the endpoint instead of 24 (28 ms), which is the
+    # only cushion that stops the device dropping whole fields when the host is
+    # late. That is what `usbfs_memory_mb` below and PCTV_URBS size; "we lost a
+    # field every few seconds" and "a pipe overflowed" are different failures and
+    # now have different counters (§14).
+    # The kernel's usbfs buffer accounting is a *streaming* limit, not a driver
+    # detail: usbfs_memory_mb (16 MiB by default) is the total pinned memory it
+    # will hold for every URB of every libusb user on the box, and a submit that
+    # does not fit is refused - which does not fail, it just makes the pipe
+    # narrower and the card's FIFO overflows sooner.  Since 2026-11-02 the probe
+    # keeps 128 URBs x 32 KiB (4 MiB) posted, i.e. 155 ms of device-side cushion
+    # instead of the 28 ms that 24 URBs bought, so the budget has to be raised.
+    # The probe raises it itself at stream start (it is root, and it is the only
+    # thing that knows what it is about to ask for); this makes it true earlier
+    # and for everything else too.
+    boot.kernelParams = [ "usbcore.usbfs_memory_mb=64" ];
+
     boot.kernel.sysctl."fs.pipe-max-size" = lib.mkDefault "67108864";
 
     # ...and the per-user half of the same arithmetic.  `F_SETPIPE_SZ` charges
@@ -168,6 +187,18 @@ in
         type = "-";
         item = "rtprio";
         value = "20";
+      }
+      # pctv-monitor mlock()s the capture rings (24 x 829 KB of frame queue +
+      # 1 MiB of audio, prefaulted at the first `c') so that a first-touch page
+      # fault cannot land in the middle of a field.  The default RLIMIT_MEMLOCK
+      # for an unprivileged user is 64 KiB, so without this the mlock is refused
+      # and the protection is only the prefault.  Refused is not fatal - it says
+      # so on stderr and carries on.
+      {
+        domain = "@wheel";
+        type = "-";
+        item = "memlock";
+        value = "1048576"; # KiB = 1 GiB, comfortably over the ~30 MB asked for
       }
     ];
 

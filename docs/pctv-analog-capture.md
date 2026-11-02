@@ -559,6 +559,7 @@ damage: run the same seek against the original and see the identical two lines.
 | `pctv-linux/probe.c` | the userspace driver: vendor request map, `analog2_bringup`, `stream` |
 | `pctv-linux/pctv-monitor.c` | BT.656 parser, SDL2 view, capture masters (§10), AGC |
 | `pctv-linux/live-module.nix`, `package.nix` | deployment: handoff unit, udev, sysctl, RT limits, firmware, wrappers |
+| `pctv-linux/capture-selftest.sh` (+ `fakeprobe.c`) | the capture path's regression harness: real-time synthetic BT.656 with injected URB losses, aligned holes and driver stalls (§14.5) |
 | `pctv-linux/README.md` | usage, keys, options; and why `driver/` (the V4L2 module) is retired |
 | `pctv-linux/COLD-BOOT-NOTES.md` | cold-boot runbook and symptom → cause → fix table |
 | `scripts/pctv-autoend.sh` (+ `-test.sh`) | tape-end watchdog and its harness (§12) |
@@ -569,3 +570,211 @@ the vendor driver actually puts on the wire. If the device is control-transfer +
 stream and only one program needs the data, userspace gets you a working product —
 faster to iterate, no kernel-version coupling, no `CONFIG_RUST` toolchain, and nothing
 to rebuild when the kernel bumps.
+
+## 14. Smoothness: the 2026-11-02 capture rework
+
+Reported symptom, again: *the recording still does not look as smooth as the live
+view*, and *SSHing in during a capture makes it stutter*.  Both are true, they
+have three independent causes, and only one of them is buffering.
+
+What "smooth" has to mean here: the file is 25 fps interlaced, so its 50 fields a
+second are 50 distinct moments.  A recording is as smooth as the live picture
+when **every field the card produced reaches the file exactly once, in order, with
+no repeats and no evictions**, and when the audio track is the same length as the
+video track so nothing has to be stretched at the end.  Everything below is that
+sentence, item by item.
+
+### 14.1 Where a field was actually going (measured)
+
+A 300 s capture of live tape, old code: `7515 frames, dup 39, skip 1`, and the
+monitor's own anomaly log said the 39 line up with **74 "stale-field feeds"** -
+the deframer seeing the same field parity twice, which only happens when a whole
+field *never arrived*.  One every four seconds, 0.5 % of pictures, which is a
+visible hitch every four seconds.
+
+Only one thing can remove a whole field from a bulk-IN stream: **the host had no
+URB posted when the device had data**, and the device's FIFO wrapped.  That is
+
+* invisible - no error, no counter, no short read: the bytes simply are not in the
+  stream; and
+* tiny - 24 URBs x 32 KiB is 768 KiB, which at 27 MB/s is **28 ms**.  Less than one
+  scheduling hiccup on a 2-core Core 2 Duo running kwin, PipeWire and a build, and
+  the earlier session measurements had the box at load average 6.5 against 1.15
+  cores of demand.
+
+So the fix is not more of our own buffering (there is already 2.4 s in the probe
+and 1.2 s in the pipe, which is why `0 stream drops` was being printed the whole
+time) - it is **more of the card's**: `PCTV_URBS`, default 128 x 32 KiB = 4 MiB =
+155 ms.  Five times the deadline for the scheduler to come back.
+
+### 14.2 Where the rest of the hitch was
+
+Four more things, each cheap once the cause is picked apart:
+
+0. **The frame was being destroyed *after* all that buffering.** `field_commit()`
+   assembled each picture into one buffer and set a flag; the **main loop** then
+   handed that buffer to the capture queue.  With nothing else going on the loop
+   turns over every 17-28 ms, so that was invisible.  But `pump()` reads and
+   parses *everything the pipe holds* on each pass, so one slow iteration (a modal
+   paint, a page-in, an SSH login, a `sync`) makes it chew through hundreds of
+   milliseconds of stream and assemble a dozen pictures - and only the **last**
+   one was ever queued.  That is precisely "a fresh picture is lost when the box is
+   busy", and it is why deeper pipes never fixed it: the loss happened downstream
+   of every buffer.  The frame is now queued **where it is born**, inside
+   `field_commit()`, one slot per assembled picture.  The main loop keeps only
+   what must not run inside the parser (`cap_start()`, which pumps) and the
+   drawing.  Same class of bug as §11's "every frame is queued where it is born",
+   one layer further down - and just as invisible without reading the call site.
+1. **A USB hole used to cost two whole fields, and it no longer has to.** The
+   bytes are gone, but the *lines that survived are not damaged*: BT.656 numbers
+   them by content, so the only thing a hole costs is knowing **which row each
+   line belongs to** - and that is measurable, from two things the stream does
+   carry:
+
+   * the **guard-code pitch**. It is fixed at 1728 B, so a hole that starts or
+     ends mid-line shows up as a seam at the wrong pitch, and the pitch says how
+     many bytes are missing (a lost 32 KiB URB is 18.96 lines, so it always
+     leaves one);
+   * the **field length**. Removing N *whole* lines leaves the guard codes
+     exactly 1728 B apart - nothing at all to see - but it leaves the field N
+     lines short at its end.
+
+   The pitch gives the seam's position, the field length gives the shortfall, and
+   `field_commit()` puts them together: everything below the seam moves down by
+   `shortfalls` rows and the band is filled from the last clean frame's
+   same-parity rows. **A lost URB is now a 19-row band that is 40 ms old, not a
+   repeated picture**, and the field keeps its geometry and its place in the
+   cadence. The one case no parser can fix is a hole aligned exactly to whole
+   lines *and* not followed by a short field (two holes in one field): then the
+   shortfall cannot be placed, the field is held and the gate repeats one
+   picture - the honest worst case, and it is counted. The exit line prints
+   `stream gaps of N B/M rows, K repaired at the seam`.
+
+   A **false** guard code inside active video (0xFF 0x00 0x00 does occur in
+   bright saturated pictures) used to look like a hole too, and cost two fields.
+   A candidate closer than one full line to the previous real one cannot be a
+   line boundary, so it is now ignored and counted (`false sync words`).
+2. **The clock cost frames.** Pacing the video on the audio byte count (§11) makes
+   the two tracks exactly consistent *and* turns the crystal difference into a
+   duplicate or an eviction every 40 ms of accumulated error.  On this box that
+   error is **+135 ppm** (measured: 59.328 s of audio against 59.320 s of video in
+   60 s), so a hitch every ~5 minutes, forever.  Reversed on 2026-11-02: the card
+   is the clock (a queued frame goes out immediately, so the file's cadence is the
+   field cadence and no clock difference can evict anything) and the *audio* is
+   resampled to the frame count instead - a 0.23 cent pitch shift, and both tracks
+   are the same length by construction.  `PCTV_CLOCK=audio` restores the old
+   writer for A/B runs.
+3. **Sync was measured by track *length*, not by tape position.** A duplicated or
+   evicted picture advances the file's video timeline 40 ms without 40 ms of new
+   content, so every one of them walks the sound out of step with the picture and
+   never comes back - 39 of them in 5 minutes (the measurement in §14.1) is 1.5 s
+   of lip-sync error with both tracks still the same length.  Now the same 40 ms
+   of audio is dropped whenever a picture is repeated or evicted
+   (`aq_skip_bytes`), so the two timelines stay locked to one tape position.  The
+   stop line reports it separately (`N B cut to match the picture`) so it can
+   never be mistaken for a dropout.
+4. **The first frame and the first audio sample were not the same instant.**
+   `cap_start()` waits up to 2 s for the PCM to come up, and the audio queue was
+   already filling during that wait - so a capture started right after launch
+   could carry up to 2 s of sound in front of its first picture.  The writer now
+   refuses to write audio until frame 0 exists and discards the pre-roll, which
+   bounds the offset by one capture period (60 ms) instead.
+
+### 14.2a When the picture is allowed to repeat at all
+
+A repeated picture is not free: it advances the file's video timeline 40 ms for
+content that does not exist, so it *is* a 40 ms sync error unless the matching
+audio is cut as well (14.2.3, which is why those two ship together).  So the
+writer repeats only when it is sure the source itself has stopped, and "the queue
+is empty" is not that:
+
+* **nothing queued for >70 ms**, *and*
+* **fewer than 4 pictures in the last 400 ms** (a live source puts 10 there), *and*
+* **nothing waiting to be parsed** - `FIONREAD` on the probe's pipe plus the
+  parse buffer.
+
+The third test is what makes a desktop freeze safe.  The card never stops
+streaming (a paused deck still emits fields), so pictures that are not arriving
+while *bytes are* arriving can only mean the host is behind - and those pictures
+are coming.  Early on this was got wrong in the expensive direction: a 300 ms
+stall earned a dozen repeats **and** then the dozen real pictures, which makes the
+video track longer than the tape and walks the sound out of step.  A 1 s
+`SIGSTOP` of the whole process is now `dup 0, skip 0` with the full picture count
+(14.5).
+
+### 14.3 The system tuning that keeps the deadline
+
+All of it in `pctv_probe` at stream start (it is root, and it is the only stage
+that destroys data when it is late); all of it restored on exit; `PCTV_TUNE=0`
+turns it off.
+
+| what | why |
+| --- | --- |
+| `usbfs_memory_mb` -> 64 MiB | the kernel's budget for *all* pinned URB memory is 16 MiB by default; 128 URBs need 4 MiB of it and a refused submit silently narrows the pipe |
+| `/dev/cpu_dma_latency` = 0 | pins the package out of the deep C-states; exit latency is hundreds of microseconds and this is what "SSHing in stutters it" looks like from the CPU's side |
+| cpufreq governor -> `performance` | one governor for all CPUs, remembered and restored; `ondemand`/`schedutil` spends milliseconds ramping up |
+| `mlock` + pre-fault | 64 MiB stream ring, 4 MiB of URB buffers, 20 MB of frame queue, 1 MiB of audio: a first-touch page fault in the producer is a stall in the one place there is no cushion. The monitor's half is `mlock`ed under the `memlock` login limit `live-module.nix` sets for `@wheel` |
+| `SCHED_FIFO` (probe 10, monitor 8, ffmpeg none) | unchanged from 6fdd651 - this is what stops the desktop from being able to preempt the path at all, and the deeper URB pool is what stops a 100 ms kernel excursion from mattering anyway |
+
+### 14.4 Playing it back is half the complaint
+
+A 25 fps interlaced file shown as 25 whole frames a second has already lost half
+its motion, however perfect the capture.  The live view shows 50 fields a second
+because it is redrawn on each field.  Compare like with like:
+
+```sh
+mpv --deinterlace=yes '--vf=bwdif=parity=tff' FILE      # 50p, one field per output
+ffplay -vf bwdif=mode=send_field:parity=tff FILE
+```
+
+`send_field` (the default) is the operative part.  Anything that blends or shows
+one field per frame - including VLC's default "automatic" on some builds - will
+look like the old, less smooth capture no matter what the file contains.
+
+### 14.5 How to tell whether a run was clean
+
+Run with `PCTV_VERBOSE=1` (or read `$XDG_STATE_HOME/pctv-monitor.log` when it was
+launched from the menu) and judge it by these numbers, in this order:
+
+| line | clean | what a bad value means |
+| --- | --- | --- |
+| `stream: 128/128 URBs x 32768 B` | all submitted | fewer: a submit was refused (`usbfs_memory_mb`) |
+| `max gap between completions` | < 5 ms | > 10 ms means the host was away from the endpoint; the device may have dropped data. The probe logs each event with a timestamp |
+| `stream gaps of N B/M rows, K repaired` | small, and every `G` has a `g` | a `G` without a `g` is a held field (see 14.2.1); a rising `N` is the USB path asking for more `PCTV_URBS` |
+| `dup` | 0, or a handful over hours | the *source* stopped delivering for >70 ms **and** nothing was waiting in the pipe: check the probe's late events first |
+| `skip` | 0 | the encoder is slower than real time: use `--master uyvy`, or `PCTV_VQ_SLOTS=48` |
+| `cut to match the picture` | 0 | it is not a dropout - it is the 40 ms of audio removed per repeated/evicted picture to keep the two timelines on the same tape position (14.2.3) |
+| `ADC +/- ppm` | stable, |x| < 400 | the correction being applied, not an error. It is biased by up to one audio period at the *end* of a short capture (-0.2 % on 20 s, -7 ppm on a 2 h tape); a value that keeps moving means one of the two clocks is not a crystal (e.g. the sound server resampling) |
+| video vs audio stream duration | equal to one audio frame | anything else is a bug - this is the whole point of 14.2.2 |
+
+**Or prove it without a deck:**
+
+```sh
+pctv-linux/capture-selftest.sh          # add -v for the anomaly timeline
+```
+
+It builds `pctv-monitor` and `fakeprobe` (a stand-in for `pctv_probe stream`
+that emits real-time BT.656 in exactly this card's line layout), runs four
+captures - clean, one lost 32 KiB URB, a hole aligned to whole lines, and a 1 s
+`SIGSTOP` of the driver - and asserts the same counters listed above. It is the
+harness the whole of §14 was developed against, and it fails loudly if a change
+ever starts costing a picture again:
+
+| case | what it checks |
+| --- | --- |
+| clean 12 s | 299-335 pictures written, `dup 0 skip 0`, nothing held |
+| one lost 32 KiB URB, mid-line | `dup 0`, no short field, one `repaired at the seam` |
+| 19 aligned lines dropped | `short 1`, `held 1` - the undetectable case, held rather than sheared |
+| 1 s `SIGSTOP` of the monitor | `dup 0 skip 0`, full picture count: the loop was away, the data waited, nothing was repeated |
+
+### 14.6 The one assumption this makes
+
+The audio is fitted to the *picture's* clock, so it inherits whatever the deck does
+to the field rate: if a VCR played a tape 0.5 % fast, the picture would be 0.5 %
+fast and the audio would be resampled 0.5 % to match (8 cents - audible on music,
+irrelevant on speech, and physically correct: both are on the same capstan).  A
+VCR's servo holds the field rate to ~0.1 % anyway, and the alternative - letting
+the picture hitch to protect a pitch nobody can hear - is the wrong trade for a
+picture archive.  `PCTV_CLOCK=audio` is there if a run ever wants the other side of
+it.
+
