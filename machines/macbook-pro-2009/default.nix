@@ -70,6 +70,19 @@
   # driver (pctv-linux/nixos-module.nix) still exists for reference but is no
   # longer enabled here.
   hardware.pctv320cxLive.enable = true;
+
+  # Raw masters go to the NAS, not to this SSD.  A lossless UYVY + PCM tape is
+  # ~74.6 GB/hour (20.9 MB/s sustained), so a 2 h tape is ~150 GB - more than the
+  # free space on the laptop, and it is the format that cannot lose a picture to
+  # an encoder that falls behind.  The monitor writes <mount>/pctv-masters, a
+  # directory that exists only while the share is mounted, so recording with
+  # GEN8-NAS down fails at capture start instead of filling the laptop disk.
+  # zen3-nixos mounts the same export as /ds-public and does the MPEG-2 pass
+  # (32 threads, ~130 fps where this box manages 132 in a best case).
+  # The share itself is already a permanent mount: common/nfs.nix declares
+  # /ds-public (hard, vers=4.2, 1 MiB rsize/wsize), so this only points the
+  # capture at it - no second mount of the same export.
+  hardware.pctv320cxLive.rawMasterMount = "/ds-public";
   # The bridge ROM can only be booted from cold by the in-tree
   # dvb_usb_dib0700, so that module now loads on purpose (boot.kernelModules)
   # and is unbound by pctv-bridge-handoff once the bridge is warm.

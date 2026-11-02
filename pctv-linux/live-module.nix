@@ -25,11 +25,50 @@ let
   cfg = config.hardware.pctv320cxLive;
   pctvLive = pkgs.callPackage ./package.nix { noSudo = cfg.noSudo; };
 
+  # The raw-master share.  A 2 h tape records as ~150 GB of UYVY + 1.4 GB of
+  # PCM, which no laptop SSD wants, so the master goes straight to GEN8-NAS's
+  # 19 TB pool over the wired link.  Measured 2026-11-02: 21 MB/s of paced,
+  # fsync'd writes to this export cost 399 ms mean and 681 ms worst over 180
+  # chunks - 2.6x the capture rate, with the worst stall far inside the
+  # monitor's 24 s frame queue - and zen3-nixos (32 threads, same ffmpeg) does
+  # the MPEG-2 pass off the same mount later.
+  #
+  # The subdirectory is deliberately NOT created in the image: `pctv-masters`
+  # only exists once the share is mounted, so a capture started with the NAS
+  # down fails at cap_start with "not writable" instead of quietly recording a
+  # tape into an empty mountpoint on the laptop disk.
+  masterDir = "pctv-masters";
+  masterEnv = pkgs.writeShellScriptBin "pctv-capture-nas" ''
+    export PCTV_MASTER=uyvy
+    export PCTV_OUT_DIR=${cfg.rawMasterMount}/${masterDir}
+    if ! findmnt -T "''${PCTV_OUT_DIR}" -t nfs4 >/dev/null 2>&1; then
+      echo "${cfg.rawMasterMount} is not an NFS mount - not starting a capture." >&2
+      echo "A raw master is 21 MB/s; writing it to a directory that is only "
+           "locally a mount point would fill this disk and look like success." >&2
+      echo "Check the server, then: findmnt ${cfg.rawMasterMount}" >&2
+      sleep 20
+      exit 1
+    fi
+    exec pctv-monitor "$@"
+  '';
+
   desktopItem = pkgs.makeDesktopItem {
     name = "pctv-monitor";
     desktopName = "PCTV 320cx Live";
     exec = "pctv-monitor";
     comment = "Live view of the Pinnacle PCTV 320cx composite / S-Video inputs";
+    categories = [
+      "AudioVideo"
+      "Video"
+    ];
+    terminal = false;
+  };
+
+  desktopRaw = pkgs.makeDesktopItem {
+    name = "pctv-monitor-raw-nas";
+    desktopName = "PCTV Capture (raw master to NAS)";
+    exec = "${masterEnv}/bin/pctv-capture-nas";
+    comment = "Lossless UYVY + PCM master straight to the NAS share; transcode on zen3";
     categories = [
       "AudioVideo"
       "Video"
@@ -92,6 +131,28 @@ in
       '';
     };
 
+    rawMasterShare = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "192.168.49.23:/sas-24tb/ds-public";
+      description = ''
+        NFS export to mount for raw masters, or null for no mount.  Set when the
+        capture station records lossless UYVY + PCM: 150 GB per 2 h tape belongs
+        on a NAS pool, not on the laptop SSD.
+      '';
+    };
+
+    rawMasterMount = lib.mkOption {
+      type = lib.types.str;
+      default = "/ds-public";
+      description = ''
+        Mount point the raw masters go under (they land in `pctv-masters` inside
+        it). Defaults to where `common/nfs.nix` mounts GEN8's ds-public, so a
+        capture station that imports it needs only `rawMasterMount` set - no
+        second mount of an export the machine already has.
+      '';
+    };
+
     audioProfile = lib.mkOption {
       type = lib.types.str;
       default = "output:analog-stereo+input:analog-stereo";
@@ -110,6 +171,28 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # The raw-master share, mounted at boot.  `hard` rather than `soft` on
+    # purpose: a soft mount answers EIO to ffmpeg once its retries run out, and
+    # that is how a tape dies halfway through.  A hard mount waits instead, and
+    # the monitor's frame queue (600 frames = 24 s, and it now stops the capture
+    # out loud rather than dropping pictures) is what rides out the wait.
+    fileSystems.${cfg.rawMasterMount} = lib.mkIf (cfg.rawMasterShare != null) {
+      device = cfg.rawMasterShare;
+      fsType = "nfs4";
+      options = [
+        "vers=4.2"
+        "proto=tcp"
+        "rsize=1048576"
+        "wsize=1048576"
+        "hard"
+        "timeo=100"
+        "retrans=5"
+        "noatime"
+        "nodiratime"
+        "_netdev"
+        "x-systemd.mount-timeout=60"
+      ];
+    };
     # The kernel downloads the bridge firmware through the normal firmware
     # path; the userspace package carries its own uncompressed copies.
     hardware.enableRedistributableFirmware = true;
@@ -220,6 +303,7 @@ in
     environment.systemPackages = [
       pctvLive
       desktopItem
+      desktopRaw
       pkgs.alsa-utils
     ];
 

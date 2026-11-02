@@ -416,7 +416,22 @@ static int cfg_read_audio(char *buf, size_t n, int *gain_pct, int *boost_step,
 static void pick_out_dir(void)
 {
     const char *e = getenv("PCTV_OUT_DIR");
-    if (e && *e) { snprintf(out_dir, sizeof out_dir, "%s", e); return; }
+    if (e && *e) {
+        /* Masters are the thing you cannot afford to lose, and this variable is
+         * how the raw-to-NAS station points at the mount.  If the mount is not
+         * there, writing into the empty mountpoint directory (or, worse,
+         * silently falling back to /tmp after a typo) means a tape recorded
+         * onto the wrong machine.  Refuse loudly instead. */
+        if (access(e, W_OK) != 0) {
+            fprintf(stderr, "pctv-monitor: PCTV_OUT_DIR=%s is not writable (%s)."
+                            " If that is the NAS mount, it is not mounted - fix"
+                            " that, do not capture somewhere else. Exiting.\n",
+                    e, strerror(errno));
+            exit(3);
+        }
+        snprintf(out_dir, sizeof out_dir, "%s", e);
+        return;
+    }
     const char *home = getenv("HOME");
     if (home && *home) {
         snprintf(out_dir, sizeof out_dir, "%s/Videos", home);
@@ -476,9 +491,32 @@ static void usage(const char *p)
 
 /* ------------------------------------------------------------------ child */
 
+/* Closing the read end comes FIRST, on pain of hanging the machine.  The probe
+ * writes stdout into this pipe and only gives up when the write fails (EPIPE);
+ * waitpid() before close() therefore waits for a process that is waiting for us
+ * - which is exactly how this deadlocked for 90 min on 2026-11-02 (monitor in
+ * wait4(1598), sudo waiting on the probe, the probe's writer thread in a 2 ms
+ * EAGAIN retry loop on a full pipe).  It is not even a bug the probe could fix
+ * by handling SIGTERM better: stream_stop is only ever checked between writes.
+ * The reap is bounded after that, and SIGKILL is the backstop. */
 static void child_stop(void)
 {
-    if (child > 0) { kill(child, SIGTERM); waitpid(child, NULL, 0); child = -1; }
+    if (child > 0) {
+        if (child_fd >= 0) { close(child_fd); child_fd = -1; }
+        kill(child, SIGTERM);
+        int waited = 0;
+        while (waited < 3000) {
+            if (waitpid(child, NULL, WNOHANG) == child) { child = -1; break; }
+            usleep(10000); waited += 10;
+        }
+        if (child > 0) {                    /* still holding the card: end it */
+            fprintf(stderr, "pctv-monitor: probe %d ignored SIGTERM for %d ms,"
+                            " sending SIGKILL\n", (int)child, waited);
+            kill(child, SIGKILL);
+            waitpid(child, NULL, 0);
+            child = -1;
+        }
+    }
     if (child_fd >= 0) { close(child_fd); child_fd = -1; }
 }
 
@@ -1953,6 +1991,14 @@ static unsigned long long cap_async_cut_bytes = 0;
  * cause now, and both are on screen: they are the two halves of what used to be
  * invisible. */
 static unsigned long long cap_vrepeats = 0, cap_vskips = 0;
+/* Pictures the queue refused.  With eviction gone this can only start counting
+ * after the queue is already full and the capture is on its way out, so a
+ * nonzero value means "the file ends here, on purpose, and this many pictures
+ * of tape after that point were not recorded".  It is printed in the summary
+ * line for exactly that reason. */
+static unsigned long long cap_vrefused = 0;
+static int vq_want_stop;        /* queue full: the main loop ends the capture */
+static int vq_warned;           /* the 3/4-full warning has been printed */
 static int cap_qmax = 0;                  /* video queue high-water, in frames */
 static int cap_clock_audio = 0;           /* 1 = PCTV_CLOCK=audio (see vq_thread) */
 static time_t cap_t0 = 0;
@@ -2039,7 +2085,18 @@ static int pipe_write(int fd, const void *p, size_t n, int msecs, size_t *done)
  * Now the PCM callback only copies: 1 MiB = 5.5 s of cushion between the sound
  * server and the writer thread.  Bytes are released only once they are in the
  * pipe, and the eviction below can never eat what is in flight. */
+/* Both rings are sized by the SAME external limit, and it is not the disk:
+ * ffmpeg's matroska muxer enforces a 10 s maximum interleaving gap between
+ * streams, and a raw-video input carries no timestamps of its own - so a
+ * backlog of EITHER stream IS a divergence, and past 10 s the muxer stops
+ * reading both pipes. Measured on 2026-11-02: with an 8 MiB (43 s) audio ring, a
+ * 12 s encoder freeze left ffmpeg consuming nothing for 24 s AFTER it resumed,
+ * the queue filled, and the file ended with a hole - although the write path
+ * itself was never the limit (123 MB/s sustained to the NAS against 21 MB/s
+ * needed). At 1 MiB (5 s) the sound a stalled sink cannot absorb is dropped -
+ * loudly, by name - and the muxer keeps flowing. */
 #define AQ_BYTES (1u << 20)
+#define AQ_SECONDS ((double)AQ_BYTES / 192000.0)
 static unsigned char *aq;
 static size_t aq_head, aq_count, aq_sent;  /* aq_sent = reserved, being written */
 /* The clock the video is paced on: bytes of audio that will end up in the file,
@@ -2061,6 +2118,30 @@ static unsigned long long aq_seq, aq_evict;
 static unsigned long long aq_skip_bytes;
 static unsigned long long rs_skipped_frames;
 static volatile int aq_closed;            /* drain in progress: refuse more */
+static volatile int vq_stopping;        /* stop requested, drain running */
+/* The picture queue is more than a quarter deep: the sink is behind the tape, so
+ * nothing measured against "pictures written" means anything right now. Set by
+ * the producer (25 Hz, under the queue lock), read by rs_update(). */
+static volatile int vq_backlog;
+/* When a stop was requested, how long the writer may keep trying to push what
+ * is already queued before it is allowed to give up on it. Sized from the
+ * backlog (a stalled sink needs about the time the pictures took to arrive);
+ * 30 s of grace on top covers a normal quit, where the queue is empty and the
+ * drain finishes immediately. */
+static unsigned long vq_drain_deadline;
+static unsigned long long vq_drain_dropped;
+/* The drain gives up on a sink that has stopped taking BYTES, not on one that is
+ * merely slow.  A wall-clock deadline alone was wrong: quitting while ffmpeg was
+ * SIGSTOPped sat out the whole 30 s + 100 ms/frame grace on a window that had
+ * stopped responding at all, which looks exactly like the 2026-11-02 quit lockup
+ * from the outside.  Only a QUIT cuts it short though (see the writer): a stalled
+ * sink that nobody walked away from keeps its grace and delivers its backlog, and
+ * that is 148 pictures of tape worth waiting for. */
+#define VQ_DRAIN_STALL_MS 3000u
+static unsigned long vq_progress_ms;
+/* The drain has given up: discard both rings instead of writing them.  Set once
+ * the sink is judged wedged, cleared when the next capture starts. */
+static volatile int vq_abandon;
 static volatile unsigned long cap_alast_ms;  /* last byte arrived (wall ms) */
 
 static void aq_reset(void)
@@ -2178,6 +2259,15 @@ static void rs_update(void)
      * would only add a pitch shift on top.  Keep it bit-transparent there so the
      * two modes really are comparable. */
     if (cap_clock_audio) { rs_step = 1.0; return; }
+    /* Not while the picture queue is backed up.  This figure is "audio fed to the
+     * resampler" over "pictures WRITTEN", and during a sink stall the second one
+     * stops advancing while the first does not: measured climbing through a 12 s
+     * freeze of ffmpeg to +42362 ppm and still going, which is a stalled pipeline
+     * being read as a 4 % crystal error.  Holding the last good step costs at most
+     * the length of the stall and is the only honest option - a stall is precisely
+     * what this measurement cannot see. (The other way this number used to explode
+     * was an accounting bug: see the owed/skipped note below.) */
+    if (vq_backlog) { rs_last_update = now; return; }
     if (rs_last_update && now - rs_last_update < 1000) return;
     rs_last_update = now;
     if (!audio_rate || !cap_has_audio) return;
@@ -2202,9 +2292,21 @@ static void rs_update(void)
 
 static void cap_feed_audio(const void *p, size_t n)
 {
-    if (!aq || aq_closed) return;
+    if (!aq) return;
     n &= ~(size_t)1;
     if (!n) return;
+    /* During a drain the sound still has to be accepted: the pictures still
+     * queued ahead of this belong to it, and refusing it here would leave the
+     * last seconds of a stopped capture with video and no audio. Refuse only
+     * once the ring is half full, which is the case this guard was written for
+     * (a dead encoder, a running ALSA thread, and a writer that could then
+     * never finish): 4 MiB is 22 s, more than any drain needs. */
+    {
+        pthread_mutex_lock(&vq_mtx);
+        int refuse = aq_closed || (vq_stopping && aq_count > AQ_BYTES / 2);
+        pthread_mutex_unlock(&vq_mtx);
+        if (refuse) return;
+    }
     cap_alast_ms = SDL_GetTicks();
 
     /* Resample first: what goes into the queue is what the file will contain. */
@@ -2224,6 +2326,17 @@ static void cap_feed_audio(const void *p, size_t n)
         if (lost > n) lost = n;
         n -= lost;
         aq_evict += ev + lost;      /* the file will not contain these samples */
+        /* Same policy as the picture queue: PCM the file does not contain is not
+         * something to discover in the summary line of a finished tape. */
+        if (!vq_want_stop) {
+            vq_want_stop = 1;
+            fprintf(stderr, "pctv-monitor: SINK STALLED: the audio ring is full"
+                            " too (%llu B = %.1f s of sound had nowhere to go) -"
+                            " ending the capture rather than writing a file whose"
+                            " sound has holes in it.\n",
+                    (unsigned long long)(ev + lost),
+                    (double)(ev + lost) / 192000.0);
+        }
     }
     if (n) {
         size_t tail = (aq_head + aq_count) % AQ_BYTES;
@@ -2244,23 +2357,38 @@ static void cap_feed_audio(const void *p, size_t n)
 }
 
 /* ---- video queue -------------------------------------------------------
- * One slot per assembled frame.  24 slots by default = 960 ms of phase buffer
- * (PCTV_VQ_SLOTS changes it; VQ_SLOTS_MAX is the ceiling, and each slot costs one
- * 829 KB UYVY frame, so 32 = 27 MB).  One slot is always reserved for the frame
- * the writer owns, so vq_n-2 frames can queue behind it, and the only way to lose
- * a picture is to evict the oldest deliberately - counted as cap_vskips.  The
- * producer can never touch the reserved slot: occupancy stays <= vq_n-1, so
- * head+count never reaches the slot the writer popped.
+ * One slot per assembled frame.  Each slot is one 829 KB UYVY frame, so 24 =
+ * 20 MB and 150 = 124 MB (PCTV_VQ_SLOTS sets it, VQ_SLOTS_MAX is the ceiling).
+ * One slot is always reserved for the frame the writer owns, so vq_n-2 frames
+ * can queue behind it.  The producer can never touch the reserved slot:
+ * occupancy stays <= vq_n-1, so head+count never reaches the slot popped.
  *
- * Why it is deeper than the 4 frames this used to be: fed on arrivals, the queue
- * is no longer a smoothing buffer, it is the *only* thing between an FFmpeg hiccup
- * and a lost picture.  On a grainy tape FFV1 encoding runs at about 1.0x on this
- * Core 2 Duo and stalls in bursts; at 10 slots those bursts evicted ~20 frames a
- * minute, at 24 they do not.  If it still evicts, the encoder is genuinely slower
- * than real time and no depth saves it - that is what `--master uyvy` (a memcpy,
- * structurally incapable of falling behind) is for. */
-#define VQ_SLOTS_MAX 64
+ * NO PICTURE IS EVER DISCARDED HERE ANY MORE.  Evicting the oldest picture was
+ * how 59688 pictures (40 minutes of tape) vanished from a 3 h recording on
+ * 2026-11-02 while every counter looked alive: the oldest frame is as much of
+ * the tape as the newest one, and a file with 22 % of its pictures silently
+ * missing is worthless as an archive.  A full queue now ends the capture and
+ * says so (see cap_feed_video), which leaves exactly two outcomes - a complete
+ * file, or a short one with a loud reason.
+ *
+ * That makes the depth the whole guarantee, so it is sized in seconds of sink
+ * stall rather than in frames of phase jitter.  Measured on 2026-11-02: a paced
+ * 21 MB/s fsync'd writer to GEN8's NFS ds-public took 399 ms/chunk mean and
+ * 681 ms worst over 180 chunks, while the MPEG-2 encoder on this box stalls in
+ * bursts (24 slots = 960 ms was chosen because at 10 slots bursts were eating
+ * ~20 frames a minute).  A lossless master to a network mount therefore starts
+ * at VQ_SLOTS_SINK = 150 slots = 6 s. That ceiling is ffmpeg's, not the disk's:
+ * its matroska muxer stops reading both pipes once the streams are more than its
+ * 10 s interleave limit apart, and with a timestamp-less raw input a video
+ * backlog IS that divergence - a deeper queue wedges the muxer instead of
+ * absorbing the stall (see the audio ring above for the measurement). The MPEG-2
+ * path stays at 24 because 124 MB for an encoder that already has its own 8 MiB
+ * pipe would be silly.  Blocking here is NOT an option: the
+ * parser is what fills this queue, and stalling it cascades into the probe's
+ * byte ring, which really does drop bytes (silently, 32 KiB at a time). */
+#define VQ_SLOTS_MAX 500      /* 415 MB even when PCTV_VQ_SLOTS asks for more */
 #define VQ_SLOTS_DEFAULT 24
+#define VQ_SLOTS_SINK 150   /* 6 s: the deepest cushion ffmpeg can be given */
 static unsigned char *vq[VQ_SLOTS_MAX];
 static int vq_n = VQ_SLOTS_DEFAULT;    /* runtime depth, clamped in main() */
 static int vq_head, vq_count;          /* frames queued, excluding the one held */
@@ -2320,29 +2448,55 @@ static int stream_pending(void)
 static void cap_feed_video(int stale)
 {
     if (!vq_started) return;
-    int evicted = 0;
     pthread_mutex_lock(&vq_mtx);
     if (vq_count + (vq_held >= 0 ? 1 : 0) >= vq_n - 1) {
-        vq_head = (vq_head + 1) % vq_n;   /* drop the OLDEST: the newest
-                                               * picture is the one to keep */
-        vq_count--;
-        evicted = 1;
+        /* Full.  Nothing is thrown away to make room: the capture is over. */
+        vq_want_stop = 1;
+        cap_vrefused++;
+        pthread_mutex_unlock(&vq_mtx);
+        fprintf(stderr, "pctv-monitor: SINK STALLED: the frame queue is full (%d"
+                        " frames = %d ms of cushion) and the encoder/disk is not"
+                        " taking pictures. Ending the capture: what is in the"
+                        " file is complete, and nothing further is recorded."
+                        " Raise PCTV_VQ_SLOTS or capture to a faster sink.\n",
+                vq_n, vq_n * FRAME_MS);
+        return;
     }
-    if ((evicted || stale) && !cap_clock_audio && aq_bytes_per_ms()) {
+    if (stale && !cap_clock_audio && aq_bytes_per_ms()) {
+        /* The file advances 40 ms of timeline for a picture it does not have
+         * (a repeat, a held gate), so the same 40 ms of audio goes too. */
         aq_skip_bytes += 40ull * aq_bytes_per_ms();
         unsigned long long cap = (unsigned long long)audio_rate * 8;   /* 2 s */
         if (aq_skip_bytes > cap) aq_skip_bytes = cap;
     }
     arr_t[arr_i++ % ARR_N] = SDL_GetTicks();
     int tail = (vq_head + vq_count) % vq_n;
-    if (!vq[tail]) { pthread_mutex_unlock(&vq_mtx); return; }
+    if (!vq[tail]) {                        /* slot malloc failed at startup */
+        vq_want_stop = 1;
+        cap_vrefused++;
+        pthread_mutex_unlock(&vq_mtx);
+        return;
+    }
     memcpy(vq[tail], fuv, UV_SIZE);
     vq_count++;
     if (vq_count > cap_qmax) cap_qmax = vq_count;
+    vq_backlog = vq_count * 4 > vq_n;
+    int warn = !vq_warned && vq_count >= (vq_n - 1) * 3 / 4;
+    vq_warned = vq_warned || warn;
+    int depth = vq_count;
     pthread_cond_broadcast(&vq_cv);
     pthread_mutex_unlock(&vq_mtx);
-    if (evicted) {
-        pthread_mutex_lock(&cap_mtx); cap_vskips++; pthread_mutex_unlock(&cap_mtx);
+    /* After the push, never before it: the first version of this warning printed
+     * and returned, which threw away the very picture it was announcing - a
+     * silent loss on the code path whose entire purpose is that there are no
+     * more silent losses. */
+    if (warn) {
+        fprintf(stderr, "pctv-monitor: warning: capture queue 3/4 full (%d of %d"
+                        " frames) - the sink is slower than the tape. It will"
+                        " stop the capture rather than drop pictures when it"
+                        " fills (now at %d ms of cushion).\n",
+                depth, vq_n, vq_n * FRAME_MS);
+        show_overlay(20000);
     }
 }
 
@@ -2464,6 +2618,10 @@ static void *vq_thread(void *unused)
                 }
             }
             pthread_mutex_lock(&vq_mtx);
+            if (vq_abandon) {                 /* the sink is gone; empty and leave */
+                pthread_mutex_unlock(&vq_mtx);
+                break;
+            }
             n = aq_count - aq_sent;
             if (n > 65536) n = 65536;
             if (n) {
@@ -2614,6 +2772,7 @@ static void *vq_thread(void *unused)
             size_t done = 0;
             int st = pipe_write(vfd, vq[vq_slot] + vq_off, UV_SIZE - vq_off, 3000, &done);
             vq_off += done;
+            if (done) vq_progress_ms = SDL_GetTicks();   /* the sink is alive */
             if (st == 0) {
                 pthread_mutex_lock(&cap_mtx);
                 cap_vframes++;
@@ -2652,11 +2811,40 @@ static void *vq_thread(void *unused)
                 pthread_mutex_unlock(&cap_mtx);
                 vq_slot = -1; vq_off = 0;
                 cap_died();
-            } else if (stopping) {
-                /* Draining: a frame that will not fit in 3 s is not going to fit,
-                 * and shutdown must not queue up behind a stalled encoder. */
-                pthread_mutex_lock(&cap_mtx); cap_vdrops++;
+            } else if (stopping &&
+                       ((long)(SDL_GetTicks() - vq_drain_deadline) >= 0 ||
+                        (g_quit && (long)(SDL_GetTicks() - vq_progress_ms) >=
+                                    (long)VQ_DRAIN_STALL_MS))) {
+                /* Give up on the WHOLE queue here, in one decision: giving up a
+                 * frame at a time would cost a fresh pipe_write timeout for each of
+                 * the ~150 queued pictures - 3 s x 148, longer than any tape, and
+                 * from the outside indistinguishable from the lockup this file
+                 * exists to prevent.
+                 * Two different waits, because they answer to two different people.
+                 * A stall nobody asked about keeps its full grace (30 s + 100 ms a
+                 * frame): those queued pictures are tape, and a sink that was only
+                 * slow does come back and takes them with it. A QUIT is the operator
+                 * overruling that - three seconds of silence and the rest is
+                 * discarded, because an unkillable player is not what they asked for.
+                 * This is now the ONE way a picture can still be lost, so it is
+                 * counted, named in the log, and only ever reaches the tail of
+                 * the file - never a hole in the middle. */
+                pthread_mutex_lock(&vq_mtx);
+                unsigned gone = vq_count + 1;          /* + the frame in flight */
+                vq_abandon = 1;
+                aq_closed = 1;                        /* else the ALSA thread keeps
+                                                       * refilling a ring nobody
+                                                       * drains and the writer can
+                                                       * never exit */
+                size_t agone = aq_count;
+                aq_head = (aq_head + aq_sent) % AQ_BYTES;
+                aq_count = 0; aq_sent = 0; aq_evict += agone;
+                vq_head = 0; vq_count = 0;
+                pthread_mutex_unlock(&vq_mtx);
+                pthread_mutex_lock(&cap_mtx);
+                cap_vdrops += gone; cap_adrop_bytes += agone;
                 pthread_mutex_unlock(&cap_mtx);
+                vq_drain_dropped += gone;
                 vq_slot = -1; vq_off = 0;
             }
             /* st == -2: ffmpeg is behind. Keep the half-written frame and carry on
@@ -2701,6 +2889,12 @@ static int vq_start(void)
     aq_skip_bytes = 0;
     cap_async_cut_bytes = 0;
     vq_head = vq_count = vq_stop = 0;
+    vq_stopping = 0;
+    vq_abandon = 0;
+    vq_want_stop = 0; vq_warned = 0;
+    fprintf(stderr, "pctv-monitor: capture queue: %d slots = %d ms of sink-stall"
+                    " cushion (%.0f MB)\n", vq_n, vq_n * FRAME_MS,
+            (double)vq_n * UV_SIZE / 1048576.0);
     vq_held = -1;
     vq_slot = -1; vq_off = 0; vq_slot_dup = 0;
     vq_next = 0;
@@ -2718,18 +2912,30 @@ static int vq_start(void)
 static void vq_stop_and_drain(void)
 {
     if (!vq_started) return;
-    /* Refuse new audio FIRST.  The writer exits when the rings are empty, and the
-     * ALSA thread would otherwise keep filling it faster than it can be drained -
-     * it did exactly that for 50 s and hung the whole shutdown (and everything
-     * downstream of it, because the main loop stops pumping the probe while it
-     * waits).  Anything the PCM delivers from here on is discarded, not recorded:
-     * capture is over the moment this is called. */
-    aq_closed = 1;
+    /* Refuse new audio when the ring is filling up.  The writer exits when the
+     * rings are empty, and the ALSA thread would otherwise keep filling it faster
+     * than it can be drained - it did exactly that for 50 s and hung the whole
+     * shutdown, and everything downstream of it with it (the main loop stops
+     * pumping the probe while it waits).  Half a ring = 2.6 s is the bound: a
+     * drain still gets the sound belonging to the pictures it is about to write,
+     * and ffmpeg's 10 s interleaving limit is never reached. */
     pthread_mutex_lock(&vq_mtx);
+    vq_stopping = 1;
+    unsigned long qn = (unsigned)(vq_count + (vq_held >= 0 ? 1 : 0));
+    vq_drain_deadline = SDL_GetTicks() + 30000u + qn * 100u;
+    vq_progress_ms = SDL_GetTicks();
     vq_stop = 1;
     pthread_cond_broadcast(&vq_cv);
     pthread_mutex_unlock(&vq_mtx);
     pthread_join(vq_thr, NULL);
+    aq_closed = 1;
+    if (vq_drain_dropped)
+        fprintf(stderr, "pctv-monitor: LOST PICTURES: the sink stopped taking data"
+                        " and the drain ran out of patience - %llu queued picture(s)"
+                        " were dropped, so the file ends %0.1f s early. Everything up"
+                        " to there is complete.\n",
+                vq_drain_dropped, (double)vq_drain_dropped * FRAME_MS / 1000.0);
+    vq_drain_dropped = 0;
     vq_started = 0;
     vq_held = -1;
 }
@@ -2940,6 +3146,7 @@ static int cap_start(void)
     cap_pid = pid; cap_vfd = vp[1]; cap_afd = ap[1]; cap_on = 1;
     cap_vframes = cap_vdrops = cap_adrops = cap_abytes = 0;
     cap_vrepeats = cap_vskips = cap_adrop_bytes = 0;
+    cap_vrefused = 0; vq_want_stop = 0; vq_warned = 0;
     cap_qmax = 0;
     cap_t0 = time(NULL);
     cap_t0_tick = SDL_GetTicks();
@@ -2967,6 +3174,7 @@ static void cap_stop(void)
     cap_on = 0; cap_vfd = cap_afd = -1; cap_pid = -1;
     unsigned long long vf = cap_vframes, vd = cap_vdrops, ad = cap_adrops,
                        rp = cap_vrepeats, sk = cap_vskips, adb = cap_adrop_bytes;
+    unsigned long long rf = cap_vrefused;
     unsigned long long ab = cap_abytes, cut = cap_async_cut_bytes;
     int qmax = cap_qmax;
     cap_closing = 0;
@@ -2977,31 +3185,60 @@ static void cap_stop(void)
     if (afd >= 0) close(afd);
     if (pid > 0) {
         int st = 0, waited = 0;
-        while (waited < 10000) {               /* give it time to flush */
+        /* Ten seconds of "give it time to finalise the file" is right for an
+         * encoder that is behind but alive, and madness for one the writer already
+         * gave up on (or that has a full queue behind it): it is not going to flush.
+         * One second there, ten otherwise. */
+        int flush_ms = vq_abandon ? 1000 : 10000;
+        while (waited < flush_ms) {            /* give it time to flush */
             pid_t r = waitpid(pid, &st, WNOHANG);
-            if (r == pid) break;
-            if (r < 0) break;
+            if (r == pid) { pid = 0; break; }
+            if (r < 0) { pid = 0; break; }
             pump();                           /* the live stream keeps running */
             usleep(10000); waited += 10;
         }
-        if (waited >= 10000) { kill(pid, SIGTERM); waitpid(pid, NULL, 0); }
+        /* A stopped or wedged child never sees SIGTERM: the signal is queued and
+         * delivered only once it is continued, and the plain waitpid() that used to
+         * follow this blocked forever.  That is the 2026-11-02 quit lockup one stage
+         * further down the pipe from the probe - same circular wait, different
+         * child - and it is reachable by pressing stop while the encoder is behind.
+         * So: TERM, wake it, wait a bounded time; KILL, wake it, wait a bounded
+         * time again; then walk away.  A zombie is reparented and reaped when this
+         * process exits.  Nothing on a shutdown path is worth an unkillable
+         * monitor. */
+        for (int phase = 0; pid > 0 && phase < 2; phase++) {
+            if (kill(pid, phase ? SIGKILL : SIGTERM) != 0 && errno == ESRCH) break;
+            kill(pid, SIGCONT);
+            for (int w = 0; w < 300; w++) {          /* up to 3 s per signal */
+                pid_t r = waitpid(pid, &st, WNOHANG);
+                if (r == pid || r < 0) { pid = 0; break; }
+                pump();
+                usleep(10000);
+            }
+        }
+        if (pid > 0)
+            fprintf(stderr, "pctv-monitor: encoder pid %d ignored SIGTERM and SIGKILL"
+                            " (stopped or in uninterruptible sleep) - leaving it and"
+                            " carrying on\n", (int)pid);
     }
     off_t sz = -1;
     struct stat sb;
     if (stat(cap_path, &sb) == 0) sz = sb.st_size;
-    /* dup/skip are the two numbers that say whether the recording kept every
-     * picture.  With the card as the clock (the default) they mean exactly one
-     * thing: dup = the source stopped producing pictures for longer than a frame
-     * period and the last one had to be repeated; skip = the encoder could not
-     * keep up and the oldest queued picture was evicted.  Neither can be caused
-     * by the two crystals disagreeing any more - that shows up as the ppm figure
-     * below instead, which is what the audio resampler is correcting. */
+    /* dup = the source stopped producing pictures for longer than a frame period
+     * and the last one had to be repeated.  skip used to be "the encoder could
+     * not keep up, so the oldest queued picture was evicted" - that policy is
+     * gone, so any nonzero skip is a bug.  refused is the replacement: pictures
+     * that arrived after the queue filled, i.e. the tape the file does NOT
+     * contain because the capture was ended out loud.  None of them can be
+     * caused by the two crystals disagreeing - that is the ppm figure below,
+     * which is what the audio resampler is correcting. */
     fprintf(stderr, "pctv-monitor: capture stopped: %s (%lld B, %llu frames "
-                    "[dup %llu, skip %llu, qmax %d], %llu B audio "
+                    "[dup %llu, skip %llu, refused %llu, qmax %d/%d frames = %d ms], "
+                    "%llu B audio "
                     "(%llu B cut to match the picture), "
                     "%llu video drops, %llu audio drops/%llu B, "
                     "ADC %+d ppm vs the card)\n",
-            cap_path, (long long)sz, vf, rp, sk, qmax, ab, cut, vd, ad, adb,
+            cap_path, (long long)sz, vf, rp, sk, rf, qmax, vq_n, vq_n * FRAME_MS, ab, cut, vd, ad, adb,
             (int)lrint((rs_step - 1.0) * 1e6));
     /* Only ffv1 and rawvideo write the field order into the file; utvideo (and
      * every other lossless codec available here) writes neither the bitstream
@@ -3327,10 +3564,17 @@ int main(int argc, char **argv)
     if (access(probe_path, X_OK) != 0)
         snprintf(probe_path, sizeof probe_path, "pctv_probe");
 
-    /* Capture queue depth: 24 frames = 960 ms of cushion in front of FFmpeg by
-     * default.  Raise it (to 32) if a lossless master still evicts frames, lower
-     * it if this box ever needs the 20 MB of RAM back. */
-    {   const char *s = getenv("PCTV_VQ_SLOTS");
+    /* Capture queue depth: how many seconds of sink stall the capture can ride
+     * out.  The MPEG-2 path keeps 24 (960 ms - it has its own 8 MiB pipe and the
+     * encoder is the variable in it); a lossless/raw master defaults to 600 =
+     * 24 s because that is what a network sink needs (see the VQ block: 681 ms
+     * was the worst measured stall to GEN8 over NFS, and 2026-11-02 lost 40 min
+     * of tape with a 960 ms cushion in front of a local encoder).  RAM is the
+     * only cost: 829 KB per slot. */
+    {
+        const char *s = getenv("PCTV_VQ_SLOTS");
+        if (cap_master != MASTER_DVD && vq_n == VQ_SLOTS_DEFAULT)
+            vq_n = VQ_SLOTS_SINK;
         if (s) {
             int n = atoi(s);
             vq_n = n < 4 ? 4 : (n > VQ_SLOTS_MAX ? VQ_SLOTS_MAX : n);
@@ -3560,6 +3804,18 @@ int main(int argc, char **argv)
          * buffer-full/no-sync case); stop when the probe dies */
         unsigned long t_stage = SDL_GetTicks();
         if (pump()) running = 0;
+
+        /* The sink stopped taking pictures.  Close the file - everything in it
+         * is complete - and do not reopen it behind the operator's back. */
+        if (vq_want_stop) {
+            vq_want_stop = 0;
+            if (cap_on) {
+                hold_auto = 0;              /* the hold logic must not reopen */
+                hold_rearm();
+                cap_stop();
+                show_overlay(30000);
+            }
+        }
 
         /* ------------------------------------------------ end-of-tape hold
          * Act out here, never from the parser: cap_start() pumps the stream

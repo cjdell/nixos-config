@@ -154,6 +154,18 @@ without anyone touching the desktop audio menu. `noSudo = true` moves the card t
 group `video` instead of launching the probe through `sudo -n` — and both binaries are
 wrapped so the firmware paths survive `sudo`'s `env_reset`.
 
+**Raw masters go to the NAS** (`rawMasterMount`, `rawMasterShare`). A lossless UYVY +
+PCM master is 20.9 MB/s, which no laptop SSD in the house should be asked to hold for
+2 h, so `pctv-capture-nas` sets `PCTV_MASTER=uyvy` and
+`PCTV_OUT_DIR=<rawMasterMount>/pctv-masters`, and the desktop gets a second entry,
+*"PCTV Capture (raw master to NAS)"*. It **refuses to start when the mount is not
+there** (`findmnt -T … -t nfs4`): a capture pointed at a directory that is merely the
+mount point, locally, would write 12 GB to the SSD, look exactly like success, and
+fail at the worst possible moment. `rawMasterShare` stays `null` when the machine
+already mounts the export — macbook-pro-2009-nixos takes `/ds-public` from
+`common/nfs.nix` and sets only `rawMasterMount`, rather than mounting the same export
+twice and having two caches disagree about which one a file landed in.
+
 ## 9. Limits that are still real
 
 * **Audio over the card's USB is undecoded** (§9.6): the only endpoint that ever
@@ -537,6 +549,63 @@ the 2026-11-02 crash verbatim (`line 77: TS[$((n-1))]: unbound variable`). That 
 the same lesson the monitor learned the hard way: the process that watches is the
 one that dies unnoticed, so the watching belongs next to the frames.
 
+### The still that is not frozen: 69 min of blue that changes every frame (2026-11-02)
+
+The tape `pctv-cap-20261102-145124.mpg` ran 8254 s for 69 min 16 s of programme.
+The detector above did not fire, and measuring why destroyed the assumption that a
+no-signal field is a *flat* one:
+
+| what | measured |
+| --- | --- |
+| programme ends | t=4156 s (file growth 750 kB/s with full luma until then) |
+| 4156 → 8210 s | the deck's blue: **749 consecutive frames, zero identical pairs**, mean absolute inter-frame difference 0.0199 |
+| 8210 → 8254 s | video black (Y=16, U=V=128) — but only 44 s, under `PCTV_HOLD_SECS` 120 |
+| so | `hold_same` never reached 3000, `PCTV_HOLD_MAX` was 0, and the rate watchdog was not running |
+
+**Why the blue is not flat** (`/tmp/planecheck` over 1000-frame windows of the real
+file, ranges per plane in 8-bit codes, mean ±spread):
+
+| window | Y range | U range | V range | mean Y/U/V |
+| --- | --- | --- | --- | --- |
+| t=100, 2000, 4100 (programme) | 231-240 | 39-60 | 26-106 | 94-113 / 60-64 / 65-68 |
+| t=4150 (last seconds of programme, dark) | 94 (min 28) | 82 | 26 | 60 / 92 / 60 |
+| t=5000, 6500, 8000 (**the blue**) | 38.0 | 86.2 | 17.2 | 47.4 / 102.9 / 58.2 |
+| t=8220 (black hold) | 0.0 | 0.0 | 0.0 | 16 / 64 / 64 |
+
+The blue is a **static pattern, not a flat field**: three windows 3000 s apart score
+identically to a tenth of a percent, and its chroma spans 86 codes. It is the no-signal
+colour subcarrier beating against the digitiser's sampling clock, so it has the *spatial*
+content of real footage and the *temporal* behaviour of a frozen frame.
+
+Which leaves every candidate pixel predicate short:
+
+* **exact repetition** (what ships) cannot see it at all — no two frames are identical;
+* **temporal calm** separates them in the right direction (blue 0.0199 < the 0.035-0.049
+  of the quiet held shot in §12) but with ~20 % of margin either side, and a false
+  trigger mid-tape is the worst kind of wrong;
+* **spatial contrast** fails outright: the blue's Y range (38) *overlaps* the dark
+  final moments of the programme (28-94), and its U range (86) overlaps it too (82);
+* **mean colour** gives 12 codes of margin (U 102.9 against 91.6 for the darkest real
+  frame in the file) — one statistic, on one deck, on one tape.
+
+So the pixel plane does not answer this, and the fix is not a cleverer detector:
+
+1. **The rate collapse is 10x separated and it already has an implementation.**
+   65 kB/s of file growth for the blue against 700-780 kB/s for the programme. The
+   reason the tape ran on for 69 min is that `scripts/pctv-autoend.sh` was not
+   running, not that its predicate was wrong. It needs to be a supervised unit
+   (or a monitor option), not something remembered at the desk.
+2. **`PCTV_HOLD_SECS 120` was too slow for a 44 s black tail**, and this deck *does*
+   hand back a genuinely frozen black frame at the very end - the exact-repetition
+   rule catches it instantly at 30-45 s. Lower it on stations whose tapes end that way.
+3. **Set `PCTV_HOLD_MAX`.** It exists for the unattended case and was 0.
+4. **A raw master has no rate signal at all** - fixed-frame-size output costs the same
+   20.9 MB/s for blue as for programme, so 69 min of nothing costs 87 GB of NAS and
+   every byte-rate guard is blind to it. `--capture-seconds` (deck-dependent: the tape
+   length plus a margin) is the honest guard until the monitor grows a size cap; the
+   blue does not even have a bit-rate to watch. `PCTV_MAX_GB` is the obvious missing
+   knob and is not implemented.
+
 ### Finding where the content actually ends
 
 If a capture did run on, the tail is trivially separable, because a frozen
@@ -550,7 +619,11 @@ ffmpeg -ss T -t 5 -i FILE -an \
 ```
 
 Binary-search that predicate and you have the boundary to the second (two orders of
-magnitude of margin, so no threshold fuss). Do not trust a merely *low* score: a
+magnitude of margin, so no threshold fuss) - **provided the tail really is frozen**.
+It is not always: the blue no-signal field of §12 above scores 0.0199, nonzero and
+*below* a quiet held shot, so an exact-zero binary search walks straight past it. Where
+the tail is a pattern rather than a value, find the boundary by the rate (750 to
+65 kB/s in the same file) or by the mean colour, which stops moving at all. Do not trust a merely *low* score: a
 long 3 min passage at 0.035-0.049 in the same tape was real programme, a still shot
 with tape noise in it. Cross-check the picture itself — the end-of-tape hold read
 Y=16, U=128, V=128 (video-black, and identical PNG hashes at t=5890 s and t=30000 s)
@@ -578,6 +651,9 @@ damage: run the same seek against the original and see the identical two lines.
 | `pctv-linux/pctv-monitor.c` | BT.656 parser, SDL2 view, capture masters (§10), AGC |
 | `pctv-linux/live-module.nix`, `package.nix` | deployment: handoff unit, udev, sysctl, RT limits, firmware, wrappers |
 | `pctv-linux/capture-selftest.sh` (+ `fakeprobe.c`) | the capture path's regression harness: real-time synthetic BT.656 with injected URB losses, aligned holes and driver stalls (§14.5) |
+| `pctv-linux/replayprobe.c` | the *other* harness: **real tape pixels** (a UYVY file) replayed as real-time BT.656, for the tests `fakeprobe` cannot do because its staircase picture is not a picture — queue depth, sink stalls, byte-identity of a master (§14.2b). `PCTV_PROBE=replayprobe REPLAY_UYVY=… PCTV_NO_SUDO=1 pctv-monitor --capture …` |
+| `/ds-public/pctv-masters` (GEN8) | where lossless masters land: 20.9 MB/s, 12.6 GB per 10 min, **151 GB per 2 h tape** — which is why it is a 17 TB pool and not the laptop SSD (§8, §14.2b) |
+| `pctv-linux/queue-selftest.sh` | the *sink* half of the regression suite: freeze ffmpeg with SIGSTOP mid-capture and assert (§14.2b) that nothing inside a file is ever lost, and (§14.2c) that quitting a wedged sink still returns |
 | `pctv-linux/README.md` | usage, keys, options; and why `driver/` (the V4L2 module) is retired |
 | `pctv-linux/COLD-BOOT-NOTES.md` | cold-boot runbook and symptom → cause → fix table |
 | `scripts/pctv-autoend.sh` (+ `-test.sh`) | tape-end watchdog and its harness (§12) |
@@ -720,6 +796,99 @@ video track longer than the tape and walks the sound out of step.  A 1 s
 `SIGSTOP` of the whole process is now `dup 0, skip 0` with the full picture count
 (14.5).
 
+### 14.2b A full picture queue ends the capture — it no longer evicts (2026-11-02)
+
+A 3 h 21 m recording (`pctv-cap-20261102-145124.mpg`) came off the tape with
+`skip 59688`: **22 % of its pictures had been silently discarded** to keep a
+stalled sink in step, while every headline counter stayed alive. The policy was
+`cap_feed_video` evicting the oldest frame whenever the queue filled. That policy
+is gone, because the oldest frame is as much of the tape as the newest one: a file
+missing a fifth of its pictures, with nothing saying so, is worthless as an
+archive and priceless as a mystery.
+
+Now a full queue **stops the capture and says why** (`SINK STALLED`), never
+reopens, and counts what arrived after the stop in `refused`. Two outcomes remain:
+a complete file, or a short file with a loud reason. The drain that closes the file
+also stopped dropping pictures (it used to abandon any frame the sink did not take
+within 3 s); it now keeps trying for 30 s plus 100 ms per queued frame and, if it
+still cannot write them, prints `LOST PICTURES` with a count and the number of
+seconds the file ends early.
+
+**Depth is set by ffmpeg, not by the disk.** The queue is 150 frames = 6 s
+(`PCTV_VQ_SLOTS`, ceiling `VQ_SLOTS_MAX` 500 = 415 MB; the MPEG-2 path keeps 24),
+and 6 s is where ffmpeg's matroska muxer stops being a bystander: it enforces a
+**10 s maximum interleaving gap** between streams, and a raw-video input carries no
+timestamps of its own, so a video backlog *is* that gap. Past 10 s the muxer stops
+reading both pipes — the queue then fills whatever its size, and the stall becomes
+a dead capture. That was measured, not reasoned: a 600-frame (24 s) queue plus an
+8 MiB (43 s) audio ring — both sized against the wrong model — turned a 12 s
+encoder freeze into a muxer that consumed **nothing for 24 s after the encoder
+resumed**, because the sound had run 12 s ahead of the picture. Both rings now sit
+under the interleave limit (video 6 s, audio 1 MiB = 5.4 s), and the audio rule is
+"the ring refuses past half, out loud", not "the ring is infinite".
+
+The write path was never the limit. Measured on this station against GEN8's
+`ds-public` (NFS 4.2, `hard`, 1 MiB `rsize`/`wsize`): **123 MB/s** sustained
+buffered writes and 107 MB/s with a final `fsync`, against 20.9 MB/s for a lossless
+UYVY master — 5-6× headroom, with the client's dirty backlog sawtoothing around
+600 MB without ever stalling the writer.
+
+What the depth buys, measured by freezing ffmpeg with `SIGSTOP` mid-capture (the
+harness is `pctv-linux/replayprobe.c`: real tape pixels, real BT.656 pacing, so
+nothing about the deck or the card can excuse a loss):
+
+| sink freeze | old queue, 6 slots | 150 slots, no eviction |
+| --- | --- | --- |
+| 3 s | 953 frames written, `skip 60` — 60 pictures gone, file kept growing | 1524 frames, `dup 0 skip 0 refused 0`, video PTS contiguous at 40 ms |
+| 12 s | (silently evicted for as long as it took) | `SINK STALLED` at 6 s of cushion; 372 frames written = 372 packets, PTS contiguous, `refused 1` |
+| none, 10 min | — | 15001 frames, `qmax 1/150`, 0 video drops, 0 audio drops, 12.56 GB, `refused 0` |
+
+The acceptance test for a change in this area is *not* `skip == 0` (a probe-ring
+byte eviction shows up as a stream gap, not a skip) — it is **frames written ÷
+elapsed × 25**, plus contiguous video PTS.
+
+### 14.2c Quitting was the same circular wait, one stage further down
+
+The 2026-11-02 lockup (press stop, monitor never returns) was diagnosed as
+`child_stop()` waiting on the probe behind a writer wedged on a full pipe, and that
+half is fixed. Building `queue-selftest.sh` found the rest of it, in three places:
+
+* **`cap_stop()` blocked forever on its own child.** It gave ffmpeg 10 s to finalise,
+  then `kill(SIGTERM)` and a **blocking** `waitpid`. A *stopped* process does not
+  receive SIGTERM — the signal is queued until it is continued — so the wait never
+  returned. Now: TERM, `SIGCONT`, bounded 3 s; KILL, `SIGCONT`, bounded 3 s; then walk
+  away and say so. A zombie gets reaped when the monitor exits; nothing on a shutdown
+  path is worth an unkillable monitor.
+* **The drain waited out its own grace on a dead sink.** The queue-full stop added a
+  30 s + 100 ms/frame drain deadline (§14.2b), which is right for a *stall* and looks
+  identical to the lockup when the operator presses stop. Two different waits now:
+  a stall nobody walked away from keeps its grace and delivers its backlog (measured:
+  274 pictures including everything queued during a 12 s freeze), while **a quit
+  discards the queue after 3 s of not one more byte** — in one decision, not a frame
+  at a time (148 frames × a 3 s `pipe_write` timeout each would have been 7 minutes).
+* **`LOST PICTURES` is printed when the drain does discard**, with the count and the
+  seconds the file ends early, and the audio is refused (`aq_closed`) at the same
+  moment so the ALSA thread cannot refill a ring nobody drains — the original 50 s
+  shutdown hang.
+
+Measured with the same `SIGSTOP`-the-encoder harness, after the fixes:
+
+| case | result |
+| --- | --- |
+| 3 s freeze, capture runs to its deadline | `dup 0 skip 0 refused 0`, 525 pictures, PTS contiguous; quit 0 s |
+| 12 s freeze (longer than the queue) | `SINK STALLED`, 274 pictures delivered including the backlog, PTS contiguous, `refused 1`; quit 1 s |
+| **quit pressed while the encoder is frozen** | **gone 6 s after SIGTERM** (was: never) |
+
+It is in the repo as **`pctv-linux/queue-selftest.sh`** — three cases, the same
+assertions, run it after touching anything in the capture path.
+
+One more number that was lying: the `ADC +/- ppm` drift figure is *audio fed to the
+resampler* over *pictures written*, so during a sink stall the denominator stops and
+a stalled pipeline is reported as a **4 % crystal error** (measured `+42362 ppm` and
+climbing through a 12 s freeze; the old unit bug in §14.5's note pushed it to the
+`+50000` clamp). `rs_update()` now holds its last good step while `vq_backlog` is set,
+and `queue-selftest.sh` fails if any drift reading reaches five digits.
+
 ### 14.3 The system tuning that keeps the deadline
 
 All of it in `pctv_probe` at stream start (it is root, and it is the only stage
@@ -760,9 +929,11 @@ launched from the menu) and judge it by these numbers, in this order:
 | `max gap between completions` | < 5 ms | > 10 ms means the host was away from the endpoint; the device may have dropped data. The probe logs each event with a timestamp |
 | `stream gaps of N B/M rows, K repaired` | small, and every `G` has a `g` | a `G` without a `g` is a held field (see 14.2.1); a rising `N` is the USB path asking for more `PCTV_URBS` |
 | `dup` | 0, or a handful over hours | the *source* stopped delivering for >70 ms **and** nothing was waiting in the pipe: check the probe's late events first |
-| `skip` | 0 | the encoder is slower than real time: use `--master uyvy`, or `PCTV_VQ_SLOTS=48` |
+| `skip` | 0 — the counter is now a bug detector, nothing more | it used to mean "the encoder could not keep up, oldest picture evicted". That policy is gone (14.2b); any nonzero `skip` is a defect |
+| `refused` | 0 | pictures that arrived after the queue filled and the capture was ended on purpose. `SINK STALLED` names it. A nonzero `qmax` in the same line (e.g. `qmax 148/150`) says the sink was behind for ~6 s: check the mount, then the master format |
+| `qmax N/150 frames` | ≤ a handful | the deepest the picture queue ever got. Near the depth means the capture stopped because the sink was slower than the tape, not because the tape ran out |
 | `cut to match the picture` | 0 | it is not a dropout - it is the 40 ms of audio removed per repeated/evicted picture to keep the two timelines on the same tape position (14.2.3) |
-| `ADC +/- ppm` | stable, |x| < 400 | the correction being applied, not an error. It is biased by up to one audio period at the *end* of a short capture (-0.2 % on 20 s, -7 ppm on a 2 h tape); a value that keeps moving means one of the two clocks is not a crystal (e.g. the sound server resampling) |
+| `ADC +/- ppm` | stable, |x| < 400 | the correction being applied, not an error. It is biased by up to one audio period at the *end* of a short capture (-0.2 % on 20 s, -7 ppm on a 2 h tape); a value that keeps moving means one of the two clocks is not a crystal (e.g. the sound server resampling) — **or** the pipeline is stalled, which used to read as +42000 ppm and now freezes the correction instead (14.2c) |
 | video vs audio stream duration | equal to one audio frame | anything else is a bug - this is the whole point of 14.2.2 |
 
 **Or prove it without a deck:**
