@@ -216,6 +216,9 @@ format:
 # --- footage cleanup -------------------------------------------------------
 # Video cleanup toolkit (VapourSynth + video2x + FFmpeg), see footage/README.md.
 # Pass through to footage-clean, e.g.: just footage --test 12 file.mp4
+# just substitutes {{args}} UNQUOTED (just limitation): paths with spaces need
+# inner quotes preserved: just footage "'/path/my file.mpg'" — or call
+# result/bin/footage-clean directly after `nix build .#footage-kit`.
 footage +args:
     @out=$(nix build .#footage-kit --no-link --print-out-paths); "$out/bin/footage-clean" {{args}}
 

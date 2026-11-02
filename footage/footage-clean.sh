@@ -137,10 +137,18 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     -*) echo "footage-clean: unknown option $1" >&2; usage >&2; exit 2 ;;
     *) if [ -z "$IN" ]; then IN=$1; elif [ -z "$OUT" ]; then OUT=$1
-       else echo "footage-clean: too many positional args" >&2; exit 2; fi
+       else EXTRA="${EXTRA:+$EXTRA }$1"; POS_EXTRA=1; fi
        shift ;;
   esac
 done
+if [ "${POS_EXTRA:-0}" = 1 ]; then
+  echo "footage-clean: too many positional args (extra words: $EXTRA)" >&2
+  echo "  A path with spaces arrived split. 'just' substitutes variadic {{args}}" >&2
+  echo "  unquoted — double-quote inner quotes:" >&2
+  echo "    just footage --upscale 2 \"'my file.mpg'\"" >&2
+  echo "  or bypass just entirely: ./result/bin/footage-clean (after nix build .#footage-kit)" >&2
+  exit 2
+fi
 
 [ -n "$IN" ] || { usage >&2; exit 2; }
 [ -f "$IN" ] || { echo "footage-clean: no such file: $IN" >&2; exit 1; }

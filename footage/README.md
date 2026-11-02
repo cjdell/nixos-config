@@ -197,6 +197,14 @@ VRAM free with the LLM resident).
 
 ## Notes
 
+* **Paths with spaces + `just`:** just substitutes variadic `{{args}}`
+  into the recipe unquoted (a documented just limitation), so a quoted
+  `"my file.mpg"` arrives split and footage-clean reports *too many
+  positional args* (the error explains it). Either preserve inner
+  quotes — `just footage "'/ds-public/Pete DV/Video8/Disneyland
+  Paris.mpg'"` — or skip just: `nix build .#footage-kit &&
+  ./result/bin/footage-clean ...`.
+
 * `--test N` samples with `-c copy`, which snaps to keyframes — expect
   the sample to run to the next GOP boundary, not to exactly N seconds.
 * Sources tagged `matrix=bt2020c` get an automatic no-filter
