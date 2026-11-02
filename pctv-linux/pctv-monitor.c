@@ -2151,19 +2151,24 @@ static int cap_start(void)
     av[n++] = "-pix_fmt"; av[n++] = "uyvy422";
     av[n++] = "-s"; av[n++] = vsize;
     av[n++] = "-r"; av[n++] = "25";
-    /* The picture is top-field-first (see the dvd branch below), and for a raw
-     * source the command line is the only place ffmpeg will take that from.
-     * Measured on this box: on the OUTPUT side both lossless encoders ignore it
-     * (rawvideo -> `tb`, ffv1 -> `progressive`), while on the INPUT side it lands
-     * where it actually counts - every decoded frame carries
-     * `interlaced_frame=1, top_field_first=1`, which is what idet, yadif/bwdif,
-     * ffms2 and l-smash consult (ffprobe's stream-level spelling `tb` for it is a
-     * separate ffmpeg quirk; the frame flag is the operative one).  Without this
-     * the master is 50 fields/s of correct pixels that nothing knows how to lay
-     * out in time. */
-    if (cap_master != MASTER_DVD) {
-        av[n++] = "-field_order"; av[n++] = "tt";
-    }
+    /* The picture is top-field-first (derivation in the dvd branch below), and
+     * for a raw source the command line is the only place ffmpeg will take that
+     * from - so it goes on the INPUT, for EVERY master.  Measured on this box
+     * with the same rawvideo demuxer the pipe uses, mpeg2video +ilme+ildct:
+     *
+     *     -field_order tt  before -i   -> field_order=tt, top_field_first=1  OK
+     *     -field_order tt  on output   -> field_order=bb, top_field_first=0   WRONG
+     *     (nothing)                    -> field_order=bb, top_field_first=0   WRONG
+     *
+     * The encoder records the order it is TOLD, and a raw demuxer tells it
+     * nothing, so an output-side flag leaves the bitstream asserting
+     * bottom-first.  This flag is metadata only: decoding the same encode with
+     * and without it and diffing the frames gives PSNR inf, so it cannot move a
+     * pixel - it only stops every downstream consumer (idet, yadif/bwdif, ffms2,
+     * mpv, AviSynth+) from laying the two fields out in the wrong time order.
+     * ffprobe's stream-level spelling `tb` for it is a separate ffmpeg quirk;
+     * the frame flag is the operative one. */
+    av[n++] = "-field_order"; av[n++] = "tt";
     av[n++] = "-i"; av[n++] = "pipe:0";
     if (cap_has_audio) {
         av[n++] = "-f"; av[n++] = "s16le"; av[n++] = "-ar"; av[n++] = ar;
@@ -2176,29 +2181,28 @@ static int cap_start(void)
         av[n++] = "-bufsize"; av[n++] = "1835008";
         av[n++] = "-g"; av[n++] = "15";
         av[n++] = "-flags"; av[n++] = "+ilme+ildct";
-        /* NOTE: mpeg2video IGNORES -field_order.  Measured: encoding with this
-         * exact flag set still produces `top_field_first=0` / field_order=bb,
-         * while the picture is top-field-first: the deframer's F-bit branch puts
-         * BT.656 field 1 on the EVEN lines, 625/50 numbers the field containing
-         * line 1 as field 1 (so field 1 IS the top field) and displays the field
-         * it transmitted first - the same reason DV-PAL is always TFF.  That is a
-         * standards argument, not an observation, because it cannot be observed
-         * with idet: two synthetic clips differing only in which field is
-         * temporally first voted TFF 9/BFF 10 and TFF 10/BFF 9, and ffmpeg also
-         * prints a spurious all-zero summary before the real one
-         * (docs/pctv-analog-capture.md §10.3 - measured, do not trust idet here).
-         * Worse, `top_field_first` is a bitstream syntax element of the MPEG-2
-         * picture coding extension, so no lossless remux can change it either:
-         * `-c copy -field_order tt` rewrites only the container label, and the
-         * frames keep reading 1,0.  So a .mpg master has to be *told* to be TFF
-         * downstream (AssumeTFF() in AviSynth+, SetFieldBased(1) in VapourSynth)
-         * - which is what tape digitisation always did anyway - or recaptured as
-         * PCTV_MASTER=uyvy|ffv1, which stamps the frame flag itself.  And played
-         * back with the order declared: `ffplay -top 1 FILE`, because a player
-         * that believes the wrong order deinterlaces every moving object in the
-         * wrong temporal order, which is exactly the "drags then catches up" that
-         * this recording used to be famous for. */
-        av[n++] = "-field_order"; av[n++] = "tt";
+        /* No -field_order here: on the output side it does nothing at all (see
+         * the table above - it was this line, plus the belief that "mpeg2video
+         * ignores -field_order", that made every .mpg this tool ever wrote
+         * assert bottom-first while carrying a top-first picture.  It doesn't
+         * ignore it; it was never being told.  The INPUT-side flag is the one
+         * that reaches the picture coding extension.)
+         *
+         * Why the picture IS top-first, which no measurement on this content can
+         * show (idet on two synthetic clips differing only in which field is
+         * temporally first voted TFF 9/BFF 10 and TFF 10/BFF 9 - docs/
+         * pctv-analog-capture.md §10.3): the deframer's F-bit branch puts BT.656
+         * field 1 on the EVEN lines, 625/50 numbers the field containing line 1
+         * as field 1 (so field 1 IS the top field) and displays the field it
+         * transmitted first - the same reason DV-PAL is always TFF.
+         *
+         * Consequence for files made BEFORE this fix: `top_field_first` is a
+         * bitstream syntax element of the MPEG-2 picture coding extension, so no
+         * lossless remux can change it (`-c copy -field_order tt` rewrites only
+         * the container label while the frames keep reading 0).  Those files have
+         * to be TOLD to be TFF downstream - `ffplay -top 1 FILE`, AssumeTFF() in
+         * AviSynth+, SetFieldBased(1) in VapourSynth - or re-encoded from the
+         * master.  New .mpg files need neither. */
         av[n++] = "-aspect"; av[n++] = "4:3";
         if (cap_has_audio) { av[n++] = "-c:a"; av[n++] = "mp2"; av[n++] = "-b:a"; av[n++] = "192k"; }
         else av[n++] = "-an";

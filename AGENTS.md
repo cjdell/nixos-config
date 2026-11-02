@@ -1360,6 +1360,16 @@ agent thread with no way to resume it. Follow this order:
 
   Check liveness with the job's PID (`kill -0`) or a `pgrep` pattern that
   cannot match the polling shell itself — not a long blocking sleep.
+- **Never pipe a whole capture file through a byte-level tool.** A 5.7 GB `.mpg`
+  is ~17 GB of hex text, and `od -An -tx1 -v FILE | tr ' ' '\n' | awk '{a[NR]=$2}'`
+  holds one array element per byte: it reached 7 GB RSS / 15 GB virtual on this
+  7.7 GB laptop, ate all 9.2 GB of swap and froze the desktop for four minutes
+  until the OOM killer picked it (2026-11-02, `awk` pid 61629; nothing else was
+  killed). Read a bounded window instead -
+  `dd bs=1M count=2 iflag=skip_bytes skip=<offset> if=FILE | od -tx1` -
+  and ask first whether the check is even needed: in that case the answer had
+  already been proved by two encodes of the same source in the same container
+  reporting different field orders, which can only come from the bitstream.
 - Do not run heavy builds unless the task requires it; the user applies Nix
   config themselves when they prefer.
 - If you DO apply a config (with permission), always finish with

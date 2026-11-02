@@ -235,18 +235,39 @@ modes to archive a tape in, with `dvd` for the copy you actually play.
   What idet *does* answer is whether the picture is interlaced at all: over 100
   frames five minutes into a tape, `Repeated Fields: Neither: 58 Top: 19 Bottom:
   23` — 58 % non-repeating is interlaced, not progressively encoded.
-* **Then contradicted by the file.** The `.mpg` masters report
-  `field_order=bb`/`top_field_first=0` — `mpeg2video` **ignores `-field_order`**
-  and writes the bitstream flag itself, and MPEG-PS has no container element to
-  overrule it. Because that flag is a *syntax element of the picture coding
-  extension*, no lossless operation changes it either: `ffmpeg -c copy
+* **Then contradicted by the file - until the flag went in the right place.** The
+  `.mpg` masters report `field_order=bb`/`top_field_first=0`, and the comment in
+  `cap_start()` concluded from that that `mpeg2video` **ignores `-field_order`**
+  and writes the bitstream flag itself.  That conclusion was wrong, and it was an
+  artefact of *where the flag was being passed*.  Measured on this box against the
+  same rawvideo demuxer the capture pipe uses, with
+  `-c:v mpeg2video -flags +ilme+ildct -f mpeg`:
+
+  | where `-field_order tt` is passed | `field_order` | `top_field_first` |
+  | --- | --- | --- |
+  | before `-i` (input/demuxer side) | `tt` | `1` |
+  | after `-i` (encoder side) | `bb` | `0` |
+  | not passed at all | `bb` | `0` |
+
+  `mpeg2video` does not ignore the flag - it **records the order the demuxer
+  reported**, and a raw demuxer reports nothing unless you tell it.  Encoder-side
+  is indistinguishable from silence, which is what made the wrong conclusion look
+  right.  So every `.mpg` this tool wrote was declaring bottom-first because it
+  was never being told, and MPEG-2 defaults to bottom-first.  All three masters
+  now pass the flag on the input side.  The flag is metadata: encoding 4 s of tape
+  told and untold and diffing the decoded frames gives **PSNR `inf` /
+  SSIM 1.000000**, so correcting it cannot move a pixel - verified with `+ilme`
+  on, where interlaced motion estimation is exactly the thing you would fear.
+
+  Because the flag is a *syntax element of the picture coding extension*, files
+  written before the fix cannot be relabelled losslessly: `ffmpeg -c copy
   -field_order tt` rewrites the Matroska label while the decoded frames go on
   reading `1,0` (measured; the remux also needs `-fflags +genpts` or the muxer
   dies on an audio packet with no valid timestamp).
 
-Which is why the lossless modes pass `-field_order tt` **on the input side**:
+Which is why the master modes all pass `-field_order tt` **on the input side**:
 with a raw source that is the only place ffmpeg listens, and it puts the value
-where consumers actually look — every decoded frame carries
+where consumers actually look - every decoded frame carries
 `interlaced_frame=1, top_field_first=1`, the flags `idet`, `yadif`/`bwdif`, ffms2
 and l-smash consult. (ffprobe then *spells* the stream-level tag `tb`; that is an
 ffmpeg quirk, the frame flag is the operative one.)
@@ -254,13 +275,15 @@ ffmpeg quirk, the frame flag is the operative one.)
 `pctv-field-order` (same package) prints all three readings for a file and what
 to do about each; `--relabel` stream-copies a container-tagged Matroska twin and
 honestly reports that the frames kept their own flag. For the `.mpg` masters
-recorded before this patch the fix is one line in the post script — AviSynth+
+recorded before 2026-11-02 the fix is one line in the post script - AviSynth+
 `AssumeTFF()`, VapourSynth `core.video.AssumeTFF(clip)` / `SetFieldBased(1)`.
 Tape digitising has always declared its field order; trusting the tag was the
 experiment.  The same applies at *playback*: a player that believes the wrong
 order deinterlaces every moving object backwards, which looks like motion that
 draggs and then catches up.  `ffplay -top 1 FILE` forces the MPEG-2 decoder's
-field order when the bitstream (as here) says the wrong thing.
+field order for those older files - a capture made after 2026-11-02 says `tt` and
+needs no flag at all.  Check which you have with
+`ffprobe -select_streams v -show_entries frame=top_field_first -of csv=p=0 FILE`.
 
 ## 11. Cadence: why a recording was less fluid than the live view (2026-11-01)
 
