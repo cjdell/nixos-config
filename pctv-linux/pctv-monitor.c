@@ -2671,7 +2671,19 @@ static void *vq_thread(void *unused)
             int st = pipe_write(afd, b, first, 3000, &d1);
             written = d1;
             if (st == 0 && n > first) {
-                st = pipe_write(afd, b + first, n - first, 3000, &d2);
+                /* The chunk wrapped the ring, so segment two continues at aq[0],
+                 * NOT at b+first - which for this branch is exactly aq+AQ_BYTES,
+                 * one past the end of the allocation.  Until 2026-11-03 that is
+                 * what this shipped: whatever sat past the ring (freshly mapped,
+                 * zero-filled heap), while aq_head then advanced over the real
+                 * wrapped bytes too.  Every ring lap - one MiB, 5.4613 s of
+                 * sound - the file therefore got ~one ALSA period of silence
+                 * (1022 samples on the tape that made us look) and lost the same
+                 * amount of real audio; the buzz on the raw masters was that,
+                 * once per 5.5 s, whenever the programme was loud enough to
+                 * hear.  The MPEG-2 masters had the same holes; MP2 quantising
+                 * hid them. */
+                st = pipe_write(afd, aq, n - first, 3000, &d2);
                 written += d2;
             }
             /* Release only what reached the pipe.  This matters: a program-stream
