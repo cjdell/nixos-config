@@ -141,6 +141,13 @@ in
           tcp flags syn / fin,syn,rst,ack ip6 daddr != fe80::/10 tcp option maxseg size set 1400 comment "Clamp TCP MSS for IPv6"
           tcp flags syn,ack ip6 daddr != fe80::/10 tcp option maxseg size set 1400 comment "Clamp TCP MSS IPv6 (SYN-ACK)"
 
+          # tailscale0's MTU is 1280, so 1400 is still too big for anything
+          # crossing the tunnel: the handshake must advertise 1240 (1280-40)
+          # or every connection discovers that the hard way with a DF drop +
+          # "frag needed" round-trip per PMTU probe — SMB browsing stalls.
+          oifname ${c.TAILSCALE_INTERFACE} tcp flags syn / fin,syn,rst,ack tcp option maxseg size set 1240 comment "Clamp MSS to tailscale tunnel MTU (out)"
+          iifname ${c.TAILSCALE_INTERFACE} tcp flags syn,ack tcp option maxseg size set 1240 comment "Clamp MSS to tailscale tunnel MTU (in)"
+
           # No internet egress to RFC1918 addresses
           oifname ${c.WAN_INTERFACE} ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } reject with icmp type net-unreachable comment "outbound rfc1918 not permitted"
 
