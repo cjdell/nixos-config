@@ -8,6 +8,8 @@
 #   FC_DENOISE       none | light | standard | strong | stronger (default standard)
 #   FC_CHROMA_BLUR   0/1  extra chroma denoise (default 1 when denoising)
 #   FC_CROP          WxH+X+Y  crop for overscan / head-switch junk (optional)
+#   FC_ENDSEC        drop this many seconds worth of source frames off the
+#                    END of the source clip before anything else (optional)
 #
 # Order per the usual advice: crop -> deinterlace -> temporal denoise.
 # Deinterlace modes:
@@ -45,6 +47,18 @@ if denoise not in ("none", "light", "standard", "strong", "stronger"):
     raise SystemExit(f"clean.vsh: bad FC_DENOISE={denoise}")
 
 clip = core.bs.VideoSource(source=src)
+
+# --- end trim (footage-clean --to with --single-pass) -----------------------
+# Trimming the SOURCE here — not just stopping rendering at the last frame —
+# is what keeps the deinterlacer honest: the qtgmc-style chain leans on
+# neighbouring frames, and a filter reading past the cut would blend a field
+# of the discarded tail (tape blue, the operator's hand on the deck) into the
+# final frame. A trimmed clip clamps the same way a physically cut file did.
+endsec = env("FC_ENDSEC")
+if endsec:
+    n = int(round(float(endsec) * float(clip.fps)))
+    if 0 < n < clip.num_frames:
+        clip = clip[:n]
 
 # --- crop (overscan, head-switch noise, black bars) -------------------------
 if crop:

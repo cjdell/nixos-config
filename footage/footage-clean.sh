@@ -87,7 +87,9 @@ OPTIONS
                       (blank tape, dropout, the operator's hand on the deck).
                       Frames after SEC are never read, so unlike trimming the
                       finished render this is one pass, and audio is cut with
-                      the video. Keyframe-snapped at --from only.
+                      the video. With --single-pass there is no temp file at
+                      all; otherwise the kept range is stream-copied once
+                      (start snaps to the previous keyframe) into $TMPDIR.
   --single-pass       pipe VapourSynth straight into the final encoder instead
                       of writing the crf 12 intermediate. One read of the
                       source, and — the reason it exists — a lossless final
@@ -506,12 +508,34 @@ if [ "$TEST" != 0 ]; then
 elif [ "$TO" != 0 ]; then
   KEEP=$(awk -v t="$TO" -v f="$FROM" 'BEGIN{printf "%.6f", t-f}')
 fi
+TSTOP=()
+FC_ENDSEC=""
 if [ "$KEEP" != 0 ]; then
-  echo "==> cutting $(if [ "$FROM" != 0 ]; then printf 'from %ss, ' "$FROM"; fi)${KEEP}s (start snaps to the previous keyframe)"
-  $FFMPEG -hide_banner -loglevel error -y -ss "$FROM" -i "$IN" -t "$KEEP" \
-    -c copy "$TMP/sample.mkv"
-  CUR="$TMP/sample.mkv"
-  AUDIO_SRC="$TMP/sample.mkv"
+  # Exception to the up-front cut: a trim from 0 that only the (single)
+  # encoder consumes is better expressed as -t ON THE ENCODE. `-ss 0 -c copy`
+  # rewrites the whole kept range as a new file — for a 154 GB capture master
+  # that is an extra read AND write of the largest stage, dumped into $TMP,
+  # which lives on tmpfs unless TMPDIR says otherwise.
+  if [ "$FROM" = 0 ] && [ "$ONE_PASS" = 1 ]; then
+    # No intermediate file: -t caps the ENCODE (and the audio with it), and
+    # FC_ENDSEC tells clean.vsh to trim the SOURCE clip itself. That second
+    # half matters: the deinterlacing chain leans on neighbouring frames, so
+    # with only -t its last output frame blends a field of the discarded tail
+    # — a blue flash where the tape went to slate (measured: the 150th frame
+    # of a 6 s trim from an 8 s master combed in the 7th second's black).
+    echo "==> end trim: encode stops at ${KEEP}s (source trimmed in vspipe; no intermediate cut)"
+    TSTOP=(-t "$KEEP")
+    FC_ENDSEC=$KEEP
+  else
+    if [ "$TO" != 0 ] && [ "$ONE_PASS" = 0 ]; then
+      echo "footage-clean: note: --to without --single-pass stream-copies the kept $(du -h "$IN" | cut -f1)-ish file into $TMP — point TMPDIR at a filesystem with room"
+    fi
+    echo "==> cutting $(if [ "$FROM" != 0 ]; then printf 'from %ss, ' "$FROM"; fi)${KEEP}s (start snaps to the previous keyframe)"
+    $FFMPEG -hide_banner -loglevel error -y -ss "$FROM" -i "$IN" -t "$KEEP" \
+      -c copy "$TMP/sample.mkv"
+    CUR="$TMP/sample.mkv"
+    AUDIO_SRC="$TMP/sample.mkv"
+  fi
 fi
 
 stage() { # stage label cmd...
@@ -533,7 +557,7 @@ stage() { # stage label cmd...
 # ---------------------------------------------------------------- stage 1 --
 if [ "$NEED_VS" = 1 ]; then
   export FC_SRC=$CUR FC_DEINT=$DEINT_APPLIED FC_FIELD=$FIELD \
-         FC_DENOISE=$DENOISE FC_CROP=$CROP FC_CHROMA_BLUR=1
+         FC_DENOISE=$DENOISE FC_CROP=$CROP FC_CHROMA_BLUR=1 FC_ENDSEC=$FC_ENDSEC
   VSCMD="$VSPIPE -r $THREADS -c y4m -p '$CLEANVSH' - 2>'$TMP/vs.log'"
   if [ "$ONE_PASS" = 1 ]; then
     # No crf 12 intermediate: pipe the cleaned frames straight into the encode
@@ -548,8 +572,9 @@ if [ "$NEED_VS" = 1 ]; then
     QCOL=$(q ${COLOR[@]+"${COLOR[@]}"})
     QVF=$(q ${VFARGS[@]+"${VFARGS[@]}"})
     QAENC=$(q "${AENC[@]}")
+    QSTOP=$(q "${TSTOP[@]+"${TSTOP[@]}"}")
     VSCMD="$VSCMD | $FFMPEG -hide_banner -loglevel error -stats -y -i - -i '$AUDIO_SRC'"
-    VSCMD="$VSCMD -map 0:v:0 -map 1:a:0? ${QCOL}${QENC} ${QVF}${QAENC} -movflags +faststart '$OUT'"
+    VSCMD="$VSCMD -map 0:v:0 -map 1:a:0? ${QCOL}${QENC} ${QVF}${QAENC} ${QSTOP}-movflags +faststart '$OUT'"
     STAGE_LABEL="VapourSynth clean + ${CODEC} encode (single pass$(
       [ "$LOSSLESS" = 1 ] && printf ', lossless qp 0'))"
   else
@@ -557,7 +582,14 @@ if [ "$NEED_VS" = 1 ]; then
     VSCMD="$VSCMD -c:v libx264 -preset fast -crf 12 -an '$TMP/stage1.mkv'"
     STAGE_LABEL="VapourSynth clean (deint=${DEINT_APPLIED} denoise=${DENOISE} crop=${CROP:-none})"
   fi
-  if stage "$STAGE_LABEL" bash -o pipefail -c "$VSCMD"; then
+  # A -t trim can finish the encoder a hair before vspipe has pushed its last
+  # frame; the writer then dies of SIGPIPE (141) with a complete file behind
+  # it. Expected for one-pass — tolerated only when $OUT actually exists.
+  RUNTAIL=""
+  if [ "$ONE_PASS" = 1 ]; then
+    RUNTAIL="; rc=\$?; if [ \$rc = 141 ] && [ -s '$OUT' ]; then rc=0; fi; exit \$rc"
+  fi
+  if stage "$STAGE_LABEL" bash -o pipefail -c "$VSCMD$RUNTAIL"; then
     if [ "$ONE_PASS" = 1 ]; then CUR="$OUT"; else CUR="$TMP/stage1.mkv"; fi
   else
     echo "--- vspipe stderr (tail):" >&2

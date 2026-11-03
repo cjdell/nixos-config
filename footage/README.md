@@ -42,8 +42,10 @@ just footage [flags] FILE [OUT]
 `result/bin/...` uses the last `nix build .#footage-kit` output. Output
 defaults to `<input>-cleaned.mp4`. `footage-clean --help` lists every
 flag with its default. Three that earn their keep on tape work:
-`--to SEC` (end trim — cut before any stage, so a blank tail is never read
-and the audio is cut with the video), `--single-pass` (VapourSynth straight
+`--to SEC` (end trim — the cut happens before any stage reads, so a blank
+tail is never decoded and the audio is cut with the video; with
+`--single-pass` there is no temp file at all — vspipe trims the source clip
+and the encoder stops with `-t`), `--single-pass` (VapourSynth straight
 into the final encoder: no crf 12 intermediate, one read of a 100+ GB master)
 and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
 
