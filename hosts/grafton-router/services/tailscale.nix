@@ -10,7 +10,11 @@
       "--advertise-routes=192.168.49.0/24"
       "--advertise-exit-node"
       "--accept-dns=false"
-      "--accept-routes=false"
+      # Accept the tailnet's approved subnet routes so the LAN can reach them
+      # (the firewall + masquerade per-subnet, see networking/firewall.nix).
+      # Currently approved: gatling-services 10.0.1.0/24, colin 192.168.178.0/24,
+      # dbthr33-server 192.168.35.0/24.
+      "--accept-routes=true"
     ];
   };
 

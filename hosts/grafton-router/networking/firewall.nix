@@ -189,6 +189,12 @@ in
           # enables TCP/UDP (e.g. SSH) which otherwise fell through to the drop.
           iifname ${c.LAN_INTERFACE} ip daddr ${c.HACKSPACE_SUBNET} accept comment "LAN to Hackspace"
 
+          # gatling-services' tailnet subnet (10.0.1.0/24) — an approved subnet
+          # route accepted on tailscale0 via --accept-routes. The generic "LAN to
+          # VPN" rule below already forwards this; it is stated explicitly so
+          # the masquerade rule in the nat table has its filter counterpart.
+          iifname ${c.LAN_INTERFACE} ip daddr ${c.GATLING_SUBNET} accept comment "LAN to gatling-services subnet"
+
           # IPv6 — delegated prefix + trusted network
           ip6 saddr ${c.DELEGATED_PREFIX} accept comment "outbound from delegated IPv6 prefix"
           ip6 saddr ${c.DBTHR33_SUBNET}   accept comment "DBTHR33 trusted network"
@@ -255,6 +261,7 @@ in
           # replies come back via us instead of the remote network's routes
           iifname ${c.LAN_INTERFACE}          ip daddr ${c.TAILSCALE_SUBNET} masquerade comment "NAT for Grafton Tailnet traffic"
           iifname ${c.LAN_INTERFACE}          ip daddr ${c.HACKSPACE_SUBNET} masquerade comment "NAT for Hackspace Tailnet traffic"
+          iifname ${c.LAN_INTERFACE}          ip daddr ${c.GATLING_SUBNET} masquerade comment "NAT for gatling-services subnet (10.0.1.0/24) traffic"
           iifname ${c.TAILSCALE_INTERFACE}    ip daddr ${c.HACKSPACE_SUBNET} masquerade comment "NAT for Hackspace Tailnet traffic"
         }
 

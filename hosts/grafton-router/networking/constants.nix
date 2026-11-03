@@ -32,6 +32,7 @@ rec {
   WIREGUARD_SUBNET = "10.47.0.0/16"; # wg0 tunnel
   TAILSCALE_SUBNET = "100.64.0.0/10"; # headscale ip_prefixes (CGNAT)
   HACKSPACE_SUBNET = "10.3.0.0/16"; # via grafton-hackspace-client VM
+  GATLING_SUBNET = "10.0.1.0/24"; # gatling-services' tailnet subnet route
   # Hackspace public IPv6 — trusted; full access to the LANs from the internet
   HACKSPACE_IPV6_SUBNET = "2001:8b0:1d14::/48";
   DELEGATED_PREFIX = "2a02:8010:6680::/48"; # IPv6 delegated by Zen (PPPoE)
