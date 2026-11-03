@@ -398,6 +398,16 @@ if [ "${#COLOR[@]}" = 0 ]; then COLOR_DESC=source; fi
 PIXFMT_EFF=$PIXFMT_OUT
 if [ -z "$PIXFMT_EFF" ] && [ "$LOSSLESS" = 1 ]; then PIXFMT_EFF=$PIXFMT; fi
 [ "$PIXFMT_EFF" = "?" ] && PIXFMT_EFF=""
+# A capture master often carries a PACKED chroma layout — UYVY is what every
+# DV/VHS USB bridge emits — and ffprobe reports that name as the source pix_fmt.
+# x264 cannot encode it (planar inputs only), but the distinction is moot by
+# the time frames reach the encoder: vspipe's y4m has already delivered them
+# planar. So translate the name and keep the format's identity (4:2:2 stays
+# 4:2:2 — which is what makes the lossless claim honest in the first place).
+case "$PIXFMT_EFF" in
+  uyvy422|uyvy422be|vuy422|yuyv422|yvyu422|nv16|nv61) PIXFMT_EFF=yuv422p ;;
+  nv12|nv21) PIXFMT_EFF=yuv420p ;;
+esac
 case "$PIXFMT_EFF" in
   "") PROF=high ;;
   yuv444*|gbrp*) PROF=high444 ;;
