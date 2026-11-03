@@ -28,10 +28,13 @@
     teamNumber = 236565;
     # While this box is on video duty it folds GPU-only: the lossless x264
     # render owns the 8 Kaby Lake threads, so 0 CPU slots (the client's GPU
-    # slot still runs). The client honours <cpus>0</cpus>, and the in-DB
-    # running WU is cleared by wiping /var/lib/fah-client/db.sql (asus-i7's
-    # documented trick) since config.xml only seeds. Drop this line (back to
-    # null = client default 75 %) once the renders stop to fold full-heater.
+    # slot still runs). The client honours <cpus>0</cpus> (no CPU slots are
+    # created; verified live over the WS API). Caveat from hosts/asus-i7-6700:
+    # the client's SQLite DB (/var/lib/fah-client/client.db, `db.sql` on
+    # older clients) persists settings and config.xml only seeds — flipping
+    # this option needs the DB wiped once (plus work/ for the assignments),
+    # as done at deploy. Drop to null (= client default 75 %) to fold as a
+    # full heater again.
     cpus = 0;
     # gpuUsage left at the module default (100).
     httpAddresses = [ "0.0.0.0:7396" ];
