@@ -106,12 +106,13 @@ in
     };
 
     cpus = lib.mkOption {
-      type = with lib.types; nullOr (ints.between 1 4096);
+      type = with lib.types; nullOr (ints.between 0 4096);
       default = null;
       description = ''
         Number of CPU threads to fold on. The client default reserves one
         core for the system; set it to the full thread count for a machine
-        that exists to make heat.
+        that exists to make heat. 0 disables CPU slots entirely — the GPU
+        folds alone while the CPUs are on other duty (a footage render).
       '';
     };
 

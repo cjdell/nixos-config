@@ -26,9 +26,14 @@
     enable = true;
     userName = "cjdell";
     teamNumber = 236565;
-    # cpus/gpuUsage deliberately left at the module defaults: this is a
-    # desktop that folds, not a dedicated heater, so it keeps v8's own
-    # "everything but a core" thread choice rather than pinning all 8.
+    # While this box is on video duty it folds GPU-only: the lossless x264
+    # render owns the 8 Kaby Lake threads, so 0 CPU slots (the client's GPU
+    # slot still runs). The client honours <cpus>0</cpus>, and the in-DB
+    # running WU is cleared by wiping /var/lib/fah-client/db.sql (asus-i7's
+    # documented trick) since config.xml only seeds. Drop this line (back to
+    # null = client default 75 %) once the renders stop to fold full-heater.
+    cpus = 0;
+    # gpuUsage left at the module default (100).
     httpAddresses = [ "0.0.0.0:7396" ];
     allowAddresses = [
       "127.0.0.1" # loopback — fah-provision/fahctl connect here
