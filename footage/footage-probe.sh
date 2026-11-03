@@ -16,6 +16,27 @@ export FC_FFPROBE=$FFPROBE
 IN=$1
 [ -f "$IN" ] || { echo "footage-probe: no such file: $IN" >&2; exit 1; }
 
+# A headerless raw stream (.uyvy/.yuv from a re-direct, or a raw BT.656 dump
+# from pctv_probe) has no container, so ffprobe has nothing to read. Tell the
+# user how to wrap it instead of failing with a traceback.
+if ! $FFPROBE -v error -show_entries stream=codec_type -of csv=p=0 "$IN" \
+     >/dev/null 2>&1; then
+  case "${IN##*.}" in
+    uyvy|yuv|yuv422|raw|bin)
+      echo "$IN: no container — this is a headerless raw stream, ffprobe cannot read it."
+      echo "Wrap it losslessly into a master first (the PCTV monitor's rawvideo is"
+      echo "uyvy422 720x576@25i TFF; for another layout adjust -pix_fmt/-s/-r):"
+      echo
+      echo "  ffmpeg -f rawvideo -pix_fmt uyvy422 -s 720x576 -r 25 -field_order tt \\"
+      echo "    -i '$IN' -c:v ffv1 -g 1 -an '${IN%.*}.mkv'"
+      echo
+      echo "(A raw *BT.656* dump from pctv_probe is NOT that — it carries EAV/SAV"
+      echo " sync words and needs the monitor's deframer first; it is a diagnostic"
+      echo " format, never a pipeline input.)"
+      exit 1 ;;
+  esac
+fi
+
 IFS=$'\t' read -r WIDTH HEIGHT FPS FRATE FIELD_ORDER CSPACE CMATRIX PRIM TRC \
     PIXFMT BITRATE DUR CODEC < <($PY - "$IN" <<'PYEOF'
 import json, os, subprocess, sys
@@ -45,14 +66,43 @@ PYEOF
 echo "$IN"
 echo "  stream:   $CODEC ${WIDTH}x${HEIGHT} @ ${FRATE} fps, ${PIXFMT}, ${DUR}s, $(( BITRATE / 1000 )) kbps"
 
-BPP=$(awk "BEGIN{printf \"%.3f\", $BITRATE / ($WIDTH * $HEIGHT * ($FPS>0?$FPS:1))}")
-echo "  bits/px:  $BPP   (0.02+ = fine, 0.01-0.02 = lossy, <0.01 = heavy compression)"
+# A lossless capture master (pctv-linux --master ffv1|utvideo|uyvy, or any
+# other intra-only lossless codec): every sample is exact, so the
+# bits-per-pixel quality heuristic is meaningless — and its field-order tag is
+# the capture's own declaration, worth more than idet's vote.
+MASTER=0
+case "$CODEC" in
+  ffv1|ffvhuff|huffyuv|utvideo|rawvideo|qtrle) MASTER=1 ;;
+esac
+
+if [ "$MASTER" = 1 ]; then
+  echo "  bits/px:  n/a — lossless capture master; the pixels ARE the source"
+else
+  BPP=$(awk "BEGIN{printf \"%.3f\", $BITRATE / ($WIDTH * $HEIGHT * ($FPS>0?$FPS:1))}")
+  echo "  bits/px:  $BPP   (0.02+ = fine, 0.01-0.02 = lossy, <0.01 = heavy compression)"
+fi
 
 CASE=ok
 case "$FIELD_ORDER" in
   tt|bt|tb|bb)
-    echo "  fields:   container says '${FIELD_ORDER}' -> INTERLACED"
+    case "$FIELD_ORDER" in t*) PARM="top field coded first (TFF)";; *) PARM="bottom field coded first (BFF)";; esac
+    echo "  fields:   container says '${FIELD_ORDER}' -> INTERLACED, $PARM"
     CASE=interlaced
+    if [ "$MASTER" = 1 ]; then
+      # What the decoded frames themselves claim (counted, not sampled):
+      # ffv1/rawvideo carry per-frame flags; utvideo writes none at all, and
+      # only the container tag remembers — which is why masters land here and
+      # not in idet's coin-toss (docs/pctv-analog-capture.md §10.3).
+      flags=$($FFPROBE -v error -select_streams v:0 -read_intervals "%+2" \
+                -show_entries frame=interlaced_frame,top_field_first -of csv=p=0 "$IN" \
+                2>/dev/null | sort | uniq -c | paste -sd'  ' -)
+      echo "  frame flags: ${flags:-none readable}  (frames: interlaced_frame,top_field_first)"
+      case "$CODEC" in
+        utvideo)
+          echo "            utvideo stores no frame flags — players see 25p unless told;"
+          echo "            footage-clean trusts the container tag (top-field-first)." ;;
+      esac
+    fi
     ;;
   *)
     t0=$(awk "BEGIN{if ($DUR > 40) printf \"%.0f\", $DUR / 4; else print 0}")
@@ -94,6 +144,11 @@ echo
 echo "suggested:"
 if [ "$CASE" = interlaced ]; then
   echo "  footage-clean --test 12 --deint qtgmc --denoise light '$IN'"
+  if [ "$MASTER" = 1 ] && [ "$WIDTH" = 720 ] && [ "$HEIGHT" = 576 ]; then
+    echo "  # PCTV master (720x576): pillar bars + head-switch band + tape colour, per"
+    echo "  # the verified recipe — deint auto now trusts this master's field tag:"
+    echo "  footage-clean --test 12 --crop 700x556+10+2 --denoise light --grade '$IN'"
+  fi
 else
   echo "  footage-clean --test 12 --denoise standard '$IN'   # progressive; no deint"
 fi

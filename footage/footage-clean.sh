@@ -6,7 +6,8 @@
 #     -> optional GPU stages: RealESRGAN upscale, RIFE interpolation
 #        (video2x on Vulkan)
 #     -> FFmpeg encode (libx265 default; SVT-AV1 / x264 / VAAPI H.265 also
-#        available; audio stream-copied).
+#        available; audio stream-copied — except PCM capture masters into
+#        .mp4, which become aac; --acodec overrides).
 #
 # Every tool below is an absolute store path baked in by kit.nix, so the
 # script needs no PATH beyond the basics (bash, coreutils, awk).
@@ -59,6 +60,11 @@ OPTIONS
   --gpu N             video2x Vulkan device index for stages 3-4 (default 0;
                       enumerate with 'nix run .#footage-kit.passthru.video2xPatched -- -l')
   --codec C           x265|x264|av1|gpu-h265|gpu-h264                (default x265)
+  --acodec A          auto|copy|aac|alac                        (default auto)
+                        auto: stream-copy, except PCM masters (ffv1/utvideo/
+                              uyvy) going to .mp4, which become aac 192k —
+                              stream-copied PCM lands in mp4 as 'ipcm', which
+                              most players cannot read. The master stays PCM.
   --crf N             quality for CPU codecs / -global_quality for VAAPI
                       (default 20; lower = better)
   --preset P          x265/x264 speed preset (default medium)
@@ -96,6 +102,7 @@ MODEL_SET=0
 INTERP=0
 GPUDEV=""
 CODEC=x265
+A_MODE=auto
 CRF=20
 PRESET=medium
 VAAPI_DEV=/dev/dri/renderD128
@@ -121,6 +128,7 @@ while [ $# -gt 0 ]; do
     --interp) INTERP=1; shift ;;
     --gpu) GPUDEV=$2; shift 2 ;;
     --codec) CODEC=$2; shift 2 ;;
+    --acodec) A_MODE=$2; shift 2 ;;
     --crf) CRF=$2; shift 2 ;;
     --preset) PRESET=$2; shift 2 ;;
     --vaapi-dev) VAAPI_DEV=$2; shift 2 ;;
@@ -164,16 +172,22 @@ esac
 
 # ---------------------------------------------------------------- probe ----
 IFS=$'\t' read -r WIDTH HEIGHT FPS FRATE FIELD_ORDER CSPACE CMATRIX PRIM TRC \
-    PIXFMT BITRATE DUR < <($PY - "$IN" <<'PYEOF'
+    PIXFMT BITRATE DUR VCODEC ACODEC < <($PY - "$IN" <<'PYEOF'
 import json, os, subprocess, sys
-data = json.loads(subprocess.check_output([
-    os.environ["FC_FFPROBE"], "-v", "error", "-select_streams", "v:0",
-    "-show_entries",
-    "stream=width,height,r_frame_rate,field_order,pix_fmt,color_space,"
-    "color_matrix,color_primaries,color_transfer,bit_rate",
-    "-show_entries", "format=duration", "-of", "json", sys.argv[1],
-]))
-s = data["streams"][0]
+try:
+    data = json.loads(subprocess.check_output([
+        os.environ["FC_FFPROBE"], "-v", "error",
+        "-show_entries",
+        "stream=codec_type,codec_name,width,height,r_frame_rate,field_order,"
+        "pix_fmt,color_space,color_matrix,color_primaries,color_transfer,bit_rate",
+        "-show_entries", "format=duration", "-of", "json", sys.argv[1],
+    ], stderr=subprocess.DEVNULL))
+except subprocess.CalledProcessError:
+    sys.exit("footage-clean: ffprobe cannot read this file. A headerless raw "
+             "stream (.uyvy/.yuv/BT.656 dump) must be wrapped into a master "
+             "first — footage-probe prints the exact ffmpeg command.")
+s = next(x for x in data["streams"] if x.get("codec_type") == "video")
+a = next((x for x in data["streams"] if x.get("codec_type") == "audio"), {})
 fmt = data.get("format", {})
 def g(k, d="?"):
     return s.get(k) or d
@@ -184,18 +198,43 @@ print("\t".join(map(str, (
     g("field_order"), g("color_space"), g("color_matrix"),
     g("color_primaries"), g("color_transfer"), g("pix_fmt"),
     int(s.get("bit_rate") or fmt.get("bit_rate") or 0),
-    float(fmt.get("duration") or 0),
+    float(fmt.get("duration") or 0), s["codec_name"],
+    a.get("codec_name") or "",
 ))))
 PYEOF
 )
 
+# A lossless capture master (pctv-linux --master ffv1|utvideo|uyvy): every
+# sample is exact and the container tag is the capture's own declaration, so
+# its field-order metadata is trustworthy in a way an old MPEG-2 .mpg's is not.
+MASTER=0
+case "$VCODEC" in
+  ffv1|ffvhuff|huffyuv|utvideo|rawvideo|qtrle) MASTER=1 ;;
+esac
+
 DEINT_APPLIED=off
 DETECT_NOTE="not checked"
 if [ "$DEINT" = auto ]; then
-  if [ "$FIELD_ORDER" = tt ] || [ "$FIELD_ORDER" = bt ]; then
+  TRUST=0
+  case "$FIELD_ORDER" in
+    tt|bt) TRUST=1 ;;                      # explicit container flags
+    tb|bb) # tb is how ffprobe spells a Matroska master's coded-top-first tag;
+           # bb for MPEG-2 .mpg is the ffmpeg probe quirk and lies, so only
+           # lossless masters get believed here.
+      [ "$MASTER" = 1 ] && TRUST=1 ;;
+  esac
+  if [ "$TRUST" = 1 ]; then
     DEINT_APPLIED=qtgmc
-    [ "$FIELD" = auto ] && FIELD=$([ "$FIELD_ORDER" = tt ] && echo tff || echo bff)
-    DETECT_NOTE="container flags field_order=${FIELD_ORDER} -> interlaced"
+    # first letter of the flag = which field is coded first = what a
+    # deinterlacer must assume.
+    if [ "$FIELD" = auto ]; then
+      case "$FIELD_ORDER" in t*) FIELD=tff ;; *) FIELD=bff ;; esac
+    fi
+    if [ "$MASTER" = 1 ]; then
+      DETECT_NOTE="container flags field_order=${FIELD_ORDER} -> interlaced (lossless master: trusted, no idet coin-toss)"
+    else
+      DETECT_NOTE="container flags field_order=${FIELD_ORDER} -> interlaced"
+    fi
   else
     t0=$(awk "BEGIN{if ($DUR > 40) printf \"%.0f\", $DUR / 4; else print 0}")
     idet_line=$($FFMPEG -hide_banner -v info -ss "$t0" -t 10 -i "$IN" -an \
@@ -271,7 +310,7 @@ echo "  pipeline:"
 [ "$NEED_VS" = 1 ] && echo "    1. VapourSynth: crop=${CROP:-none} deint=${DEINT_APPLIED}/${FIELD} denoise=${DENOISE} -> lossless-ish h264 intermediate"
 [ "$UPSCALE" != 1 ] && echo "    2. video2x -p $PROCESSOR -s $UPSCALE --$PROCESSOR-model $MODEL (Vulkan)"
 [ "$INTERP" = 1 ] && echo "    3. video2x -p rife -m 2 (rife-v4.6, Vulkan)"
-echo "    4. encode: $CODEC crf/qp=$CRF preset=$PRESET ${VF:+vf=$VF} + audio copy + bt709 tags"
+echo "    4. encode: $CODEC crf/qp=$CRF preset=$PRESET ${VF:+vf=$VF} + audio=${A_MODE}($ACODEC) + bt709 tags"
 if [ "$DRY" = 1 ]; then exit 0; fi
 echo
 
@@ -370,9 +409,28 @@ case "$CODEC" in
 esac
 [ -n "$VF" ] && VFARGS=(-vf "$VF")
 
+# Audio: auto = copy, but a PCM master (pctv-linux lossless mkv) written into
+# an .mp4 as-is lands there as 'ipcm', which most players cannot demux. Encode
+# that case to aac; the master keeps its PCM. mkv/mov outputs may hold PCM.
+case "$A_MODE" in
+  copy) AENC=(-c:a copy) ;;
+  aac)  AENC=(-c:a aac -b:a 192k) ;;
+  alac) AENC=(-c:a alac) ;;
+  auto)
+    AENC=(-c:a copy)
+    case "$OUT" in *.mp4|*.m4v)
+      case "$ACODEC" in
+        pcm_*)
+          AENC=(-c:a aac -b:a 192k)
+          echo "footage-clean: source audio is ${ACODEC}; encoding aac 192k into mp4 instead of stream-copying (copied PCM becomes 'ipcm'). Use --acodec alac to keep it lossless." ;;
+      esac ;;
+    esac ;;
+  *) echo "footage-clean: --acodec must be auto|copy|aac|alac" >&2; exit 2 ;;
+esac
+
 stage "final encode ${CODEC}" \
   $FFMPEG -hide_banner -loglevel error -stats -y -i "$CUR" -i "$AUDIO_SRC" \
     -map 0:v:0 -map 1:a:0? ${COLOR[@]+"${COLOR[@]}"} "${ENC[@]}" ${VFARGS[@]+"${VFARGS[@]}"} \
-    -c:a copy -movflags +faststart "$OUT"
+    "${AENC[@]}" -movflags +faststart "$OUT"
 
 echo "==> wrote $OUT ($(du -h "$OUT" | cut -f1), source was $(du -h "$IN" | cut -f1))"

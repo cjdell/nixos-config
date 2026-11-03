@@ -18,8 +18,9 @@ nix run .#footage-kit -- --help               # footage-clean --help
 just probe ~/Downloads/n265.mp4               # what is this file?
 just footage --test 12 ~/Downloads/n265.mp4   # short test render FIRST
 just footage --denoise standard --deband ~/Downloads/n265.mp4
-# analog PCTV capture (crop bars + head-switch band, idet picks the field order):
-just footage --deint qtgmc --denoise light --crop 700x556+10+2 captures/<file>.mpg
+# analog PCTV capture (lossless mkv master: crop bars + head-switch band,
+# the master's own field-order tag drives the deinterlacer):
+just footage --denoise light --grade --crop 700x556+10+2 captures/<file>.mkv
 ```
 
 Built binaries: `result/bin/footage-clean`, `result/bin/footage-probe`.
@@ -65,11 +66,14 @@ flag with its default.
 ### Choosing the flags
 
 * **Interlaced (tape, PCTV, DVD rips)?** `--deint auto` is right 95 %
-  of the time: it believes `idet` over the container tag (the PCTV
-  driver writes a bogus `bb`; idet found TFF=250/BFF=0 and the kit
-  overrode it correctly). Override with `--deint qtgmc|znedi3|eedi3` +
-  `--field tff|bff` when you know better. Interlaced sources come out
-  as full-rate 50p, never 25p.
+  of the time, and it knows what it is looking at: a **lossless capture
+  master** (ffv1/utvideo/uyvy) is trusted outright — its container tag is the
+  capture's own declaration, and idet's TFF-vs-BFF vote on this content is
+  near a coin-toss (9:10 on test clips). Old `.mpg`s still get the idet
+  treatment (it believes `idet` over the container's bogus `bb` — idet found
+  TFF=250/BFF=0 on the 2026-11-01 capture and was right). Override with
+  `--deint qtgmc|znedi3|eedi3` + `--field tff|bff` when you know better.
+  Interlaced sources come out as full-rate 50p, never 25p.
 * **Overscan / head-switching band / pillar bars?** `--crop WxH+X+Y`,
   found with `ffmpeg -vf cropdetect`. Applied *before* deinterlacing.
 * **Noise level?** `--denoise light` for tape (MDegrain keeps detail),
@@ -99,12 +103,15 @@ flag with its default.
 ### Recipes that are known good
 
 ```sh
-# PCTV/VHS MPEG capture -> clean 50p HEVC (the 2026-11-01 render):
-just footage --deint qtgmc --denoise light --grade --crop 700x556+10+2 captures/x.mpg
+# PCTV lossless master (ffv1/utvideo .mkv) -> clean 50p HEVC:
+just footage --denoise light --grade --crop 700x556+10+2 captures/x.mkv
 
 # ...same, upscaled x2 for the collection, on the RX 580 (~4.5 h per 29 min):
-just footage --deint qtgmc --denoise light --grade --crop 700x556+10+2 \
-  --upscale 2 captures/x.mpg        # add --gpu 1 when the R9700 lease is free
+just footage --denoise light --grade --crop 700x556+10+2 \
+  --upscale 2 captures/x.mkv       # add --gpu 1 when the R9700 lease is free
+
+# legacy PCTV MPEG capture (.mpg) -> clean 50p HEVC (the 2026-11-01 render):
+just footage --deint qtgmc --denoise light --grade --crop 700x556+10+2 captures/x.mpg
 
 # digital travel clip: denoise banding, sharper, small file:
 just footage --denoise standard --deband --crf 22 n265.mp4
@@ -112,6 +119,65 @@ just footage --denoise standard --deband --crf 22 n265.mp4
 # SD DVD rip to a crisp 2x with the sharper net:
 just footage --deint auto --denoise light --upscale 2 --processor realcugan vob.mkv
 ```
+
+## Feeding PCTV lossless masters into the pipeline (since 2026-11-02)
+
+The PCTV 320cx capture station (`pctv-linux/`, the macbook-pro-2009) no
+longer archives as MPEG-2. `--master ffv1|utvideo|uyvy` writes a **lossless
+Matroska master**: `pctv-cap-<date>.mkv`, 720×576 `yuv422p` (`uyvy422` for
+`uyvy`), 25i top-field-first, audio `pcm_s16le` 48k. It arrives over
+`sftp`/the shared directory and goes straight into the pipeline — **no
+pre-conversion step exists or is needed**:
+
+```sh
+just probe    captures/pctv-cap-x.mkv     # recognises the master, reads field flags
+just footage  --test 12 --denoise light --grade --crop 700x556+10+2 captures/pctv-cap-x.mkv /tmp/t.mp4
+just footage  --denoise light --grade --crop 700x556+10+2 captures/pctv-cap-x.mkv
+```
+
+* **Field order comes from the container, not from idet.** The masters tag
+  themselves `tb` (Matroska's spelling of coded-top-first) and ffv1/uyvy also
+  stamp every decoded frame interlaced+TFF. `--deint auto` now *trusts*
+  master codecs instead of falling back to idet — deliberate: on this content
+  idet's parity vote measured 9:10 on synthetic clips that differed only in
+  field order (pctv docs §10.3), so "which field is first" must come from the
+  capture, which knows it by derivation (BT.656 field 1 = top, like DV-PAL).
+  **utvideo** masters carry no per-frame flags at all — players show them as
+  25p unless told; footage-clean still deinterlaces them correctly from the
+  container tag, and `pctv-field-order --relabel` (on the Mac) fixes playback.
+* **Audio:** masters hold lossless PCM. Stream-copying PCM into an `.mp4`
+  lands it as `ipcm`, which most players cannot read, so the *final* encode
+  transcodes it to aac 192k by default (`--acodec alac` keeps it lossless,
+  `--acodec copy` forces ipcm). The master is never touched — it is the
+  archive, keep it.
+* **Raw files:** a headerless `.uyvy` is not a pipeline input; `footage-probe`
+  prints the one-liner that wraps it losslessly into an ffv1 MKV. A raw
+  **BT.656** dump (`pctv_probe stream > x.bin`) is a *diagnostic* format with
+  EAV/SAV sync words — it needs the monitor's deframer, never the pipeline.
+
+### Why not convert to lossless H.264 first? (settled by measurement)
+
+Asked and answered 2026-11-02:
+
+* **The capture box cannot write it:** x264 `-qp 0` measured **0.71× realtime**
+  on the macbook-pro-2009 (`-crf 12`: 0.48×) — it would drop pictures during
+  capture; FFV1 runs 4.5× and never rate-controls. Measured table:
+  `pctv-linux/README.md` "Which master to write".
+* **On this box it decodes *slower* than the master** (720×576, 150 f,
+  5950X): `x264 -qp 0` 13.3× single-thread / **47.6× multithread**, vs
+  ffv1 15.9×/**130×**, utvideo 54.6×/131×. The serial CABAC + frame
+  dependencies of a lossless x264 stream are worse pipeline food than
+  intra-only FFV1.
+* It *would* be bit-exact (verified: `-qp 0 -pix_fmt yuv422p` round-trips
+  `framemd5`-identical, High 4:4:4 profile), so this is not a lossiness
+  argument — it is the generation argument: **the pipeline already produces
+  exactly that intermediate** (stage 1 emits x264 crf 12, visually lossless)
+  *after* crop/deint/denoise have made the frames worth encoding. Converting
+  first would double-encode every frame, cost hours, and still leave the
+  FFV1 master as the thing you trust.
+
+One master in, one cleaned file out; the FFV1 MKV stays the archival master
+forever (4 MB/s of real tape ≈ 7 GB per 29-min tape).
 
 ## How the standard workflow maps onto this kit
 
@@ -123,7 +189,7 @@ pinned nixpkgs, it lands like this:
 | ----------------- | ----------------------------- | ---------------------------------------------------------- |
 | deinterlace       | QTGMC (Avisynth/havsfunc)     | QTGMC-style chain built from the packaged parts: znedi3/eedi3 field-interpolation → MVTools FlowInter → MDegrain (`--deint qtgmc`). Real QTGMC.py needs fmtconv + havsfunc, which nixpkgs does not carry — the substitution is honest and close (`slower` preset minus the source-match passes). `bwdif` via plain FFmpeg is the fast fallback. |
 | denoise           | BM3D / KNLMeansCL / SMDegrain | MDegrain (MVTools) temporal denoise, 4 strengths (`--denoise light..stronger`) + chroma BoxBlur. BM3D/KNLMeans VS plugins aren't packaged; motion-compensated averaging is the right tool for exactly the noise these files have (per-frame sensor noise + compression banding). |
-| tape artifacts    | FixChromaBleeding etc.        | the analog path today is the PCTV MPEG-2 capture: crop (pillar bars + head-switching band, `--crop 700x556+10+2`), `--deint qtgmc`, `--denoise light` and `--grade` handle combing, tape noise and faded colour; verified on `captures/pctv-cap-20261101-210236.mpg`. Composite-level fixes (color bleed, WRNAGS) would need avs-xf/fmtconv vendored first; noted under "extension points". |
+| tape artifacts    | FixChromaBleeding etc.        | the analog path today is the PCTV **lossless master** (ffv1/utvideo/uyvy `.mkv`, see the section above; MPEG-2 `.mpg`s still work): crop (pillar bars + head-switching band, `--crop 700x556+10+2`), `--deint qtgmc`, `--denoise light` and `--grade` handle combing, tape noise and faded colour; verified on `captures/pctv-cap-20261101-210236.mpg` and on master-shaped `.mkv`s 2026-11-02. Composite-level fixes (color bleed, WRNAGS) would need avs-xf/fmtconv vendored first; noted under "extension points". |
 | upscale           | vs-mlrt + ONNX models         | **video2x → realesrgan-ncnn-vulkan** (Vulkan/Mesa, works on the R9700 and the RX 580). vs-mlrt's ONNX runtime has no AMD-relevant EP on Linux; ncnn-vulkan is the same net, and video2x also carries RIFE. |
 | interpolation     | RIFE                          | **video2x rife-ncnn-vulkan** (`--interp`). |
 | encode            | x265                          | libx265 default; `--codec av1|x264|gpu-h265|gpu-h264`. Note AMF encoders do **not** work on Linux (they need the Windows AMF runtime); VAAPI is the GPU path (tested on renderD128). |
