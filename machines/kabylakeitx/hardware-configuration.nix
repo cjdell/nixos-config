@@ -77,7 +77,39 @@
     nvidiaSettings = true;
 
     # Optionally, you may need to select the appropriate driver version for your specific GPU.
-    package = config.boot.kernelPackages.nvidiaPackages.latest;
+    #
+    # patchelf 0.19.2 (NixOS/patchelf#674, NixOS/nixpkgs#576412 — the nixpkgs pin
+    # here, 26.11.20261017.09063bd) botches the nvidia-x11 builder's single
+    # combined `patchelf --interpreter … --set-rpath …` call on bin/
+    # (builder.sh:203): the result has overlapping LOAD segments with .dynamic
+    # mapped read-only, so ld.so dies with SEGV_ACCERR in dl_main before any
+    # library is loaded — `nvidia-smi` segfaults on every call, on any machine,
+    # driver present or not (that is how to tell it from the "couldn't
+    # communicate with the NVIDIA driver" error, which is what a healthy
+    # nvidia-smi prints where there is no driver). The kernel modules and the
+    # libraries are unaffected, which is why CUDA/OpenCL and the FAH container
+    # keep working while the CLI tools are dead.
+    #
+    # Work around it by re-patching the bin/ programs from the pristine copies
+    # the builder keeps in $bin/origBin/, in the order patchelf tolerates:
+    # rpath first, interpreter second (verified against the 615.78.08 store
+    # output — patched binary prints the "no driver" line, unpatched one dumps
+    # core). Same workaround as hosts/asus-i7-6700-nixos, which needs it for
+    # its legacy_580 pin; drop both once nixpkgs ships the patchelf fix.
+    package = (config.boot.kernelPackages.nvidiaPackages.latest).overrideAttrs (
+      final: prev: {
+        postInstall = ''
+          for b in nvidia-smi nvidia-cuda-mps-control nvidia-cuda-mps-server nvidia-debugdump nvidia-powerd; do
+            if [ -e "$bin/origBin/$b" ]; then
+              cp "$bin/origBin/$b" "$bin/bin/$b"
+              chmod +w "$bin/bin/$b"
+              patchelf --set-rpath "$out/lib:$libPath" "$bin/bin/$b"
+              patchelf --interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" "$bin/bin/$b"
+            fi
+          done
+        '';
+      }
+    );
   };
 
   hardware.nvidia-container-toolkit.enable = true;
