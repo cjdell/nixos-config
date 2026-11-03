@@ -18,12 +18,18 @@
 # NVIDIA and CUDA binaries"). Networking is systemd-networkd, not
 # NetworkManager: ./networking.nix builds the br0 bridge (with the MAC the
 # router's lease for .55 is pinned to) and slaves en* into it.
-{ ... }:
+{ sops-nix, ... }:
 
 [
   ./folding.nix
   ./hardware-configuration.nix
   ./networking.nix
+
+  # sops: the shared fleet key at /var/lib/sops-nix/key.txt decrypts
+  # secrets/fah.yaml (the FAH account token, ./folding.nix). Installed on
+  # this host 2026-11-03.
+  sops-nix.nixosModules.sops
+  ../../common/sops.nix
 
   ../../common/desktop.nix
   ../../common/nfs.nix

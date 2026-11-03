@@ -46,13 +46,17 @@
       "100.64.0.0/10" # tailnets
     ];
 
-    # NOT linked to the FAH account: the token lives in secrets/fah.yaml,
-    # which only sops-enabled hosts can read, and this machine has never had
-    # the fleet age key at /var/lib/sops-nix/key.txt. Folding works without
-    # it — the points just do not show up under the account on
-    # app.foldingathome.org. To link it: import sops-nix + common/sops.nix
-    # (see hosts/asus-i7-6700-nixos/folding-heater.nix), install the shared
-    # key, and set accountTokenFile = config.sops.secrets.fah_account_token.path.
+    # Linked to the FAH account since 2026-11-03: the token comes from
+    # secrets/fah.yaml, decrypted by the shared fleet age key at
+    # /var/lib/sops-nix/key.txt (installed on this host that day — same
+    # arrangement as hosts/asus-i7-6700-nixos/folding-heater.nix). Without it
+    # folding still credits donor name + team in public stats, but the points
+    # never appear on app.foldingathome.org.
+    accountTokenFile = config.sops.secrets.fah_account_token.path;
+  };
+
+  sops.secrets.fah_account_token = {
+    sopsFile = ../../secrets/fah.yaml;
   };
 
   # The native module exists for AMD GPUs, so it wires up the ROCm OpenCL ICD.
