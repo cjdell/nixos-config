@@ -133,7 +133,7 @@
     #   # add the printed .pub here, then nixos-rebuild switch on zen3
     # Hosts whose key is missing simply fall back to local builds (max-jobs 1).
     # Still outstanding: rocketlakelatitude, 3d-printer-server (offline when
-    # this was written) and the legacy machines/* boxes.
+    # this was written) and the remaining legacy machines/* boxes.
     users.users.root.openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICx2X9y6tglYE8dnTPW1j28iSmv8wftzaVhpUulB5fez root@alderlake-thinkpad (nix builder)"
       # The 2-core/7 GiB MacBook Pro 2009 offloads everything here (its pctv320cx
@@ -147,6 +147,7 @@
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEqKYLh/zb6s1MWILerRlIQ2AiqJHJHNbTt7CTze/5zX root@gatling-services (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKRvbzK5uAlww+wmGRk8Y6Tfe0As7Z3FUDo9/16tPT11 root@haswellatx-nixos (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICz9IKHBT5WoeiTooTqU0YdTjTo9toRZp44aoIQfvUE4 root@asus-i7-6700-nixos (nix builder)"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEYNL22AWqq7A7e7Nue/vt2LvV1mr7edMHH5NK0uKKP4 root@kabylakeitx-nixos (nix builder)"
     ];
 
     boot.kernel.sysctl = {

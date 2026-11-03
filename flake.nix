@@ -537,24 +537,6 @@
             ];
           };
 
-          kabylakeitx-nixos = nixpkgs.lib.nixosSystem {
-            inherit system pkgs;
-            modules = [
-              ./common/desktop.nix
-              ((import ./common/folding-at-home.nix) "nvidia")
-              ./common/nfs.nix
-              ./common/nosleep.nix
-              ./common/sunshine.nix
-              ./common/sunshine-nvidia.nix
-              ./common/system.nix
-              ./machines/kabylakeitx
-              ./users/cjdell
-              home-manager.nixosModules.home-manager
-              homeManagerPrefs
-              commonModules
-            ];
-          };
-
           # Dell Vostro SFF (i3-8100)
           coffeelakedell-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
