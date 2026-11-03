@@ -66,14 +66,33 @@ OPTIONS
                               stream-copied PCM lands in mp4 as 'ipcm', which
                               most players cannot read. The master stays PCM.
   --crf N             quality for CPU codecs / -global_quality for VAAPI
-                      (default 20; lower = better)
+                      (default 20; lower = better). crf 0 = LOSSLESS for x264:
+                      the encode switches to -qp 0 with the source's own pixel
+                      format (see --pixfmt), because x264 only does lossless in
+                      the High 4:4:4 Predictive profile — 'high422' + -qp 0 is
+                      rejected outright ("high422 profile doesn't support
+                      lossless") and forcing yuv444p instead would upsample a
+                      4:2:2 capture. Verified byte-identical round trip:
+                      -profile:v high444 -qp 0 -pix_fmt yuv422p.
+  --pixfmt FMT        output pixel format for CPU codecs (default: keep the
+                      source's when lossless, else ffmpeg's choice)
   --preset P          x265/x264 speed preset (default medium)
   --vaapi-dev PATH    /dev/dri/renderD12x for --codec gpu-* (default renderD128)
   --deband            ffmpeg deband pass (banded skies/gradients)
   --grade             analog colour refresh (eq: saturation 1.18, contrast 1.04)
   --sharpen A         mild unsharp after clean, e.g. 0.4 (default off)
   --test N            process only N seconds (from --from) — test first!
-  --from SEC          start offset for --test (default 0)
+  --from SEC          start offset for --test / --to (default 0)
+  --to SEC            stop at SEC seconds — trims the tail off the source
+                      (blank tape, dropout, the operator's hand on the deck).
+                      Frames after SEC are never read, so unlike trimming the
+                      finished render this is one pass, and audio is cut with
+                      the video. Keyframe-snapped at --from only.
+  --single-pass       pipe VapourSynth straight into the final encoder instead
+                      of writing the crf 12 intermediate. One read of the
+                      source, and — the reason it exists — a lossless final
+                      encode stops being lossless-of-lossy. Needs no GPU stage
+                      (those need a file between the stages).
   --threads N         worker threads (default: all cores)
   --source-color      keep source color tags instead of tagging bt709
   --keep-temp         keep intermediate files (path printed at exit)
@@ -85,6 +104,10 @@ EXAMPLES
   footage-clean --denoise standard --deband cam.mp4 cam-cleaned.mp4
   footage-clean --deint qtgmc --denoise light vhs-capture.mp4
   footage-clean --denoise none --upscale 2 --interp lowres.mp4
+  # deinterlaced lossless H.264 master off a capture master, tail trimmed:
+  # one pass, no crf 12 intermediate, 4:2:2 kept, PCM audio copied
+  footage-clean --deint auto --denoise none --codec x264 --crf 0 \
+    --single-pass --to 1750 Disney.mkv Disney-deint.mkv
 EOF
 }
 
@@ -104,6 +127,7 @@ GPUDEV=""
 CODEC=x265
 A_MODE=auto
 CRF=20
+PIXFMT_OUT=""
 PRESET=medium
 VAAPI_DEV=/dev/dri/renderD128
 DEBAND=0
@@ -111,6 +135,8 @@ GRADE=0
 SHARPEN=""
 TEST=0
 FROM=0
+TO=0
+SINGLE_PASS=0
 THREADS=""
 SOURCE_COLOR=0
 KEEP_TEMP=0
@@ -130,6 +156,7 @@ while [ $# -gt 0 ]; do
     --codec) CODEC=$2; shift 2 ;;
     --acodec) A_MODE=$2; shift 2 ;;
     --crf) CRF=$2; shift 2 ;;
+    --pixfmt) PIXFMT_OUT=$2; shift 2 ;;
     --preset) PRESET=$2; shift 2 ;;
     --vaapi-dev) VAAPI_DEV=$2; shift 2 ;;
     --deband) DEBAND=1; shift ;;
@@ -137,6 +164,8 @@ while [ $# -gt 0 ]; do
     --sharpen) SHARPEN=$2; shift 2 ;;
     --test) TEST=$2; shift 2 ;;
     --from) FROM=$2; shift 2 ;;
+    --to) TO=$2; shift 2 ;;
+    --single-pass) SINGLE_PASS=1; shift ;;
     --threads) THREADS=$2; shift 2 ;;
     -o|--output) OUT=$2; shift 2 ;;
     --source-color) SOURCE_COLOR=1; shift ;;
@@ -169,6 +198,20 @@ fi
 case "$PROCESSOR" in realesrgan|realcugan) ;;
   *) echo "footage-clean: --processor must be realesrgan|realcugan" >&2; exit 2 ;;
 esac
+
+# --to is an end trim, --test a bounded sample from --from. Both cut the source
+# up before any stage sees it, so they are mutually exclusive, and --to has to
+# point past --from or the stream copy gets a negative -t and fails obscurely.
+if [ "$TO" != 0 ]; then
+  if ! awk -v f="$FROM" -v t="$TO" 'BEGIN{exit !(t>f)}'; then
+    echo "footage-clean: --to $TO must be greater than --from $FROM" >&2
+    exit 2
+  fi
+  if [ "$TEST" != 0 ]; then
+    echo "footage-clean: --to and --test cannot be combined (--test N already bounds the length)" >&2
+    exit 2
+  fi
+fi
 
 # ---------------------------------------------------------------- probe ----
 IFS=$'\t' read -r WIDTH HEIGHT FPS FRATE FIELD_ORDER CSPACE CMATRIX PRIM TRC \
@@ -306,11 +349,137 @@ VF=""
 [ "$GRADE" = 1 ] && VF="${VF:+$VF,}eq=saturation=1.18:contrast=1.04"
 [ -n "$SHARPEN" ] && VF="${VF:+$VF,}unsharp=5:5:${SHARPEN}"
 
+# --------------------------------------------------------------- encoder ---
+# Decided before any stage runs: --single-pass feeds these flags straight to
+# VapourSynth's ffmpeg, and the plan printed below has to say what will really
+# happen.
+
+# --crf 0 means LOSSLESS. x264 refuses lossless outside the High 4:4:4
+# Predictive profile (`-profile:v high422 -qp 0` dies with "high422 profile
+# doesn't support lossless"), which is why the profile follows the output
+# pixel format below instead of being hardcoded to 'high' — and a 4:2:2
+# capture is kept at 4:2:2 rather than upsampled to 4:4:4 to satisfy it: High
+# 4:4:4 Predictive carries chroma_format_idc=2, and `-profile:v high444 -qp 0
+# -pix_fmt yuv422p` round-trips byte-identical (verified with ffmpeg 9.0.2 by
+# decoding and cmp'ing against the raw source). HEVC has no 8-bit 4:2:2
+# lossless profile and VAAPI/SVT have no lossless at all, so those are
+# refused rather than quietly downgraded.
+LOSSLESS=0
+if [ "$CRF" = 0 ]; then
+  if [ "$CODEC" = x264 ]; then
+    LOSSLESS=1
+  else
+    echo "footage-clean: --crf 0 is only implemented for --codec x264; $CODEC cannot do lossless" >&2
+    exit 2
+  fi
+fi
+
+# Colour: the default restamp to bt709 is *not* a label. ffmpeg treats
+# -colorspace as a requested conversion and inserts a bt601->bt709 matrix —
+# measured against untouched frames: PSNR y 22.7 / u 28.5 / v 32.6 dB, i.e.
+# real pixel changes, not rounding. Declaring the colour on the *input*
+# instead does stamp the tags and stays bit-exact, but that mislabels an SD
+# tape master, whose true matrix is the bt601/SMTE-170M its own (unspecified)
+# tags already imply. So a lossless encode keeps the source's tags.
+COLOR=()
+if [ "$SOURCE_COLOR" = 0 ] && [ "$LOSSLESS" = 0 ]; then
+  COLOR=(-colorspace bt709 -color_primaries bt709 -color_trc bt709)
+elif [ "$LOSSLESS" = 1 ] && [ "$SOURCE_COLOR" = 0 ]; then
+  echo "footage-clean: lossless => keeping the source's colour tags (space=${CSPACE} matrix=${CMATRIX} primaries=${PRIM} transfer=${TRC}): a bt709 restamp is itself a colour conversion and would undo it"
+fi
+COLOR_DESC=bt709
+if [ "${#COLOR[@]}" = 0 ]; then COLOR_DESC=source; fi
+
+# Output pixel format: --pixfmt wins; else a lossless encode keeps the source's
+# format so it cannot silently subsample (that is the whole point); else
+# nothing is passed and libx264's yuv420p default applies, as before.
+PIXFMT_EFF=$PIXFMT_OUT
+if [ -z "$PIXFMT_EFF" ] && [ "$LOSSLESS" = 1 ]; then PIXFMT_EFF=$PIXFMT; fi
+[ "$PIXFMT_EFF" = "?" ] && PIXFMT_EFF=""
+case "$PIXFMT_EFF" in
+  "") PROF=high ;;
+  yuv444*|gbrp*) PROF=high444 ;;
+  *422*) if [ "$LOSSLESS" = 1 ]; then PROF=high444; else PROF=high422; fi ;;
+  *) if [ "$LOSSLESS" = 1 ]; then PROF=high444; else PROF=high; fi ;;
+esac
+
+VFARGS=()
+case "$CODEC" in
+  x265) ENC=(-c:v libx265 -preset "$PRESET" -crf "$CRF"
+             -x265-params "log-level=none" -tag:v hvc1) ;;
+  x264) if [ "$LOSSLESS" = 1 ]; then
+          ENC=(-c:v libx264 -preset "$PRESET" -qp 0)
+        else
+          ENC=(-c:v libx264 -preset "$PRESET" -crf "$CRF")
+        fi
+        ENC+=(-profile:v "$PROF") ;;
+  av1)  ENC=(-c:v libsvtav1 -crf "$CRF" -preset 8 -svtav1-params "lp=$THREADS") ;;
+  gpu-h265)
+    ENC=(-init_hw_device vaapi=va:"$VAAPI_DEV" -filter_hw_device va
+         -c:v hevc_vaapi -rc_mode CQP -global_quality "$CRF" -tag:v hvc1)
+    VF="${VF:+$VF,}format=nv12,hwupload" ;;
+  gpu-h264)
+    ENC=(-init_hw_device vaapi=va:"$VAAPI_DEV" -filter_hw_device va
+         -c:v h264_vaapi -rc_mode CQP -global_quality "$CRF")
+    VF="${VF:+$VF,}format=nv12,hwupload" ;;
+  *) echo "footage-clean: unknown codec $CODEC" >&2; exit 2 ;;
+esac
+[ -n "$PIXFMT_EFF" ] && ENC+=(-pix_fmt "$PIXFMT_EFF")
+[ -n "$VF" ] && VFARGS=(-vf "$VF")
+
+# Audio: auto = copy, but a PCM master (pctv-linux lossless mkv) written into
+# an .mp4 as-is lands there as 'ipcm', which most players cannot demux. Encode
+# that case to aac; the master keeps its PCM. mkv/mov outputs may hold PCM.
+case "$A_MODE" in
+  copy) AENC=(-c:a copy) ;;
+  aac)  AENC=(-c:a aac -b:a 192k) ;;
+  alac) AENC=(-c:a alac) ;;
+  auto)
+    AENC=(-c:a copy)
+    case "$OUT" in *.mp4|*.m4v)
+      case "$ACODEC" in
+        pcm_*)
+          AENC=(-c:a aac -b:a 192k)
+          echo "footage-clean: source audio is ${ACODEC}; encoding aac 192k into mp4 instead of stream-copying (copied PCM becomes 'ipcm'). Use --acodec alac to keep it lossless." ;;
+      esac ;;
+    esac ;;
+  *) echo "footage-clean: --acodec must be auto|copy|aac|alac" >&2; exit 2 ;;
+esac
+
+# --single-pass: fuse stage 1 and the final encode. Two reasons it exists: a
+# lossless final encode stops being lossless-of-lossy (the intermediate is
+# crf 12), and it halves the reads of a 100+ GB capture master. The GPU stages
+# need a real file between them, so they rule it out.
+ONE_PASS=$SINGLE_PASS
+if [ "$ONE_PASS" = 1 ]; then
+  if [ "$UPSCALE" != 1 ] || [ "$INTERP" = 1 ]; then
+    echo "footage-clean: --single-pass cannot be combined with the GPU stages (video2x reads a file) — drop --single-pass or --upscale/--interp" >&2
+    exit 2
+  fi
+  if [ "$NEED_VS" = 0 ]; then ONE_PASS=0; fi  # no VS stage to fuse: the plain encode is already one pass
+fi
+
 echo "  pipeline:"
-[ "$NEED_VS" = 1 ] && echo "    1. VapourSynth: crop=${CROP:-none} deint=${DEINT_APPLIED}/${FIELD} denoise=${DENOISE} -> lossless-ish h264 intermediate"
+if [ "$ONE_PASS" = 1 ]; then
+  echo "    1. VapourSynth: crop=${CROP:-none} deint=${DEINT_APPLIED}/${FIELD} denoise=${DENOISE} -> straight into the encode (--single-pass)"
+else
+  [ "$NEED_VS" = 1 ] && echo "    1. VapourSynth: crop=${CROP:-none} deint=${DEINT_APPLIED}/${FIELD} denoise=${DENOISE} -> lossless-ish h264 intermediate"
+fi
 [ "$UPSCALE" != 1 ] && echo "    2. video2x -p $PROCESSOR -s $UPSCALE --$PROCESSOR-model $MODEL (Vulkan)"
 [ "$INTERP" = 1 ] && echo "    3. video2x -p rife -m 2 (rife-v4.6, Vulkan)"
-echo "    4. encode: $CODEC crf/qp=$CRF preset=$PRESET ${VF:+vf=$VF} + audio=${A_MODE}($ACODEC) + bt709 tags"
+if [ "$LOSSLESS" = 1 ]; then
+  ENC_DESC="$CODEC LOSSLESS (qp 0, profile $PROF, ${PIXFMT_EFF:-source} kept, colour=$COLOR_DESC)"
+else
+  ENC_DESC="$CODEC crf/qp=$CRF preset=$PRESET colour=$COLOR_DESC"
+fi
+echo "    4. encode: $ENC_DESC ${VF:+vf=$VF} + audio=${A_MODE}($ACODEC)$(
+  [ "$ONE_PASS" = 1 ] && echo ' [piped from 1]')"
+if [ "$TO" != 0 ]; then
+  echo "  trim: keeping ${FROM}s..${TO}s; frames after ${TO}s are never read"
+  if awk -v t="$TO" -v d="$DUR" 'BEGIN{exit !(t>d)}'; then
+    echo "  note: --to $TO is past the end of this ${DUR}s source"
+  fi
+fi
 if [ "$DRY" = 1 ]; then exit 0; fi
 echo
 
@@ -327,9 +496,19 @@ trap cleanup EXIT
 
 CUR="$IN"
 AUDIO_SRC="$IN"
+# --test (a short sample to check flags on) and --to (trimming the tail off a
+# capture) are the same mechanism: cut the source up front with a stream copy,
+# so every stage — the audio included — works on the kept range and the master
+# is read once rather than twice.
+KEEP=0
 if [ "$TEST" != 0 ]; then
-  echo "==> sampling ${TEST}s from ${FROM}s"
-  $FFMPEG -hide_banner -loglevel error -y -ss "$FROM" -i "$IN" -t "$TEST" \
+  KEEP=$TEST
+elif [ "$TO" != 0 ]; then
+  KEEP=$(awk -v t="$TO" -v f="$FROM" 'BEGIN{printf "%.6f", t-f}')
+fi
+if [ "$KEEP" != 0 ]; then
+  echo "==> cutting $(if [ "$FROM" != 0 ]; then printf 'from %ss, ' "$FROM"; fi)${KEEP}s (start snaps to the previous keyframe)"
+  $FFMPEG -hide_banner -loglevel error -y -ss "$FROM" -i "$IN" -t "$KEEP" \
     -c copy "$TMP/sample.mkv"
   CUR="$TMP/sample.mkv"
   AUDIO_SRC="$TMP/sample.mkv"
@@ -356,11 +535,30 @@ if [ "$NEED_VS" = 1 ]; then
   export FC_SRC=$CUR FC_DEINT=$DEINT_APPLIED FC_FIELD=$FIELD \
          FC_DENOISE=$DENOISE FC_CROP=$CROP FC_CHROMA_BLUR=1
   VSCMD="$VSPIPE -r $THREADS -c y4m -p '$CLEANVSH' - 2>'$TMP/vs.log'"
-  VSCMD="$VSCMD | $FFMPEG -hide_banner -loglevel error -y -i -"
-  VSCMD="$VSCMD -c:v libx264 -preset fast -crf 12 -an '$TMP/stage1.mkv'"
-  if stage "VapourSynth clean (deint=${DEINT_APPLIED} denoise=${DENOISE} crop=${CROP:-none})" \
-       bash -o pipefail -c "$VSCMD"; then
-    CUR="$TMP/stage1.mkv"
+  if [ "$ONE_PASS" = 1 ]; then
+    # No crf 12 intermediate: pipe the cleaned frames straight into the encode
+    # that is actually kept. That is what makes a lossless final encode
+    # lossless, and on a 100+ GB capture master it halves the reading.
+    # VSCMD is executed by `bash -c`, so every flag has to survive two rounds
+    # of parsing — hence %q. Note `printf '%q ' "" ` is *not* a no-op: with an
+    # empty array it prints '' and ffmpeg then receives an empty output
+    # filename, so quoting goes through q(), which prints nothing for no args.
+    q() { if [ "$#" -gt 0 ]; then printf '%q ' "$@"; fi; }
+    QENC=$(q "${ENC[@]}")
+    QCOL=$(q ${COLOR[@]+"${COLOR[@]}"})
+    QVF=$(q ${VFARGS[@]+"${VFARGS[@]}"})
+    QAENC=$(q "${AENC[@]}")
+    VSCMD="$VSCMD | $FFMPEG -hide_banner -loglevel error -stats -y -i - -i '$AUDIO_SRC'"
+    VSCMD="$VSCMD -map 0:v:0 -map 1:a:0? ${QCOL}${QENC} ${QVF}${QAENC} -movflags +faststart '$OUT'"
+    STAGE_LABEL="VapourSynth clean + ${CODEC} encode (single pass$(
+      [ "$LOSSLESS" = 1 ] && printf ', lossless qp 0'))"
+  else
+    VSCMD="$VSCMD | $FFMPEG -hide_banner -loglevel error -y -i -"
+    VSCMD="$VSCMD -c:v libx264 -preset fast -crf 12 -an '$TMP/stage1.mkv'"
+    STAGE_LABEL="VapourSynth clean (deint=${DEINT_APPLIED} denoise=${DENOISE} crop=${CROP:-none})"
+  fi
+  if stage "$STAGE_LABEL" bash -o pipefail -c "$VSCMD"; then
+    if [ "$ONE_PASS" = 1 ]; then CUR="$OUT"; else CUR="$TMP/stage1.mkv"; fi
   else
     echo "--- vspipe stderr (tail):" >&2
     tail -40 "$TMP/vs.log" >&2 || true
@@ -389,48 +587,13 @@ if [ "$INTERP" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- stage 4 --
-COLOR=()
-[ "$SOURCE_COLOR" = 0 ] && COLOR=(-colorspace bt709 -color_primaries bt709 -color_trc bt709)
-VFARGS=()
-case "$CODEC" in
-  x265) ENC=(-c:v libx265 -preset "$PRESET" -crf "$CRF"
-             -x265-params "log-level=none" -tag:v hvc1) ;;
-  x264) ENC=(-c:v libx264 -preset "$PRESET" -crf "$CRF" -profile:v high) ;;
-  av1)  ENC=(-c:v libsvtav1 -crf "$CRF" -preset 8 -svtav1-params "lp=$THREADS") ;;
-  gpu-h265)
-    ENC=(-init_hw_device vaapi=va:"$VAAPI_DEV" -filter_hw_device va
-         -c:v hevc_vaapi -rc_mode CQP -global_quality "$CRF" -tag:v hvc1)
-    VF="${VF:+$VF,}format=nv12,hwupload" ;;
-  gpu-h264)
-    ENC=(-init_hw_device vaapi=va:"$VAAPI_DEV" -filter_hw_device va
-         -c:v h264_vaapi -rc_mode CQP -global_quality "$CRF")
-    VF="${VF:+$VF,}format=nv12,hwupload" ;;
-  *) echo "footage-clean: unknown codec $CODEC" >&2; exit 2 ;;
-esac
-[ -n "$VF" ] && VFARGS=(-vf "$VF")
-
-# Audio: auto = copy, but a PCM master (pctv-linux lossless mkv) written into
-# an .mp4 as-is lands there as 'ipcm', which most players cannot demux. Encode
-# that case to aac; the master keeps its PCM. mkv/mov outputs may hold PCM.
-case "$A_MODE" in
-  copy) AENC=(-c:a copy) ;;
-  aac)  AENC=(-c:a aac -b:a 192k) ;;
-  alac) AENC=(-c:a alac) ;;
-  auto)
-    AENC=(-c:a copy)
-    case "$OUT" in *.mp4|*.m4v)
-      case "$ACODEC" in
-        pcm_*)
-          AENC=(-c:a aac -b:a 192k)
-          echo "footage-clean: source audio is ${ACODEC}; encoding aac 192k into mp4 instead of stream-copying (copied PCM becomes 'ipcm'). Use --acodec alac to keep it lossless." ;;
-      esac ;;
-    esac ;;
-  *) echo "footage-clean: --acodec must be auto|copy|aac|alac" >&2; exit 2 ;;
-esac
-
-stage "final encode ${CODEC}" \
-  $FFMPEG -hide_banner -loglevel error -stats -y -i "$CUR" -i "$AUDIO_SRC" \
-    -map 0:v:0 -map 1:a:0? ${COLOR[@]+"${COLOR[@]}"} "${ENC[@]}" ${VFARGS[@]+"${VFARGS[@]}"} \
-    "${AENC[@]}" -movflags +faststart "$OUT"
+if [ "$ONE_PASS" = 1 ]; then
+  echo "==> final encode was folded into stage 1 (--single-pass)"
+else
+  stage "final encode ${CODEC}" \
+    $FFMPEG -hide_banner -loglevel error -stats -y -i "$CUR" -i "$AUDIO_SRC" \
+      -map 0:v:0 -map 1:a:0? ${COLOR[@]+"${COLOR[@]}"} "${ENC[@]}" ${VFARGS[@]+"${VFARGS[@]}"} \
+      "${AENC[@]}" -movflags +faststart "$OUT"
+fi
 
 echo "==> wrote $OUT ($(du -h "$OUT" | cut -f1), source was $(du -h "$IN" | cut -f1))"

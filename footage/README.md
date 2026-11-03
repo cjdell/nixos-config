@@ -41,7 +41,11 @@ just footage [flags] FILE [OUT]
 `just` rebuilds the kit on every invocation (seconds when unchanged);
 `result/bin/...` uses the last `nix build .#footage-kit` output. Output
 defaults to `<input>-cleaned.mp4`. `footage-clean --help` lists every
-flag with its default.
+flag with its default. Three that earn their keep on tape work:
+`--to SEC` (end trim — cut before any stage, so a blank tail is never read
+and the audio is cut with the video), `--single-pass` (VapourSynth straight
+into the final encoder: no crf 12 intermediate, one read of a 100+ GB master)
+and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
 
 ### The workflow, every time
 
@@ -98,13 +102,33 @@ flag with its default.
   5950X ≈ 2.2× realtime; `gpu-h265` offloads VCN to the RX 580.
 * **Colour tags:** output is stamped bt709; `--source-color` keeps the
   source's (broken) tags instead. Mislabelled `bt2020c` sources get an
-  automatic normalising pass — that's a fix, not a bug.
+  automatic normalising pass — that's a fix, not a bug. Note that the restamp
+  is **not a label**: `-colorspace bt709` makes ffmpeg insert a real
+  bt601→bt709 matrix (measured 22.7 dB luma against untouched frames), so a
+  `--crf 0` lossless encode keeps the source's own tags and says so. Stamping
+  without converting is only ever a declaration, and declaring an SD tape
+  master bt709 would be a lie.
+* **Lossless?** `--codec x264 --crf 0` is genuinely bit-exact: x264 refuses
+  lossless outside High 4:4:4 Predictive (`high422` + `-qp 0` errors), so the
+  profile is picked from the output format and the source's 4:2:2 is kept
+  (`high444` carries chroma_format_idc=2 — verified byte-identical, and
+  decoding it is software-only: no hardware block does 4:2:2/4:4:4 H.264).
+  Pair it with `--single-pass`, and with `--to SEC` to drop a blank tail in
+  the same read. HEVC has no 8-bit 4:2:2 lossless profile, so `--crf 0` with
+  anything but x264 is refused.
 
 ### Recipes that are known good
 
 ```sh
 # PCTV lossless master (ffv1/utvideo .mkv) -> clean 50p HEVC:
 just footage --denoise light --grade --crop 700x556+10+2 captures/x.mkv
+
+# ...deinterlaced *only*, kept as a bit-exact 4:2:2 H.264 master for later
+# processing: --single-pass so nothing is squeezed twice, --to to drop a blank
+# tail while the master is still being read once, PCM audio stream-copied
+# (that is why the output is .mkv — PCM into .mp4 becomes 'ipcm'):
+just footage --denoise none --codec x264 --crf 0 --single-pass \
+  --to 5340 captures/Disney.mkv Disney-deinterlaced.mkv
 
 # ...same, upscaled x2 for the collection, on the RX 580 (~4.5 h per 29 min):
 just footage --denoise light --grade --crop 700x556+10+2 \
