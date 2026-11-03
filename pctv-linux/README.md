@@ -447,8 +447,9 @@ Knobs for the capture path (all environment, all optional):
 | variable | default | what it does |
 | --- | --- | --- |
 | `PCTV_VQ_SLOTS` | 24 | video queue depth, 4..64 frames (each costs 829 KB); raise it if `skip` climbs |
-| `PCTV_HOLD_SECS` | 120 | end-of-tape: how long a **bit-identical** picture may run inside a file before the file is closed; the card stays claimed and a new file opens when the picture moves again. `0` never closes (a frozen frame is then recorded for as long as it lasts) |
+| `PCTV_HOLD_SECS` | 600 | end-of-tape: how long a **bit-identical** picture may run inside a file before the file is closed; the card stays claimed and a new file opens when the picture moves again. `0` never closes (a frozen frame is then recorded for as long as it lasts). 600 rather than 120 because a **damaged** stretch of tape reads as a frozen picture (the frame gate holds the last clean frame) and is not the end of anything — at 120 the file was cut in the middle of one |
 | `PCTV_HOLD_MAX` | 0 (watch for ever) | also end the *run* this many seconds after the picture stopped, releasing the card - the one to set for an unattended overnight tape (`900` = quit 15 min after it ends); clamped up to `PCTV_HOLD_SECS` |
+| `PCTV_BLUE_SECS` | 60 | no content: the deck's **blue screen** is *not* a frozen frame (the no-signal subcarrier beats, so every frame differs) but it is unmistakably blue and dark — mean Y≈48/U≈206/V≈116 against Y 94-113/U≈123 for programme. After this many seconds of it the run ends and the card is released, because that blue is the deck saying there is nothing to play. Only counts once a real picture has been seen in the file, so a monitor started in front of a stopped deck does not quit; `0` never ends |
 | `PCTV_HOLD_RESUME` | 25 | changed frames (1 s) needed before the picture counts as back, so one tracking glitch cannot open a file |
 | `PCTV_HOLD_STRESS` | - | self-test: report a frozen picture for the first N seconds whatever the deck is doing, so both transitions (close, reopen) can be exercised without waiting for a tape to end |
 | `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
@@ -528,18 +529,46 @@ accumulators because the fold is a dependency chain and not a bandwidth problem)
 acts on the run length.
 
 What it does when the picture stops moving is **not** stop: after `PCTV_HOLD_SECS`
-(default 120) it closes the file - cleanly, the same path `c` and Ctrl-C take, so the
+(default 600) it closes the file - cleanly, the same path `c` and Ctrl-C take, so the
 MPEG is finalised - keeps the card claimed, and opens a fresh file once `PCTV_HOLD_RESUME`
 frames (1 s) have changed.  Nothing has to be right about *why* the picture stopped.
 A blank stretch between two recordings on one tape therefore costs a file boundary
-and two minutes of tail (45 kB/s while frozen, against 699 kB/s of programme), where
+and ten minutes of tail (45 kB/s while frozen, against 699 kB/s of programme), where
 a guess that said "end of tape" used to cost the rest of the tape.  The overlay says
 `STILL mm:ss - file closed, waiting`, the window title gains `[STILL]`, and `c` at any
 time takes back control (it re-arms the window and cancels the automatic reopen).
 
+Ten minutes and not two because a **damaged** patch of tape looks exactly the same
+from here: the frame gate replaces every unclean frame with the last clean one, so the
+frames handed to the encoder are bit-identical and a 2 min window cut the file in the
+middle of the damage (2026-11-03) and then stopped recording the rest of it, waiting
+for a picture that was never coming back on its own.
+
 For an unattended tape, `PCTV_HOLD_MAX 900` also ends the run 15 min after the picture
 stopped, which releases the card.  Left at 0 the monitor simply keeps watching, which
 costs nothing on disk because the file is already closed.
+
+### No content at all: the blue screen *does* end the run
+
+A deck with nothing to play shows a blue screen, and unlike the frozen frame above it
+is not bit-identical - the no-signal colour subcarrier beats against the digitiser's
+sampling clock, so 749 consecutive frames of it in the 2026-11-02 capture had zero
+identical pairs (docs/pctv-analog-capture.md §12).  It is, however, unmistakably
+*blue*, and that is measured rather than thresholded: mean plane values in 8-bit
+codes are **Y 47.9 / U 206.2 / V 116.4** for the deck's blue (real s-video, checked
+live 2026-11-03) against **Y 94-113 / U 123-129 / V 129-150** for programme, with
+neutral chroma at 128.  U alone separates them by ~77 codes.
+
+So after `PCTV_BLUE_SECS` (default 60) of a frame whose mean is blue-and-dark (U >= 170,
+Y <= 110) **and whose means are not moving** (within 3 codes of the first frame of the
+run, so a real blue thing in a shot cannot accumulate the window), the monitor closes
+the file **and ends the run**, releasing the card - the tape is over.  The overlay says
+`NO SIGNAL mm:ss - blue, ends the run at mm:ss` and the title gains `[NO SIGNAL]`.
+Only while capturing, and only after a real picture has been seen since the file
+opened, so a monitor started in front of a stopped deck waits for the tape instead of
+quitting.  `PCTV_BLUE_SECS=0` turns it off; `PCTV_VERBOSE` prints the three means
+every second (`monitor: blue: Y … U … V …`) so the predicate can be checked against a
+deck.
 
 What this cannot see is a deck that answers end of tape with *static*: snow changes
 every frame, so it is programme-shaped to every detector here and in

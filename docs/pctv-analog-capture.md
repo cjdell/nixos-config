@@ -500,24 +500,34 @@ happening" from "something is happening very quietly".
 ### What the monitor does, which is not "stop"
 
 `pctv-monitor` folds every frame it would encode into 64 bits and watches the run
-length. After `PCTV_HOLD_SECS` (default 120) of an unchanged picture it **closes the
-file and keeps the card**, then opens a new file once `PCTV_HOLD_RESUME` frames (1 s)
-have changed. The overlay reads `STILL mm:ss - file closed, waiting`, the window title
-gains `[STILL]`, and `c` re-arms the window and cancels the automatic reopen, because a
-person has then decided what to record.
+length. After `PCTV_HOLD_SECS` (**600** since 2026-11-03; 120 before) of an unchanged
+picture it **closes the file and keeps the card**, then opens a new file once
+`PCTV_HOLD_RESUME` frames (1 s) have changed. The overlay reads
+`STILL mm:ss - file closed, waiting`, the window title gains `[STILL]`, and `c` re-arms
+the window and cancels the automatic reopen, because a person has then decided what to
+record.
 
-Closing-instead-of-stopping is the whole point. Nothing can tell a blank stretch
-between two recordings apart from the end of a tape, so any rule confident enough to
-end the run is confident enough to discard the rest of the tape - and the costs are
-nowhere near symmetric: the programme runs at 699 kB/s and a frozen frame at 45 kB/s
-(24 kB/s of that is the CBR mp2 track), so recording through a blank is 1 % of the
-disk while stopping through one loses the programme. `PCTV_HOLD_MAX 900` does end the
-run, 15 min after the picture stopped, for the case where nobody is there and the card
-should be released; at 0 it keeps watching and costs nothing, because the file is
-already shut. Verified the same day with `PCTV_HOLD_STRESS`, which reports a frozen
-picture for the first N seconds whatever the deck is doing: 151 frames in 6.05 s,
-file closed, then 425 frames in 17.02 s in the next file, `field_order=tt` and
-`dup 0 skip 0` on both sides of the boundary.
+120 s was too short, and the reason is not the end of a tape but a **damaged** one.
+The frame gate replaces every unclean frame with the last clean one, so a stretch of
+dropped-out tape is bit-identical frame after frame *exactly like* a deck that has
+stopped - at 2 min the file was cut in the middle of the damage (2026-11-03) and then
+nothing further was recorded, because the monitor was waiting for a picture that was
+not coming back on its own. Ten minutes costs 27 MB of frozen tail when it is wrong
+(45 kB/s) and leaves the rest of the tape in one file when it is right. The real end
+of a tape has an unambiguous answer of its own - the blue screen, below - in 60 s.
+
+Closing-instead-of-stopping is still the point for a *frozen* picture. Nothing can
+tell a blank stretch between two recordings apart from the end of a tape, so any rule
+confident enough to end the run is confident enough to discard the rest of the tape -
+and the costs are nowhere near symmetric: the programme runs at 699 kB/s and a frozen
+frame at 45 kB/s (24 kB/s of that is the CBR mp2 track), so recording through a blank
+is 1 % of the disk while stopping through one loses the programme. `PCTV_HOLD_MAX 900`
+does end the run, 15 min after the picture stopped, for the case where nobody is there
+and the card should be released; at 0 it keeps watching and costs nothing, because the
+file is already shut. Verified with `PCTV_HOLD_STRESS`, which reports a frozen picture
+for the first N seconds whatever the deck is doing: 151 frames in 6.05 s, file closed,
+then 425 frames in 17.02 s in the next file, `field_order=tt` and `dup 0 skip 0` on
+both sides of the boundary.
 
 What it cannot see is a deck that answers end of tape with *static*: snow changes
 every frame, so it is programme-shaped to this and to every growth-rate detector
@@ -559,52 +569,71 @@ no-signal field is a *flat* one:
 | --- | --- |
 | programme ends | t=4156 s (file growth 750 kB/s with full luma until then) |
 | 4156 → 8210 s | the deck's blue: **749 consecutive frames, zero identical pairs**, mean absolute inter-frame difference 0.0199 |
-| 8210 → 8254 s | video black (Y=16, U=V=128) — but only 44 s, under `PCTV_HOLD_SECS` 120 |
+| 8210 → 8254 s | video black (Y=16, U=V=128) — but only 44 s, under `PCTV_HOLD_SECS`, then 120 |
 | so | `hold_same` never reached 3000, `PCTV_HOLD_MAX` was 0, and the rate watchdog was not running |
 
 **Why the blue is not flat** (`/tmp/planecheck` over 1000-frame windows of the real
-file, ranges per plane in 8-bit codes, mean ±spread):
+file; the chroma columns in that tool are at **half scale** - it reads video black as
+U=V=64 where the 8-bit code is 128 - so the U/V figures below are doubled, and the
+same numbers come out of `signalstats` on the file directly):
 
-| window | Y range | U range | V range | mean Y/U/V |
+| window | Y range | U range (8-bit) | V range (8-bit) | mean Y/U/V |
 | --- | --- | --- | --- | --- |
-| t=100, 2000, 4100 (programme) | 231-240 | 39-60 | 26-106 | 94-113 / 60-64 / 65-68 |
-| t=4150 (last seconds of programme, dark) | 94 (min 28) | 82 | 26 | 60 / 92 / 60 |
-| t=5000, 6500, 8000 (**the blue**) | 38.0 | 86.2 | 17.2 | 47.4 / 102.9 / 58.2 |
-| t=8220 (black hold) | 0.0 | 0.0 | 0.0 | 16 / 64 / 64 |
+| t=100, 2000, 4100 (programme) | 231-240 | 78-120 | 52-212 | 94-113 / 123.2 / 129-136 |
+| t=4150 (last seconds of programme, dark) | 94 (min 28) | 164 | 52 | 60 / 184 / 120 |
+| t=5000, 6500, 8000 (**the blue**) | 38.0 | 172.4 | 34.4 | 47.4 / 205.9 / 116.3 |
+| t=8220 (black hold) | 0.0 | 0.0 | 0.0 | 16 / 128 / 128 |
 
 The blue is a **static pattern, not a flat field**: three windows 3000 s apart score
-identically to a tenth of a percent, and its chroma spans 86 codes. It is the no-signal
-colour subcarrier beating against the digitiser's sampling clock, so it has the *spatial*
-content of real footage and the *temporal* behaviour of a frozen frame.
+identically to a tenth of a percent, and its chroma spans 172 codes. It is the
+no-signal colour subcarrier beating against the digitiser's sampling clock, so it has
+the *spatial* content of real footage and the *temporal* behaviour of a frozen frame.
 
-Which leaves every candidate pixel predicate short:
+Which leaves every candidate pixel predicate short except one, and that one is
+overwhelming once the chroma scale is right:
 
-* **exact repetition** (what ships) cannot see it at all — no two frames are identical;
+* **exact repetition** cannot see it at all — no two frames are identical;
 * **temporal calm** separates them in the right direction (blue 0.0199 < the 0.035-0.049
   of the quiet held shot in §12) but with ~20 % of margin either side, and a false
   trigger mid-tape is the worst kind of wrong;
 * **spatial contrast** fails outright: the blue's Y range (38) *overlaps* the dark
-  final moments of the programme (28-94), and its U range (86) overlaps it too (82);
-* **mean colour** gives 12 codes of margin (U 102.9 against 91.6 for the darkest real
-  frame in the file) — one statistic, on one deck, on one tape.
+  final moments of the programme (28-94), and its U range (172) overlaps it too (164);
+* **mean colour** is the one that works: at half scale its margin looked like 12 codes
+  (U 102.9 against 91.6), but the codes are 8-bit and the real gap is **205.9 against
+  123-129 for programme — 77 codes**, on every window of the file and on a live
+  s-video feed (2026-11-03: Y 47.9, U 206.2, V 116.4).
 
-So the pixel plane does not answer this, and the fix is not a cleverer detector:
+**The fix (2026-11-03), and it is a monitor option:** after `PCTV_BLUE_SECS` (default
+60) of a frame whose mean is blue and dark (U >= 170, Y <= 110) *and whose three plane
+means have not moved by more than 3 codes since the run began*, the monitor closes the
+file, ends the run and releases the card — the tape is over. The stability clause is
+what keeps a genuinely blue shot out: a sky is Y 150-200 (luma alone excludes it), and
+anything that *moves* restarts the window instead of accumulating it. Two live checks
+(2026-11-03): a 15 s programme clip followed by the deck's blue ended the run exactly
+`PCTV_BLUE_SECS` after the transition, and a 5 s blue insert between two programme
+passages did not (the window restarted when the picture came back). It counts only
+after a real picture has been seen since the file opened, so a monitor started in
+front of a stopped deck does not quit; `PCTV_VERBOSE` prints the means every second so
+the predicate can be re-checked against any deck.
 
-1. **The rate collapse is 10x separated and it already has an implementation.**
+What that leaves is still worth knowing:
+
+1. **The rate collapse is 10x separated and `scripts/pctv-autoend.sh` implements it.**
    65 kB/s of file growth for the blue against 700-780 kB/s for the programme. The
-   reason the tape ran on for 69 min is that `scripts/pctv-autoend.sh` was not
-   running, not that its predicate was wrong. It needs to be a supervised unit
-   (or a monitor option), not something remembered at the desk.
-2. **`PCTV_HOLD_SECS 120` was too slow for a 44 s black tail**, and this deck *does*
-   hand back a genuinely frozen black frame at the very end - the exact-repetition
-   rule catches it instantly at 30-45 s. Lower it on stations whose tapes end that way.
-3. **Set `PCTV_HOLD_MAX`.** It exists for the unattended case and was 0.
-4. **A raw master has no rate signal at all** - fixed-frame-size output costs the same
-   20.9 MB/s for blue as for programme, so 69 min of nothing costs 87 GB of NAS and
-   every byte-rate guard is blind to it. `--capture-seconds` (deck-dependent: the tape
-   length plus a margin) is the honest guard until the monitor grows a size cap; the
-   blue does not even have a bit-rate to watch. `PCTV_MAX_GB` is the obvious missing
-   knob and is not implemented.
+   reason the tape ran on for 69 min is that the watchdog was not running, not that
+   its predicate was wrong. It is still the fallback for a monitor that does not see
+   the pixels.
+2. **`PCTV_HOLD_SECS` was 120, and that was wrong in the other direction** — a damaged
+   patch of tape is bit-identical too and got its file cut in the middle (2026-11-03).
+   It is 600 now. A deck that ends with a 44 s frozen black tail is caught by the
+   blue rule at 44 s or by `PCTV_HOLD_MAX`.
+3. **Set `PCTV_HOLD_MAX`** for an unattended run if the deck may end in *static*, which
+   no pixel rule here sees.
+4. **A raw master still has no rate signal at all** - fixed-frame-size output costs the
+   same 20.9 MB/s for blue as for programme, so 69 min of nothing costs 87 GB of NAS
+   and every byte-rate guard is blind to it. The blue rule is the guard for that case
+   (it needs no bit rate, only the picture); `PCTV_MAX_GB` against a *misbehaving*
+   deck remains unimplemented.
 
 ### Finding where the content actually ends
 

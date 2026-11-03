@@ -2,10 +2,13 @@
 # Stop a running pctv-monitor capture when the tape ends.
 #
 # SINCE 2026-11-02 THE MONITOR DOES THIS ITSELF, better: it sees the frames, and a
-# frozen one is bit-identical, so it closes the file after PCTV_HOLD_SECS and opens
-# another when the picture moves (docs/pctv-analog-capture.md §12, and the README
-# knobs). This script is the fallback for an older monitor and for anyone who wants
-# the *process* gone rather than idle; PCTV_HOLD_MAX is the knob for the usual case.
+# frozen one is bit-identical, so it closes the file after PCTV_HOLD_SECS (600 s now,
+# raised from 120 because a damaged patch of tape is bit-identical too) and opens
+# another when the picture moves.  Since 2026-11-03 it also ends the run on the deck's
+# no-signal BLUE screen (PCTV_BLUE_SECS, 60 s), which is not bit-identical and which
+# this script cannot see at all.  This script is the fallback for an older monitor and
+# for anyone who wants the *process* gone rather than idle; PCTV_HOLD_MAX is the knob
+# for the usual case.
 #
 # Why it works by watching the file: the DVD master is rate-CAPPED (-b:v/-maxrate
 # 6000k), so live programme sits at the ceiling - ~776 kB/s measured on
@@ -16,7 +19,7 @@
 # deck instead fills with static, entropy goes UP, not down, and this detector
 # cannot see it - that is what PCTV_END_MAX is for.)  It averages a rate over a
 # window, so it needs ~9 min of frozen frame and cannot tell a mid-tape blank that
-# long from the end; the monitor needs 2 min and does not have to decide.
+# long from the end; the monitor needs 10 min and does not have to decide.
 #
 # The capture is never interrupted: this only stat()s the output file, and at the
 # end sends SIGTERM to the monitor, which is the same path Ctrl-C takes -

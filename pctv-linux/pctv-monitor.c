@@ -495,15 +495,18 @@ static void usage(const char *p, FILE *to)
         "  (pctv-linux/README.md), and check the run against 14.5 in\n"
         "  docs/pctv-analog-capture.md - or run pctv-linux/queue-selftest.sh, which\n"
         "  freezes the encoder mid-capture and proves a stall loses nothing.\n"
-        "  end of tape: the monitor watches for a picture that has stopped moving\n"
-        "  (a frozen frame is bit-identical, live tape never is).  After\n"
-        "  PCTV_HOLD_SECS (default 120) of that the capture closes and the card\n"
-        "  stays claimed, so a blank stretch between two recordings costs a file\n"
-        "  boundary and not the rest of the tape.  PCTV_HOLD_MAX N also ends the\n"
-        "  run N s after the picture stopped (0 = keep watching, the default);\n"
-        "  PCTV_HOLD_SECS=0 turns the whole thing off.  A deck that answers end of\n"
-        "  tape with static is not a frozen frame and is not caught by this - use\n"
-        "  --capture-seconds for that.\n"
+        "  end of tape: the monitor watches the picture, not the file.\n"
+        "  A frozen frame is bit-identical and live tape never is, so after\n"
+        "  PCTV_HOLD_SECS (default 600) of one the file is closed and the card\n"
+        "  stays claimed: a blank stretch or a damaged patch costs a file\n"
+        "  boundary and not the rest of the tape, and a picture again reopens\n"
+        "  a file by itself.  PCTV_HOLD_MAX N also ends the run N s after the\n"
+        "  picture stopped (0 = keep watching, the default);\n"
+        "  PCTV_HOLD_SECS=0 turns that off.  A deck with nothing to play shows\n"
+        "  a BLUE screen instead, which changes every frame and so is caught by\n"
+        "  colour, not repetition: PCTV_BLUE_SECS (default 60) of it ends the\n"
+        "  run and releases the card (0 = never).  A deck that answers end of\n"
+        "  tape with static is neither - use --capture-seconds for that.\n"
         "\n"
         "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
         "        -/+ gain | b boost | m mute | o monitor input | c capture (master |\n"
@@ -652,8 +655,18 @@ static inline void yuv2rgb(int y, int cb, int cr, unsigned char *o)
  * (every fed frame is then the gate holding the last good one) as well as a deck
  * quietly outputting the same field.
  */
-#define HOLD_SECS_DEFAULT 120      /* PCTV_HOLD_SECS: how long a still may run
-                                    * inside a file; 0 turns the detector off */
+#define HOLD_SECS_DEFAULT 600      /* PCTV_HOLD_SECS: how long a still may run
+                                    * inside a file; 0 turns the detector off.
+                                    * 600 and not 120 because a damaged stretch
+                                    * of tape reads exactly like a still (the
+                                    * frame gate holds the last clean frame, so
+                                    * every fed frame is bit-identical) and is
+                                    * not the end of anything: at 2 min the file
+                                    * was cut in the middle of one and
+                                    * everything the gate held after that was
+                                    * never recorded.  The real end of a tape is
+                                    * the deck's blue screen, and the detector
+                                    * below answers that in 60 s. */
 #define HOLD_RESUME_DEFAULT 25     /* changed FRAMES (1 s) before the picture
                                     * counts as back - one tracking glitch must
                                     * not open a file */
@@ -750,6 +763,115 @@ static void hold_rearm(void)
     hold_same = hold_diff = 0;
     hold_state = 0;
     hold_want_stop = hold_want_start = 0;
+}
+
+/* ------------------------------------------------ no content: the blue screen
+ *
+ * The other way a camcorder says "nothing to play" is a blue screen, and it is
+ * NOT a frozen frame: over the 69 min tail of the 2026-11-02 capture there were
+ * 749 consecutive frames and zero identical pairs, because the no-signal colour
+ * subcarrier beats against the digitiser's sampling clock
+ * (docs/pctv-analog-capture.md §12).  The repetition detector above cannot see
+ * it at all, and neither can a growth-rate watchdog on a raw master (a fixed-
+ * frame-size master costs the same 20.9 MB/s for blue as for programme).
+ *
+ * What the blue does have is colour.  signalstats over that file, in 8-bit
+ * codes with neutral chroma at 128:
+ *
+ *      deck blue   Y 47.4   U 205.9   V 116.3   (held to a tenth over 3000 s)
+ *      programme   Y 94-113 U 123.2   V 129-136
+ *      tape black  Y 16     U 128     V 128
+ *
+ * U alone separates blue from programme by 80 codes, so the predicate is
+ * "strongly blue and dark" (mean U >= 170, mean Y <= 110) plus "the frame means
+ * are not moving" (each within BLUE_TOL of the run's first frame).  V is *not*
+ * used: 116 against 129 is a 13-code margin and that is how false triggers
+ * happen.  Luma is what keeps a real blue thing on tape - a sky, a swimming
+ * pool - out: those are bright (Y 150-200) and ordinary programme; the deck's
+ * blue is dark, which is why it is separable at all.
+ *
+ * This one ENDS the run, unlike the stillness detector's "close the file and
+ * keep watching": a blank stretch between two recordings is something tapes
+ * genuinely do, but a blue screen is the deck answering "there is nothing to
+ * play", so after BLUE_SECS of it the tape is over and the card belongs back
+ * to the system.  It only counts while capturing, and only after a real picture
+ * has been seen since the file opened - otherwise a monitor started in front of
+ * a stopped deck would quit before the tape was rolled. */
+#define BLUE_SECS_DEFAULT 60  /* PCTV_BLUE_SECS: how long blue ends the run; 0 off */
+#define BLUE_U_MIN 170.0      /* mean Cb at or above this is the blue screen ... */
+#define BLUE_Y_MAX 110.0      /* ... and at or below this it is the deck's dark
+                               * one, not a bright blue that is real footage */
+#define BLUE_TOL 3.0          /* codes a plane's mean may drift inside a run */
+static int blue_secs = BLUE_SECS_DEFAULT;
+static int blue_seen;         /* a real picture since the file opened: a blue
+                               * screen before it is not the end of anything */
+static int blue_run;          /* 1 = in a run of blue frames */
+static unsigned long blue_since;          /* ticks of the run's first frame */
+static double blue_y0, blue_u0, blue_v0;  /* means of the run's first frame */
+static double frame_y, frame_u, frame_v;  /* the frame just measured: printed by
+                                           * PCTV_VERBOSE so the predicate can be
+                                           * checked against a real deck */
+static int blue_hit;          /* the main loop acts: end the run */
+static int blue_is;           /* this frame passes the colour test (verbose) */
+
+/* Mean of each plane over the frame.  One extra pass over 829 kB per frame
+ * (~1% of a core at 25 fps, next to hold_fold's 0.2%) and deliberately not
+ * sampled: a stride would alias against the very subcarrier pattern this is
+ * looking for.  fuv is UYVY, so every 4 bytes are U Y0 V Y1. */
+static void frame_means(double *y, double *u, double *v)
+{
+    unsigned long long sy = 0, su = 0, sv = 0;
+    size_t n = UV_SIZE / 4;
+    for (size_t i = 0; i + 4 <= UV_SIZE; i += 4) {
+        su += fuv[i];
+        sy += fuv[i + 1] + fuv[i + 3];
+        sv += fuv[i + 2];
+    }
+    *y = n ? (double)sy / (double)(2 * n) : 0.0;
+    *u = n ? (double)su / (double)n : 0.0;
+    *v = n ? (double)sv / (double)n : 0.0;
+}
+
+/* Called once per complete frame, next to hold_update(). */
+static void blue_update(void)
+{
+    double y, u, v;
+    frame_means(&y, &u, &v);
+    frame_y = y; frame_u = u; frame_v = v;
+    blue_is = (u >= BLUE_U_MIN && y <= BLUE_Y_MAX);
+    if (!blue_is) {
+        blue_run = 0;               /* a picture: the deck has something to play */
+        blue_seen = 1;
+        return;
+    }
+    if (!blue_seen) return;         /* blue before any picture: not an end */
+    if (!blue_run) {
+        blue_run = 1;
+        blue_since = SDL_GetTicks();
+        blue_y0 = y; blue_u0 = u; blue_v0 = v;
+        return;
+    }
+    if (fabs(y - blue_y0) > BLUE_TOL || fabs(u - blue_u0) > BLUE_TOL ||
+        fabs(v - blue_v0) > BLUE_TOL) {
+        /* Still blue, but not the *same* blue: something is moving in it.  The
+         * window starts over rather than ending, so a scene that merely sits in
+         * the blue corner of the gamut can never accumulate 60 s. */
+        blue_y0 = y; blue_u0 = u; blue_v0 = v;
+        blue_since = SDL_GetTicks();
+        return;
+    }
+    if (blue_secs > 0 &&
+        SDL_GetTicks() - blue_since >= (unsigned long)blue_secs * 1000)
+        blue_hit = 1;
+}
+
+/* A new file is a new question ("has anything played yet?"), so both the run
+ * and the seen-a-picture flag start over. */
+static void blue_rearm(void)
+{
+    blue_run = 0;
+    blue_seen = 0;
+    blue_hit = 0;
 }
 
 static void field_commit(void)
@@ -851,6 +973,7 @@ static void field_commit(void)
         int stale = (parity_mask != 3) || frame_bad;
         parity_mask = 0;
         field_repeat = 0;
+        blue_update();            /* no-content blue screen: once per frame */
         hold_update(frame_bad);   /* end-of-tape detector: once per frame */
         unsigned long t_feed = SDL_GetTicks();
         cap_feed_video(stale);
@@ -3198,6 +3321,10 @@ static int cap_start(void)
     cap_t0 = time(NULL);
     cap_t0_tick = SDL_GetTicks();
     pthread_mutex_unlock(&cap_mtx);
+    /* The blue-screen window belongs to a file, not to the process: anything
+     * pumped while starting up (cap_start() waits for the audio) happened
+     * before frame 0, and a new file re-asks "has anything played yet?". */
+    blue_rearm();
     if (cap_master == MASTER_DVD)
         fprintf(stderr, "pctv-monitor: note: 'dvd' is the watching format - rate-"
                         "controlled (%d kbps, 1.8 MB VBV), so a hard scene can cost "
@@ -3653,6 +3780,9 @@ int main(int argc, char **argv)
         if (s) hold_max_secs = atoi(s);
         s = getenv("PCTV_HOLD_STRESS");
         if (s) hold_stress = atoi(s);
+        s = getenv("PCTV_BLUE_SECS");
+        if (s) blue_secs = atoi(s);
+        if (blue_secs < 0) blue_secs = 0;
         if (hold_max_secs && hold_max_secs < hold_secs)
             hold_max_secs = hold_secs;   /* quitting cannot precede the close */
         if (hold_secs)
@@ -3667,6 +3797,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "pctv-monitor: PCTV_HOLD_STRESS=%d: SELF-TEST, reporting"
                             " a frozen picture for the first %d s whatever the"
                             " deck is doing\n", hold_stress, hold_stress);
+        if (blue_secs)
+            fprintf(stderr, "pctv-monitor: no-content blue on: %d s of the deck's"
+                            " blue screen ends the run and releases the card"
+                            " (PCTV_BLUE_SECS=0 turns it off)\n", blue_secs);
+        else
+            fprintf(stderr, "pctv-monitor: no-content blue off - a blue screen is"
+                            " recorded until the deck or the operator stops it\n");
     }
 
     cfg_write("input", INPUTS[cur_input]);
@@ -3905,6 +4042,29 @@ int main(int argc, char **argv)
             running = 0;
         }
 
+        /* A blue screen is the deck saying there is nothing to play: end the
+         * run, not just the file.  Only while capturing - a person watching the
+         * live view of a stopped deck should not have the window disappear -
+         * and blue_update() only gets here after a real picture was seen, so a
+         * capture started in front of a stopped deck is not cut short. */
+        if (blue_hit) {
+            blue_hit = 0;
+            blue_run = 0;
+            if (cap_on) {
+                char was[512];
+                snprintf(was, sizeof was, "%s", cap_path);
+                hold_auto = 0;
+                hold_rearm();
+                fprintf(stderr, "pctv-monitor: no picture - the deck has shown its"
+                                " blue screen for %d s, so the tape is finished;"
+                                " closed %s and releasing the card"
+                                " (PCTV_BLUE_SECS=0 turns this off)\n",
+                        blue_secs, was);
+                cap_stop();
+                running = 0;
+            }
+        }
+
         /* a complete interlaced frame is ready for the encoder */
         {   /* parse stage: stream read + BT.656 decode, top of loop to here */
             unsigned long d = SDL_GetTicks() - t_stage;
@@ -4060,6 +4220,24 @@ int main(int argc, char **argv)
             draw_panel_lines(ren, W - text_w(l0, 2) - 30, 8, lines, 1, 2);
         }
 
+        /* The other no-content state, and the one that is allowed to end the
+         * run: a blue screen is not a frozen frame (its subcarrier beats every
+         * frame), so it gets its own line and its own countdown. */
+        if (blue_run && !hold_state) {
+            const char *lines[1];
+            char l0[200];
+            unsigned s = (SDL_GetTicks() - blue_since) / 1000;
+            if (blue_secs > 0)
+                snprintf(l0, sizeof l0, "NO SIGNAL %02u:%02u - blue, ends the run"
+                                        " at %02d:%02d",
+                         s / 60, s % 60, blue_secs / 60, blue_secs % 60);
+            else
+                snprintf(l0, sizeof l0, "NO SIGNAL %02u:%02u - blue screen",
+                         s / 60, s % 60);
+            lines[0] = l0;
+            draw_panel_lines(ren, W - text_w(l0, 2) - 30, 8, lines, 1, 2);
+        }
+
         SDL_RenderPresent(ren);
         {   /* render stage: from the texture update to the present returning */
             unsigned long d = SDL_GetTicks() - t_stage;
@@ -4084,6 +4262,8 @@ int main(int argc, char **argv)
                          MASTER_NAME[cap_master]);
             else if (hold_state)
                 snprintf(recmode, sizeof recmode, " [STILL]");
+            else if (blue_run)
+                snprintf(recmode, sizeof recmode, " [NO SIGNAL]");
 
             char title[256];
             snprintf(title, sizeof title,
@@ -4100,7 +4280,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "monitor: %s | in %llu B rlen %zu | maxgap %lums "
                                 "(%s %lums %s %lums %s %lums) q %d/%d dup %llu "
                                 "skip %llu | "
-                                "held %llu/%llu | still %d/%d%s | "
+                                "held %llu/%llu | still %d/%d%s | blue %lum%s | "
                                 "audio %s ok=%d L %.1f R %.1f pk %.1f clips %u gain %+.1f dB\n",
                         title, bytes_in, rlen, gap_max,
                         stage_name[0], stage_max[0], stage_name[1], stage_max[1],
@@ -4108,10 +4288,23 @@ int main(int argc, char **argv)
                         cap_vrepeats, cap_vskips,
                         frames_held, frames,
                         hold_same, hold_diff, hold_state ? "*" : "",
+                        blue_run ? (SDL_GetTicks() - blue_since) / 1000 : 0,
+                        blue_hit ? "!" : "",
                         srcs[cur_src].label, audio_ok, pk_db[0], pk_db[1],
                         hold_db[0] > hold_db[1] ? hold_db[0] : hold_db[1], clips,
                         gain_db + boost_db);
                 pthread_mutex_unlock(&amtx);
+                /* The colour predicate's own numbers: a deck showing its blue
+                 * screen must read U ~206, Y ~47, and programme U ~123. */
+                fprintf(stderr, "monitor: blue: Y %5.1f U %5.1f V %5.1f | %s"
+                                " %lus of %ds (needs U>=%.0f, Y<=%.0f, drift<=%.0f)\n",
+                        frame_y, frame_u, frame_v,
+                        blue_run ? "IN RUN"
+                                 : blue_is ? (blue_seen ? "blue"
+                                                         : "blue, no picture seen yet")
+                                           : "not blue",
+                        blue_run ? (SDL_GetTicks() - blue_since) / 1000 : 0,
+                        blue_secs, BLUE_U_MIN, BLUE_Y_MAX, BLUE_TOL);
                 gap_max = 0;
                 for (int q = 0; q < 3; q++) stage_max[q] = 0;
             }
