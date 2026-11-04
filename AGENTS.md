@@ -85,7 +85,7 @@ All in `hosts/<name>` (directory name == host name == flake attribute), on the
 | Host | LAN IP | Role | What it actually runs | Deploy notes |
 | --- | --- | --- | --- | --- |
 | **grafton-router** | `.1` (`2a02:8010:6680:49::1`) | Edge router **and** the main homelab app host | PPPoE WAN (`pppoe-zen`), `lan` bridge + VLAN10, nftables, dnsmasq DHCP+DNS, AdGuard, WireGuard `10.47.0.0/16`, headscale + Tailscale, **kanidm** IdP (`kanidm.home.chrisdell.info`), nginx public edge `*.home.chrisdell.info` (ACME DNS-01 Route 53 + route53 dynamic DNS) proxying to itself *and* to N100-NAS (`grafana…`→`:3000`, `filebrowser…`→`:8002`), Home Assistant + InfluxDB + Mosquitto + zigbee2mqtt, Frigate (+`frigate-whisper`/`frigate-monitor`), Jellyfin, Immich, qBittorrent, Ghost, 2fauth, Beszel, Postgres, **meter-relay** (`:8484`), container-ui, TFTP/iPXE netboot, a microVM host (`grafton-hackspace-client`, `.15`), dsh-harness `:3080` | **autoRollback ON** → `sudo nixos-confirm`. 15 GiB RAM + 8 GiB `/swapfile`. No Rust toolchain. Config is `hosts/grafton-router/` (imports its own flake inputs). |
-| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Strata `:8080` (R9700 32 GB; llama-swap `:8081` is **disabled** — see the Strata section), sd-gate + SDXL (only when `gpu-mode sd` holds the card — see the GPU-modes section), Recallium (its LLM = Strata via `/recallium-llm`), diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
+| **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Avalon `:8080` (Qwen3.8-Flash-Next, R9700 32 GB; llama-swap `:8081` is **disabled**, and Strata `:8080` was **disabled 2026-11-04** in favour of Avalon — see the Avalon section), sd-gate + SDXL (only when `gpu-mode sd` holds the card — see the GPU-modes section), Recallium (its LLM = Avalon via `/recallium-llm`), diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
 | **N100-NAS** | `.22` | Media/app NAS (ZFS pool `samsung-4tb`: `ds-media`, `ds-photos`) | Jellyfin, Immich (podman: server/ml/redis/postgres), qBittorrent, Postgres + postgresqlBackup, filebrowser, Grafana `:3000` (kanidm OIDC, `grafana.home.chrisdell.info`), container-ui `:8091`, Samba + NFS, sanoid + syncoid → N40L-NAS and dbthr33, Scrutiny, Prometheus exporters, Tailscale | **autoRollback ON** → `sudo nixos-confirm`. Repo checkout lives here too. `common/folding-at-home.nix` (the linuxserver container) is imported — it was crash-looping on every host over an unqualified image name, fixed 2026-10-20, so it will start CPU-folding on the next switch of every host that imports it. |
 | **GEN8-NAS** | `.23` | Bulk file + snapshot host (ZFS `sas-24tb`: `ds-public`, `ds-cjdell`, `ds-backup`) | Samba + NFS shares, sanoid snapshots, syncoid → N40L-NAS, `backup-host` receiver (`backup` user, `/var/lib/backup`), Scrutiny, Prometheus exporters, Tailscale, `lsiutil`/`sasutils` (HBA) | no autoRollback. ZFS via disko. |
 | **N40L-NAS** | `.21` (`…:49::21`) | The backup **target** (ZFS `sas-16tb`) | Receives the GEN8 + N100 syncoid streams under `sas-16tb/ds-external-backups/…`, holds dbthr33's `ds-frigate-archive`, UniFi controller container, `zfs-status`, Scrutiny, Tailscale | `nfs.nix`, `samba.nix` and `backup.nix` exist in the directory but are **not imported** by `default.nix` — no shares and no offsite push from this box. no autoRollback. |
@@ -611,7 +611,12 @@ because the LLM and SD split one 32 GiB card.
 
 ## GPU modes: `gpu-mode llm | sd | game` (zen3-nixos)
 
-One 32 GiB card, three jobs that each want it whole: the Strata LLM, Stable
+(Since 2026-11-04 the `llm` lease commands `avalon.service`, not
+`strata.service` — same semantics, see the Avalon section; llama.cpp has no
+`POST /v1/unload`, so unit state IS the eviction, and "ready" comes from
+`GET /health` instead of Strata's `/v1/status`.)
+
+One 32 GiB card, three jobs that each want it whole: the Avalon LLM, Stable
 Diffusion, and (occasionally) a game. `gpu-mode`
 (`hosts/zen3-nixos/ai/gpu-mode.nix` + `./gpu-mode.sh`, installed on PATH)
 makes the card a **lease**:
@@ -672,8 +677,9 @@ its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
   public names are what `allowed_hosts` in `strata.nix` carries) and
   **`client_max_body_size 32m;`** (nginx's 1 MiB default 413s a whole-session
   metadata prompt).
-- **Active model:** whatever Strata serves — `qwen3.8-flash-next-ud-iq4-xs` while
-  `config.ai.strataModel = "ud-iq4-xs"`. Recallium's DB row still says
+- **Active model:** whatever the :8080 engine serves — since 2026-11-04 Avalon's
+  llama-server, `--alias qwen3.8-flash-next` (before that: Strata's
+  `qwen3.8-flash-next-ud-iq4-xs` via `config.ai.strataModel`). Recallium's DB row still says
   `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, provider
   account id 3) and that is **harmless**: Strata routes by engine, not by the
   requested name, so an unknown/absent model name still gets the loaded model
@@ -996,7 +1002,79 @@ junk (`target/`, `web/node_modules/`, `web/dist/`) is **not** copied into the
 build. Keep `git status` in the crate clean-ish, so the working tree that Nix
 reads corresponds to something reviewable.
 
-## Strata (Qwen3.8-Flash-Next on the R9700, live)
+## Avalon (Qwen3.8-Flash-Next on the R9700, live since 2026-11-04)
+
+**Avalon** (github.com/freriadoc/Avalon) replaced Strata on `127.0.0.1:8080`
+on 2026-11-04 — deliberately, keeping **every client URL identical**: it is a
+fork of llama.cpp tuned for exactly the one model this box serves
+(Qwen3.8-Flash-Next, 512-expert MoE), with the experts hosted in system RAM,
+a GPU expert cache prefilled from `moe-cache-ranking.bin`, MTP speculative
+decoding from a shared draft head, and fused RDNA kernels. Same idea as
+Strata, llama.cpp-native serve surface: no Python serve layer, no
+hang-watchdog core dumps (docs/strata-hang.md), no ROCm-10 runtime override,
+no #879 audit patch to re-base every release. Upstream numbers: 86.6 t/s on
+an R9700 (user-reported) where their Strata showed 31 — our Strata measured
+60-64 tok/s on the UD-IQ4_XS pack on 0.2.7.1, so Avalon's realistic win here
+is prefill (~1,500-1,900 t/s vs our ~1,250) and long context. RDNA4 is
+"reported working, not measured" upstream — treat the first days accordingly.
+
+- **Flake:** input `avalon = github:freriadoc/Avalon` (nixpkgs follows ours).
+  Its `.devops/nix/` tree is unmodified llama.cpp, so `nix build .#avalon` =
+  `hosts/zen3-nixos/ai/avalon-package.nix` instantiating that scope with
+  `useRocm = true`, `rocmGpuTargets = "gfx1201"` (nixpkgs ROCm 7.2.3 — clr
+  lists gfx1201 and rocblas/hipblas build Tensile kernels for it; upstream
+  tests on 7.2.4) and `LLAMA_BUILD_TESTS=OFF` (the llamaCppPkgs ICE reason).
+- **Service `avalon.service`** (`hosts/zen3-nixos/ai/avalon.nix`): stock
+  `llama-server` on `127.0.0.1:8080`, OpenAI-compatible; the run line is
+  Avalon's documented `avalon-server` command (262144 ctx — Strata's
+  393216-via-YaRN is NOT repeated, `-b/-ub 9536`, FA on, KV q8_0/q4_0,
+  `--parallel 1`, MTP 2 drafts, `--fit` default) plus `--alias
+  qwen3.8-flash-next`, `--slots` (gpu-mode's in-flight check),
+  `--cache-reuse 256`, `-cram 16384` (**MiB** - 16 GiB cap on the RAM prompt
+  cache, llama.cpp's units; the llama-swap-era `-cram 65536` = 64 GiB OOM'd
+  this box) and `--log-prompts-dir llama-logs/`, which
+  revives llama-log-viewer (dark since llama-swap stopped writing it).
+- **Model data** lives OUT of the store:
+  `/home/cjdell/Models/Qwen3.8-Flash-Next-Avalon-GGUF` (33 IQ3_KS-hybrid
+  shards, `MTP/mtp-…FR65k.gguf`, `moe-cache-ranking.bin`, ~89.7 GiB) from
+  `scripts/fetch-avalon-model.sh` (HF rev `372fe3a4e572c5ba75a90e579de0695633d083a8`
+  pinned, per-file size + sha256, resumable; `--check` verifies). The unit's
+  `ConditionPathExists` refuses to start an unprepared set. The IQ3_KS
+  hybrid keeps ISTA's experts and re-quantises 27 layers' gate/up from the
+  BF16 original with an imatrix: better perplexity than the IQ3_S Strata
+  served, close to UD-IQ4_XS, at 89 instead of 93.7 GiB.
+- **URLs are unchanged on purpose:** the `/` location on the `192.168.49.50`
+  vhost, the `strata.ai.chrisdell.info` vhost (kept as the public name —
+  same cert), `llm.`/`llama.ai` via `../tls.nix`'s wildcard fallback, and
+  Recallium's `/recallium-llm/` all still proxy `127.0.0.1:8080`. llama.cpp's
+  server ignores the requested `model` name (no 404 path), so Recallium's
+  stale DB row and every client config keep working. `POST /v1/unload` and
+  `/v1/status` are GONE (Strata-only endpoints): sd-gate's
+  `--llm-unload-url` was dropped and `gpu-mode` now checks `/health`
+  (200 = model resident) + `/slots`.
+- **Lease differences vs the Strata era:** llama.cpp has no unload endpoint,
+  so `gpu-mode sd|game` stopping `avalon.service` IS the eviction (an ad-hoc
+  overlap runs SD at GTT-spill speed), and there is no auto-reload — after
+  `gpu-mode llm` the unit loads the model before `/health` goes 200. Also
+  parked for now: **vision** (the mtmd `--mmproj` line for the existing
+  mmproj GGUF is documented in avalon.nix but OFF — untested against this
+  fork, and a rejected mmproj kills the service at load),
+  **multi-conversation KV parking** (a Strata feature; llama.cpp re-reads a
+  switched-away prompt, softened by `--cache-reuse`/`-cram`), and
+  >262144-ctx YaRN extrapolation.
+- **Rollback:** swap the `./avalon.nix` / `./strata.nix` imports in
+  `hosts/zen3-nixos/ai/default.nix` — Strata's packs, config and
+  `rocm10-runtime.nix` are untouched; importing both would double-bind
+  :8080, so never enable them at once.
+
+## Strata (Qwen3.8-Flash-Next on the R9700 — DISABLED 2026-11-04)
+
+⚠️ **Superseded by the Avalon section above**, which took over `:8080` and
+every nginx location this one owned on 2026-11-04. Everything below stays as
+the rollback procedure and the incident history (`./strata.nix` is
+unimported; its packs, the ROCm-10 runtime input and the audit diff are
+untouched). Re-enabling = swap the `./strata.nix` / `./avalon.nix` imports
+in `hosts/zen3-nixos/ai/default.nix`.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
 **0.2.7.1** (`46c152a1310f77cd2f0ce2c7cd213962df14fe83`, updated 2026-10-29 from

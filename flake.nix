@@ -114,6 +114,16 @@
       url = "github:ggml-org/llama.cpp";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Avalon: the llama.cpp fork that serves Qwen3.8-Flash-Next with hosted
+    # MoE experts + MTP (github.com/freriadoc/Avalon), the engine behind
+    # hosts/zen3-nixos/ai/avalon.nix since 2026-11-04. Same input style as
+    # llama-cpp above; its .devops/nix tree is unmodified upstream, so
+    # ./hosts/zen3-nixos/ai/avalon-package.nix just instantiates it with
+    # useRocm + rocmGpuTargets = gfx1201. `nix flake update avalon` to move.
+    avalon = {
+      url = "github:freriadoc/Avalon";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # Upstream llama.cpp ONLY (2026-09-26). The three fork inputs that used to
     # live here are gone: `llama-cpp-mtp` (local /home/cjdell/Projects/llama-mtp,
     # upstream master + the open qwen4exp-MTP PRs #27836/#28097 + unsloth #144
@@ -156,6 +166,7 @@
       plasma-manager,
       stylix,
       llama-cpp,
+      avalon,
       disko,
       disko-zfs,
       zed,
@@ -462,6 +473,15 @@
       packages.x86_64-linux.strata =
         (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-package.nix
           { };
+
+      # Build Avalon's llama-server (the Qwen3.8-Flash-Next fork) on its own:
+      #   nix build .#avalon
+      # (the NixOS module in hosts/zen3-nixos/ai/avalon.nix callPackages the
+      # same file for the service; the model files are NOT built here - see
+      # scripts/fetch-avalon-model.sh).
+      packages.x86_64-linux.avalon =
+        (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/avalon-package.nix
+          { avalonSrc = avalon; };
 
       # Video cleanup toolkit (footage-clean / footage-probe); see footage/README.md.
       packages.x86_64-linux.footage-kit = (mkPkgs nixpkgs).callPackage ./footage/kit.nix { };

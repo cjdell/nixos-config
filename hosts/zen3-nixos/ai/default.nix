@@ -5,8 +5,11 @@
 # locations + its public *.ai.chrisdell.info subdomain vhost), so the proxy
 # for a service lives with that service:
 #   llama-swap.nix      - llama.cpp router matrix + llama./llm. subdomains
-#                         (DISABLED while ./strata.nix runs - see the import list)
+#                         (DISABLED while ./avalon.nix runs - see the import list)
+#   avalon.nix          - Avalon llama-server fork (HIP/gfx1201) on :8080 - the
+#                         Qwen3.8-Flash-Next server since 2026-11-04
 #   strata.nix          - Strata engine (HIP/gfx1201) + serve + strata. subdomain
+#                         (DISABLED since 2026-11-04, superseded by ./avalon.nix)
 #   sd-gate.nix         - on-demand stable-diffusion.cpp server + sd. subdomain
 #                         (started by gpu-mode, NOT at boot)
 #   gpu-mode.nix        - the `gpu-mode` command: lease the R9700 to llm / sd /
@@ -14,7 +17,7 @@
 #   llama-log-viewer.nix- log viewer web app + logs. subdomain
 #   ollama-bridge.nix   - legacy Ollama-compatible bridge (no proxy)
 #   recallium.nix       - Recallium container + recallium./recallium-mcp.
-#                         (its LLM calls ride on ./strata.nix via /recallium-llm)
+#                         (its LLM calls ride on ./avalon.nix via /recallium-llm)
 #   diamcp.nix          - diamcp container + mcp. subdomain
 #   alexandria.nix      - Alexandria audiobook container (ROCm on the R9700, port 4200) + alexandria. subdomain
 #   gpu-panel.nix       - GPU telemetry/overdrive/PID-fan web panel + gpu. subdomain
@@ -30,12 +33,22 @@
     ./gpu-panel.nix
     ./gpu-mode.nix
     # ./llama-log-viewer.nix
-    # llama-swap is DISABLED while the Strata experiment runs: both want the
-    # R9700's VRAM and tens of GB of RAM, and Strata exists to run a model
-    # llama.cpp cannot fit. Re-enable this import together with
-    # ./strata.nix's to switch back.
+    # llama-swap is DISABLED while the single-model Qwen3.8-Flash-Next server
+    # runs: both want the R9700's VRAM and tens of GB of RAM, and that server
+    # exists to run a model llama.cpp (stock) cannot fit. Re-enable this import
+    # only by also disabling ./avalon.nix below.
     # ./llama-swap.nix
-    ./strata.nix
+    # Strata (./strata.nix) ran the model from 2026-10-01 to 2026-11-04. It is
+    # superseded by ./avalon.nix - the same llama.cpp-fork idea (experts in
+    # RAM, GPU expert cache, MTP) with a llama.cpp-native serve surface, no
+    # Python serve layer, no 32 GB watchdog core dumps (docs/strata-hang.md),
+    # no ROCm-10 runtime override, and Avalon's own IQ3_KS-hybrid pack.
+    # To switch back: comment ./avalon.nix, uncomment ./strata.nix, and flip
+    # ai.strataModel back on (its unit refuses to start a pack that has not
+    # been prepared, so an unimported avalon.nix + commented strata.nix never
+    # double-binds :8080).
+    # ./strata.nix
+    ./avalon.nix
     # ./ollama-bridge.nix
     ./recallium.nix
     # SD shares the card with Strata via the gpu-mode lease (./gpu-mode.nix):
