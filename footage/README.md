@@ -100,8 +100,11 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   so renders run *while Strata holds the R9700*. `--gpu 1` after
   `gpu-mode game` for the fast card (see *GPU etiquette*).
 * **Delivery vs archive?** `--crf` (20 default; 16 for master-grade,
-  24 for space) and `--codec x265|x264|av1|gpu-*`. x265 medium on the
-  5950X ≈ 2.2× realtime; `gpu-h265` offloads VCN to the RX 580.
+  24 for space) and `--codec x265|x264|av1|gpu-*|nvenc-hevc|nvenc-h264`.
+  x265 medium on the 5950X ≈ 2.2× realtime; `gpu-h265` offloads VCN to the
+  RX 580; `nvenc-hevc` (e.g. the RTX 2060 on kabylakeitx) is the watch-copy
+  default: `--crf 16 --preset slow` (→ cq16 p5/tune hq) after QTGMC, whole
+  50p features at ~1× realtime — the encode is free, qtgmc is the cost.
 * **Colour tags:** output is stamped bt709; `--source-color` keeps the
   source's (broken) tags instead. Mislabelled `bt2020c` sources get an
   automatic normalising pass — that's a fix, not a bug. Note that the restamp

@@ -5,9 +5,9 @@
 #     -> VapourSynth: crop, deinterlace (znedi3/eedi3/QTGMC-style), MDegrain
 #     -> optional GPU stages: RealESRGAN upscale, RIFE interpolation
 #        (video2x on Vulkan)
-#     -> FFmpeg encode (libx265 default; SVT-AV1 / x264 / VAAPI H.265 also
-#        available; audio stream-copied — except PCM capture masters into
-#        .mp4, which become aac; --acodec overrides).
+#     -> FFmpeg encode (libx265 default; SVT-AV1 / x264 / VAAPI H.265 /
+#        NVIDIA NVENC HEVC+H.264 also available; audio stream-copied — except
+#        PCM capture masters into .mp4, which become aac; --acodec overrides).
 #
 # Every tool below is an absolute store path baked in by kit.nix, so the
 # script needs no PATH beyond the basics (bash, coreutils, awk).
@@ -59,14 +59,22 @@ OPTIONS
   --interp            RIFE 2x frame interpolation (e.g. 25p -> 50p)
   --gpu N             video2x Vulkan device index for stages 3-4 (default 0;
                       enumerate with 'nix run .#footage-kit.passthru.video2xPatched -- -l')
-  --codec C           x265|x264|av1|gpu-h265|gpu-h264                (default x265)
+  --codec C           x265|x264|av1|gpu-h265|gpu-h264 (VAAPI, AMD/Intel) |
+                      nvenc-hevc|nvenc-h264 (NVIDIA)   (default x265)
+                        nvenc-*: GPU encode, frames uploaded by NVENC itself;
+                        on Turing HEVC is clearly the better engine (its H.264
+                        NVENC block lags a generation). 8-bit 4:2:0 watch
+                        profile; NVENC has no 4:2:2 and 4:4:4 is
+                        software-decode-only, so masters stay on the CPU codecs.
   --acodec A          auto|copy|aac|alac                        (default auto)
                         auto: stream-copy, except PCM masters (ffv1/utvideo/
                               uyvy) going to .mp4, which become aac 192k —
                               stream-copied PCM lands in mp4 as 'ipcm', which
                               most players cannot read. The master stays PCM.
-  --crf N             quality for CPU codecs / -global_quality for VAAPI
-                      (default 20; lower = better). crf 0 = LOSSLESS for x264:
+  --crf N             quality: CPU codecs use crf, VAAPI -global_quality,
+                      NVENC -cq with -rc vbr -b:v 0 (default 20; lower =
+                      better; 16-18 is "high quality lossy" territory for
+                      nvenc-* on grainy tape). crf 0 = LOSSLESS for x264:
                       the encode switches to -qp 0 with the source's own pixel
                       format (see --pixfmt), because x264 only does lossless in
                       the High 4:4:4 Predictive profile — 'high422' + -qp 0 is
@@ -76,7 +84,10 @@ OPTIONS
                       -profile:v high444 -qp 0 -pix_fmt yuv422p.
   --pixfmt FMT        output pixel format for CPU codecs (default: keep the
                       source's when lossless, else ffmpeg's choice)
-  --preset P          x265/x264 speed preset (default medium)
+  --preset P          x265/x264 speed preset (default medium). nvenc-* maps
+                      the same vocabulary onto NVENC's p0..p7 (fast→p2,
+                      medium→p4, slow→p5, slower→p6, veryslow→p7) and always
+                      adds -tune hq.
   --vaapi-dev PATH    /dev/dri/renderD12x for --codec gpu-* (default renderD128)
   --deband            ffmpeg deband pass (banded skies/gradients)
   --grade             analog colour refresh (eq: saturation 1.18, contrast 1.04)
@@ -110,6 +121,13 @@ EXAMPLES
   # one pass, no crf 12 intermediate, 4:2:2 kept, PCM audio copied
   footage-clean --deint auto --denoise none --codec x264 --crf 0 \
     --single-pass --to 1750 Disney.mkv Disney-deint.mkv
+  # the same tape as a high-quality watch copy on the NVIDIA card: QTGMC on
+  # the CPU, NVENC HEVC for the encode — the GPU never deinterlaces here,
+  # only compresses. QTGMC keeps the kit's coded-order trust (it measured
+  # clean); bff matters only for RAW bobs — see the README field test.
+  footage-clean --deint auto --denoise none --codec nvenc-hevc --crf 16 \
+    --preset slow --single-pass --source-color \
+    --to 7385.88 Disney.mkv Disney-watch.mkv
 EOF
 }
 
@@ -411,11 +429,29 @@ case "$PIXFMT_EFF" in
   uyvy422|uyvy422be|vuy422|yuyv422|yvyu422|nv16|nv61) PIXFMT_EFF=yuv422p ;;
   nv12|nv21) PIXFMT_EFF=yuv420p ;;
 esac
+# NVENC speaks nv12/p010le, not yuv420p/yuv422p — and silently fails the
+# negotiation otherwise, so pin the default rather than leaving it empty.
+case "$CODEC" in
+  nvenc-*)
+    [ -z "$PIXFMT_EFF" ] && PIXFMT_EFF=nv12
+    case "$PIXFMT_EFF" in yuv420p) PIXFMT_EFF=nv12 ;; yuv420p10le) PIXFMT_EFF=p010le ;; esac ;;
+esac
 case "$PIXFMT_EFF" in
   "") PROF=high ;;
   yuv444*|gbrp*) PROF=high444 ;;
   *422*) if [ "$LOSSLESS" = 1 ]; then PROF=high444; else PROF=high422; fi ;;
   *) if [ "$LOSSLESS" = 1 ]; then PROF=high444; else PROF=high; fi ;;
+esac
+
+# --preset speaks x264/x265; NVENC answers to p0 (fastest) .. p7 (best).
+NVENC_PRESET=p4
+case "$PRESET" in
+  ultrafast)                    NVENC_PRESET=p1 ;;
+  superfast|fast|veryfast)      NVENC_PRESET=p2 ;;
+  mediumfast|medium)            NVENC_PRESET=p4 ;;
+  slow)                         NVENC_PRESET=p5 ;;
+  slower)                       NVENC_PRESET=p6 ;;
+  veryslow|placebo)             NVENC_PRESET=p7 ;;
 esac
 
 VFARGS=()
@@ -437,6 +473,12 @@ case "$CODEC" in
     ENC=(-init_hw_device vaapi=va:"$VAAPI_DEV" -filter_hw_device va
          -c:v h264_vaapi -rc_mode CQP -global_quality "$CRF")
     VF="${VF:+$VF,}format=nv12,hwupload" ;;
+  # NVIDIA NVENC. Frames arrive from vspipe in system memory and NVENC
+  # uploads them itself, so — unlike the VAAPI codecs — no hwupload filter.
+  nvenc-hevc)
+    ENC=(-c:v hevc_nvenc -preset "$NVENC_PRESET" -tune hq -rc vbr -cq "$CRF" -b:v 0 -tag:v hvc1) ;;
+  nvenc-h264)
+    ENC=(-c:v h264_nvenc -preset "$NVENC_PRESET" -tune hq -rc vbr -cq "$CRF" -b:v 0) ;;
   *) echo "footage-clean: unknown codec $CODEC" >&2; exit 2 ;;
 esac
 [ -n "$PIXFMT_EFF" ] && ENC+=(-pix_fmt "$PIXFMT_EFF")
@@ -589,7 +631,7 @@ if [ "$NEED_VS" = 1 ]; then
     VSCMD="$VSCMD | $FFMPEG -hide_banner -loglevel error -stats -y -i - -i '$AUDIO_SRC'"
     VSCMD="$VSCMD -map 0:v:0 -map 1:a:0? ${QCOL}${QENC} ${QVF}${QAENC} ${QSTOP}-movflags +faststart '$OUT'"
     STAGE_LABEL="VapourSynth clean + ${CODEC} encode (single pass$(
-      [ "$LOSSLESS" = 1 ] && printf ', lossless qp 0'))"
+      if [ "$LOSSLESS" = 1 ]; then printf ', lossless qp 0'; fi))"
   else
     VSCMD="$VSCMD | $FFMPEG -hide_banner -loglevel error -y -i -"
     VSCMD="$VSCMD -c:v libx264 -preset fast -crf 12 -an '$TMP/stage1.mkv'"
