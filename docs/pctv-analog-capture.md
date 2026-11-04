@@ -682,7 +682,7 @@ damage: run the same seek against the original and see the identical two lines.
 | `pctv-linux/capture-selftest.sh` (+ `fakeprobe.c`) | the capture path's regression harness: real-time synthetic BT.656 with injected URB losses, aligned holes and driver stalls (§14.5) |
 | `pctv-linux/replayprobe.c` | the *other* harness: **real tape pixels** (a UYVY file) replayed as real-time BT.656, for the tests `fakeprobe` cannot do because its staircase picture is not a picture — queue depth, sink stalls, byte-identity of a master (§14.2b). `PCTV_PROBE=replayprobe REPLAY_UYVY=… PCTV_NO_SUDO=1 pctv-monitor --capture …` |
 | `/ds-public/pctv-masters` (GEN8) | where lossless masters land: 20.9 MB/s, 12.6 GB per 10 min, **151 GB per 2 h tape** — which is why it is a 17 TB pool and not the laptop SSD (§8, §14.2b) |
-| `pctv-linux/queue-selftest.sh` | the *sink* half of the regression suite: freeze ffmpeg with SIGSTOP mid-capture and assert (§14.2b) that nothing inside a file is ever lost, and (§14.2c) that quitting a wedged sink still returns |
+| `pctv-linux/queue-selftest.sh` | the *sink* half of the regression suite: freeze ffmpeg with SIGSTOP mid-capture and assert (§14.2b) that nothing inside a file is ever lost, that the backlog rides the local-disk spill with zero loss (§14.2g), that a full or disabled scratch file restores the loud early stop, and (§14.2c) that quitting a wedged sink still returns |
 | `pctv-linux/avclock-selftest.sh` (+ `avclock-selftest.c`) | the *clock* half: nine simulated tapes through the real producer/commit/controller, asserting exact track equality, bounded-and-repaid phase E, refused catch-up windows and soft seams (§14.2f) |
 | `pctv-linux/README.md` | usage, keys, options; and why `driver/` (the V4L2 module) is retired |
 | `pctv-linux/COLD-BOOT-NOTES.md` | cold-boot runbook and symptom → cause → fix table |
@@ -845,7 +845,10 @@ a complete file, or a short file with a loud reason. The drain that closes the f
 also stopped dropping pictures (it used to abandon any frame the sink did not take
 within 3 s); it now keeps trying for 30 s plus 100 ms per queued frame and, if it
 still cannot write them, prints `LOST PICTURES` with a count and the number of
-seconds the file ends early.
+seconds the file ends early. *(Amended 2026-11-04: a full RAM queue is no longer
+the end of anything while local disk is available — it overflows to the spill
+scratch file and the take runs on; the stop described here is what still happens
+when even the scratch file says no. §14.2g.)*
 
 **Depth is set by ffmpeg, not by the disk.** The queue is 150 frames = 6 s
 (`PCTV_VQ_SLOTS`, ceiling `VQ_SLOTS_MAX` 500 = 415 MB; the MPEG-2 path keeps 24),
@@ -875,6 +878,10 @@ nothing about the deck or the card can excuse a loss):
 | 3 s | 953 frames written, `skip 60` — 60 pictures gone, file kept growing | 1524 frames, `dup 0 skip 0 refused 0`, video PTS contiguous at 40 ms |
 | 12 s | (silently evicted for as long as it took) | `SINK STALLED` at 6 s of cushion; 372 frames written = 372 packets, PTS contiguous, `refused 1` |
 | none, 10 min | — | 15001 frames, `qmax 1/150`, 0 video drops, 0 audio drops, 12.56 GB, `refused 0` |
+
+*(The middle row is history: since the local-disk spill, §14.2g, a 12 s freeze no
+longer stops anything — the 150-slot queue is now only the first 6 s of cushion,
+not the whole one.)*
 
 The acceptance test for a change in this area is *not* `skip == 0` (a probe-ring
 byte eviction shows up as a stream gap, not a skip) — it is **frames written ÷
@@ -1211,6 +1218,90 @@ injected ppm, catch-up windows refused, and no sample-to-sample step over 800
 anywhere in the recorded audio. `./avclock-selftest.sh` - fast, and the first
 thing to run after touching anything in the commit machine.
 
+### 14.2g The queue now overflows onto local disk, so a slow NFS sink ends nothing (2026-11-04)
+
+§14.2b left one honest hole in the design: the queue was the *only* waiting room,
+so a sink slower than the tape for longer than 6 s still ended the take. That is
+the case this rig actually runs in — a lossless UYVY master is 20.9 MB/s onto
+GEN8's `ds-public` over NFS, and §14.2b's own measurement says the write path has
+5-6× headroom *sustained*. Nothing about the sustained figure describes the bad
+minute: a resync on the pool, someone's `scrub`, a snapshot window, and the
+sink drops under real-time for longer than any queue made of RAM can be.
+
+Pictures were never the scarce resource — RAM is. So the queue now has a second
+stage behind it: **when the RAM queue cannot take a pair, the pair is appended to
+a scratch file on the capture host's own SSD**, and it walks back into the writer
+path the moment the writer asks for one. The capture ends only when even the disk
+says no, which is the §14.2b stop unchanged and still correct: it now means the
+host itself is out of room, not that NFS had a bad minute.
+
+Three things had to be true, and each of them is a fact about this design rather
+than a taste:
+
+* **A record is a PAIR.** The 64-byte header says how many bytes of sound follow
+  the 829 440 of picture; the sound is that picture's own exposure window, cut off
+  the **tail** of the ring at spill time. Spilling pictures alone would commit the
+  wrong sound to the wrong picture the moment the backlog outlived the 21.8 s
+  ring — which the chronic-slow case does in minutes — and that is exactly the
+  damage §14.2f exists to make impossible. At restore time the bytes go **in
+  front of** the ring (the `rs_front` stub), so `a_make_chunk` still reads one
+  contiguous capture-order stream and never reorders the sound.
+* **The audio part is variable, and short is not an error.** While the file holds
+  records, ALSA delivery and per-arrival extraction cancel, so the ring settles at
+  a few ms and a record's tail is whatever the ring could actually pay. Zero-
+  padding a short window into a fixed one would splice silence into the middle of
+  the sound; a truncated record the drain pads *softly* (the `rs_pad_into` seam
+  the clock already knows) is the honest shape — and the deficit is bounded by the
+  crystals, about a sample.
+* **Ordering is by position, and that costs a routing rule:** while the scratch
+  file holds a backlog, **every** new pair goes to the file, room in RAM or not
+  (`cap_feed_video`). RAM then holds one contiguous OLDER block, the file one
+  contiguous NEWER one, and "oldest pending" is a fact about positions. Without
+  the rule a newer frame could re-enter RAM while older ones sat on disk, and the
+  writer — which must pop RAM first because that is what the audio stream
+  requires — would commit it before them.
+
+The clock does not see any of it: each record is one pending picture (queue side,
+`sp_count × FRAME_MS`) *and* that picture's own sound (ring side, `sp_sound`), so
+`E = queue_ms − ring_ms` grows by the same amount on both sides and cancels.
+`rs_update` charges both terms explicitly; charge one and forget the other and the
+controller would chase an invented lip error into the audio.
+
+Disk discipline, because the spill must never become the new way to lose a tape:
+`mkstemp` then **immediate unlink** (a crash leaves no file, and space returns the
+instant the fd closes), `posix_fallocate` in 64 MiB chunks so ENOSPC surfaces
+before a picture is lost rather than in someone's writeback, a cap of
+`PCTV_SPILL_MB` further clamped by the measured free space at activation minus a
+1 GiB floor, and `PCTV_SPILL_DIR` **must be local** — spilling onto the same slow
+mount is circular. The producer's hot path is one memcpy plus one bounded
+`pwrite`: no retries, and nothing that waits on the sink.
+
+The two failure directions are deliberately asymmetric:
+
+| | what happens | why |
+| --- | --- | --- |
+| **append fails** (cap, ENOSPC, `pwrite` error) | `SPILL FAILED`, the file **keeps its fd and every valid record**, the drain restores them, and only the picture that could not be written ends the capture | nothing already recorded becomes a hole over a disk error |
+| **read-back fails** (bad header, short `pread`, stub overflow) | `SPILL FAILED`, then §14.2b verbatim: count everything still owed, end the take complete to the last pair really in the file | two swapped segments of sound are exactly the damage class this file refuses to commit; reordering to keep pictures would be a worse loss than losing them |
+
+`spill %llu` in the stop line counts the pairs that went to disk this take;
+`spill done:` says the sink caught up and the capture is running from live again.
+A healthy long take with a healthy sink shows `spill 0`.
+
+Measured with `queue-selftest.sh` (12 s SIGSTOP on ffmpeg — twice the RAM queue —
+against the SSD scratch file):
+
+| case | result |
+| --- | --- |
+| 12 s freeze, spill on (default) | `SPILL ACTIVE` at 6 s, 179 pairs to disk, `spill done:`, then `dup 0, skip 0, refused 0, spill 179`, 499 pictures, video PTS contiguous at 40 ms, `A/V phase +0 ms` — **the take is untouched** |
+| 12 s freeze, `PCTV_SPILL_MB=0` | the pre-spill design exactly: `SINK STALLED`, 263 pictures, `spill 0`, file complete, PTS contiguous |
+| 12 s freeze, `PCTV_SPILL_MB=64` | `SPILL ACTIVE`, 80 pairs (64 MiB) in, `SPILL FAILED (cap)`, capture ends with `dup 0, skip 0, refused 1, spill 80`, 343 pictures, PTS contiguous — everything recorded is in the file |
+| 3 s freeze, spill on | never touches the scratch file at all (`spill 0`): RAM absorbs it, as before |
+
+Sizing: 64 MiB of scratch holds 78 pairs ≈ 3 s of master; the default 32 GiB cap
+is ~25 min of chronic ~16 MB/s sink, and a 90-min tape that stays behind all the
+way wants ~33 GB — so the cap *firing* is documented behaviour, not a surprise,
+and `PCTV_SPILL_DIR` wants a disk with room if that is the workflow.
+
 ### 14.3 The system tuning that keeps the deadline
 
 All of it in `pctv_probe` at stream start (it is root, and it is the only stage
@@ -1252,7 +1343,8 @@ launched from the menu) and judge it by these numbers, in this order:
 | `stream gaps of N B/M rows, K repaired` | small, and every `G` has a `g` | a `G` without a `g` is a held field (see 14.2.1); a rising `N` is the USB path asking for more `PCTV_URBS` |
 | `dup` | 0, or a handful over hours | the *source* stopped delivering for >70 ms **and** nothing was waiting in the pipe: check the probe's late events first |
 | `skip` | 0 — the counter is now a bug detector, nothing more | it used to mean "the encoder could not keep up, oldest picture evicted". That policy is gone (14.2b); any nonzero `skip` is a defect |
-| `refused` | 0 | pictures that arrived after the queue filled and the capture was ended on purpose. `SINK STALLED` names it. A nonzero `qmax` in the same line (e.g. `qmax 148/150`) says the sink was behind for ~6 s: check the mount, then the master format |
+| `refused` | 0 | pictures that arrived after the queue filled **and** nowhere could put them, so the capture was ended on purpose (`SINK STALLED`, or `SPILL FAILED` first if the scratch file was what broke). Since the spill (§14.2g) a nonzero `refused` means RAM *and* the local disk were both done. A nonzero `qmax` in the same line (e.g. `qmax 148/150`) says the sink was behind: check the mount, then the master format |
+| `spill N` | 0 on a healthy sink | pairs (picture + its sound) that waited on the local-disk scratch file and came back. Any `N` with a `spill done:` line and `refused 0` is the design working: a slow NFS minute cost the take nothing. No `spill done:` and the take ended → the scratch file filled or failed; read the `SPILL FAILED` line for which |
 | `qmax N/150 frames` | ≤ a handful | the deepest the picture queue ever got. Near the depth means the capture stopped because the sink was slower than the tape, not because the tape ran out |
 | `B padded at the drain` | 0 | sound the *file* needed and the ring could not cover - an **undetected** PCM hole (a detected one reads in `silence for N PCM holes` instead). Every padded stretch is ramped in and out, so it costs audio, never a click; more than a few hundred ms says sound vanished without the gap detector noticing |
 | `ADC +/- ppm` | stable, |x| < 500 | the correction being applied, not an error: the crystal difference, now measured over a 1 s window instead of since the start of the take. It is bounded to 3000 ppm because resampling harder than that would be audible, and a window reading more than 5000 ppm is discarded as not-a-crystal (a stall, a reopen, a device that stopped) and counted in `clock windows discarded` instead of believed |

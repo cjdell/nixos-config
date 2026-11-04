@@ -9,12 +9,25 @@
 #      picture written is in the file - a short complete file, never a long
 #      holey one.
 #
+#   3. since 2026-11-04: a freeze LONGER than the RAM queue is absorbed too, by
+#      spilling the backlog (pictures + their sound) to a scratch file on local
+#      disk - SINK STALLED must NOT appear, the take stays whole and PTS stays
+#      contiguous (case survive-12s-freeze);
+#   4. a spill that runs out of scratch space (PCTV_SPILL_MB cap) ends the
+#      capture the way §14.2b always did - after SPILL FAILED, with everything
+#      already recorded still complete on disk (case spill-cap-64mb);
+#   5. PCTV_SPILL_MB=0 restores the pre-spill behaviour exactly: the full queue
+#      stops the take (case spill-off-12s-freeze).
+#
 # It runs against real tape pixels, not synthetic ones: replayprobe.c replays a
 # UYVY file as real-time BT.656, so nothing about a deck or the card can excuse a
 # loss.  Provide one with REPLAY_UYVY (any 720x576 PAL UYVY; 30 s is plenty), or
 # point PCTV_PROBE at a real pctv_probe to test the card instead.
 #
 #   ./pctv-linux/queue-selftest.sh [source.uyvy]
+#
+# The spill cases write through PCTV_SPILL_DIR (default below - keep it on REAL
+# local disk to test what the capture host actually does, not tmpfs).
 #
 # History: on 2026-11-02 a 3 h tape came off with `skip 59688` (22 % of its
 # pictures evicted to keep a stalled encoder in step) and the monitor then hung
@@ -36,6 +49,8 @@ if [ ! -f "$UYVY" ]; then
   exit 1
 fi
 mkdir -p "$OUT"; rm -f "$OUT"/*.mkv
+SPILL_DIR=${PCTV_SPILL_DIR:-/var/tmp/pctv-queue-selftest-spill}
+mkdir -p "$SPILL_DIR"
 
 export PCTV_PROBE="$PROBE" PCTV_NO_SUDO=1 REPLAY_UYVY="$UYVY" REPLAY_SECS=3600
 export PCTV_FFMPEG="$FFMPEG" PCTV_LOG=0 SDL_VIDEODRIVER=dummy PCTV_VERBOSE=1
@@ -48,10 +63,14 @@ fail=0
 alive() { local s; s=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
          [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
 # $1 = label, $2 = seconds to freeze ffmpeg (0 = don't freeze), $3 = expect
-# "absorbed" (no loss), "stopped" (capture ended itself, file still complete) or
+# "absorbed" (no loss), "stopped" (capture ended itself, file still complete),
+# "spill" (the backlog overflowed to the scratch file and came back: no SINK
+# STALLED, no loss, a "spill done" line), "spillcap" (the scratch file hit its
+# cap: SPILL FAILED + SINK STALLED, file still complete), or
 # "quit" (SIGTERM arrives WHILE the sink is frozen and must still come back at once)
+# $4 = extra environment for the monitor (e.g. PCTV_SPILL_MB=64)
 run() {
-  local label=$1 freeze=$2 expect=$3
+  local label=$1 freeze=$2 expect=$3 extraenv=${4:-}
   local log="$OUT/$label.log"
   pkill -9 -x replayprobe 2>/dev/null; pkill -9 -x ffmpeg 2>/dev/null; sleep 1
   # Start it as OUR child and keep that pid.  `pgrep -x | head -1` picks the
@@ -60,7 +79,8 @@ run() {
   # unobserved - which is exactly how this script produced a nondeterministic
   # "quit lockup" FAIL.  Same for ffmpeg: it is a child of the monitor, so ask
   # pgrep for that relationship instead of guessing by name.
-  ./pctv-linux/pctv-monitor --capture --capture-seconds "$SECS" \
+  env PCTV_SPILL_DIR="$SPILL_DIR" ${extraenv:+$extraenv} \
+      ./pctv-linux/pctv-monitor --capture --capture-seconds "$SECS" \
       --master uyvy --out-dir "$OUT" >/dev/null 2>"$log" &
   local mp=$!
   local ff="" _i
@@ -131,10 +151,15 @@ run() {
   local frames; frames=$(echo "$span" | awk '{print $2}')
   local counters; counters=$(grep -aoE '\[dup [0-9]+, skip [0-9]+, refused [0-9]+.*\]' "$log" | tail -1)
   local stalled; stalled=$(grep -ac 'SINK STALLED' "$log")
+  local spilled_n; spilled_n=$(echo "$counters" | sed -n 's/.*spill \([0-9]*\).*/\1/p')
+  local spill_act; spill_act=$(grep -ac 'SPILL ACTIVE' "$log")
+  local spill_done; spill_done=$(grep -ac 'spill done:' "$log")
+  local spill_fail; spill_fail=$(grep -ac 'SPILL FAILED' "$log")
 
   printf '%-22s %s\n' "$label" "$counters"
-  printf '%-22s PTS steps off 40 ms: %s | span %s s (%s pictures) | SINK STALLED: %s | %s\n' \
-         "" "$bad" "$(echo "$span" | cut -d' ' -f1)" "$frames" "$stalled" "$f"
+  printf '%-22s PTS steps off 40 ms: %s | span %s s (%s pictures) | SINK STALLED: %s | spill: %s active, %s done, %s failed, %s pairs | %s\n' \
+         "" "$bad" "$(echo "$span" | cut -d' ' -f1)" "$frames" "$stalled" \
+         "$spill_act" "$spill_done" "$spill_fail" "${spilled_n:-?}" "$f"
 
   [ "${bad:-1}" = "0" ] || { echo "$label: FAIL - video PTS is not contiguous"; fail=1; }
   # A stall must not be read as a crystal error: the drift figure used to run away
@@ -145,11 +170,34 @@ run() {
     absorbed)
       echo "$counters" | grep -qE 'dup 0, skip 0, refused 0' \
         || { echo "$label: FAIL - a freeze shorter than the queue must lose nothing"; fail=1; }
-      [ "$stalled" = "0" ] || { echo "$label: FAIL - capture stopped on a short freeze"; fail=1; } ;;
+      [ "$stalled" = "0" ] || { echo "$label: FAIL - capture stopped on a short freeze"; fail=1; }
+      [ "$spill_act" = "0" ] || { echo "$label: FAIL - a freeze the RAM queue can hold must never touch the scratch file"; fail=1; } ;;
     stopped)
       [ "$stalled" != "0" ] || { echo "$label: FAIL - a freeze longer than the queue must END the capture"; fail=1; }
+      [ "$spill_act" = "0" ] || { echo "$label: FAIL - spilled with the spill disabled (PCTV_SPILL_MB=0 must be the pre-spill design)"; fail=1; }
       echo "$log" | grep -q '3/4 full' || true
       [ "${bad:-1}" = "0" ] || fail=1 ;;
+    spill)
+      # The claim of 2026-11-04: a sink slower than the tape, for longer than
+      # the RAM queue, costs the take NOTHING - the pairs waited on the SSD and
+      # walked back in order.  Every symptom of the old §14.2b stop must be
+      # absent, and the summary must show the pairs actually went to disk.
+      [ "$spill_act" != "0" ] || { echo "$label: FAIL - a 12 s freeze overruns the 6 s queue: the spill must have activated"; fail=1; }
+      [ "$spill_done" != "0" ] || { echo "$label: FAIL - the backlog never came back (no \"spill done\")"; fail=1; }
+      [ "$spill_fail" = "0" ] || { echo "$label: FAIL - the scratch file reported a failure on a healthy disk"; fail=1; }
+      [ "$stalled" = "0" ] || { echo "$label: FAIL - capture stopped although the spill had space"; fail=1; }
+      echo "$counters" | grep -qE 'dup 0, skip 0, refused 0' \
+        || { echo "$label: FAIL - the spill round-trip must lose nothing (dup/skip/refused all 0)"; fail=1; }
+      [ "${spilled_n:-0}" -gt 0 ] \
+        || { echo "$label: FAIL - the summary reports no spilled pairs for a 12 s freeze"; fail=1; } ;;
+    spillcap)
+      # Scratch space is the new last resort, so the cap must fail EXACTLY like
+      # the full queue used to: shout, stop, and leave a complete file.
+      [ "$spill_act" != "0" ] || { echo "$label: FAIL - the spill never activated at this cap"; fail=1; }
+      [ "$spill_fail" != "0" ] || { echo "$label: FAIL - a 64 MB cap must run out during a 12 s freeze (no SPILL FAILED)"; fail=1; }
+      [ "$stalled" != "0" ] || { echo "$label: FAIL - a failed spill must end the capture (SINK STALLED)"; fail=1; }
+      grep -q 'the capture ends exactly where\|nothing after this is' "$log" \
+        || { echo "$label: FAIL - the SPILL FAILED line must say where the take ends"; fail=1; } ;;
   esac
   [ -s "$f" ] || { echo "$label: FAIL - empty file"; fail=1; }
   # A rawvideo master is 829440 B a frame: the file must hold what it claims.
@@ -159,9 +207,11 @@ run() {
 }
 
 echo "== queue-selftest: $(nproc) cores, source $(basename "$UYVY") ($(stat -c %s "$UYVY") B), ${SECS}s captures"
-echo "   queue depth: $(grep -aoE 'VQ_SLOTS_SINK [0-9]+' pctv-linux/pctv-monitor.c | head -1)"
+echo "   queue depth: $(grep -aoE 'VQ_SLOTS_SINK [0-9]+' pctv-linux/pctv-monitor.c | head -1), spill dir: $SPILL_DIR"
 run absorb-3s-freeze 3 absorbed
-run survive-12s-freeze 12 stopped
+run survive-12s-freeze 12 spill
+run spill-off-12s-freeze 12 stopped PCTV_SPILL_MB=0
+run spill-cap-64mb 12 spillcap PCTV_SPILL_MB=64
 run quit-into-frozen-sink 12 quit
 echo
 [ $fail -eq 0 ] && echo "PASS - a stalled sink costs seconds of tape, never pictures inside a file" \

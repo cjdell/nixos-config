@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -55,6 +56,7 @@
 #include <sys/poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/statvfs.h>
 #include <alsa/asoundlib.h>
 #include <SDL.h>
 
@@ -2360,6 +2362,11 @@ static int pipe_write(int fd, const void *p, size_t n, int msecs, size_t *done)
 #define AQ_SECONDS ((double)AQ_BYTES / 192000.0)
 static unsigned char *aq;
 static size_t aq_head, aq_count, aq_sent;  /* aq_sent = reserved, being written */
+/* The spill backlog, in records and in their un-restored sound bytes.  They
+ * live with the ring's counters because that is where they are spent
+ * (rs_update) as well as earned (spill_append), and rs_update runs long
+ * before the spill section itself. */
+static unsigned long long sp_count, sp_sound;
 /* Raw frames the ADC has actually delivered this take, silence fill excluded.
  * rs_update() windows THIS against the frames committed - arrivals against
  * arrivals - so the writer's own draining cannot bias the crystal estimate
@@ -2458,6 +2465,22 @@ static unsigned long long aq_bytes_per_ms(void)
  * 4096 covers a commit's whole demand (1920 frames at 48 kHz) in one pass. */
 #define RS_MAX_OUT 4096
 static short  rs_buf[RS_MAX_OUT * 2];
+/* The restored-record stub of the drain's input stream: when a spilled pair
+ * comes back from disk its sound lands here, and a_make_chunk() reads this
+ * before the ring, so the two together stay ONE contiguous byte stream for
+ * the resampler (the queue was never allowed to reorder the sound, and the
+ * spill file therefore never has to either).  Sized for two records at the
+ * widest supported rate because step < 1 means a commit can leave a residue
+ * of the previous record here, and the next restore must not overwrite it -
+ * that residue is the first samples of the next commit's chunk.  Writer
+ * thread only, which is why it needs no lock and no reservation protocol.
+ * The number is 40 ms of audio at 205 kHz plus a residue's worth, i.e. the
+ * same ceiling A_CHUNK_MAX puts on a chunk's frame count (checked against
+ * the negotiated rate at spill activation, not by a macro dependency). */
+#define SPILL_AUDIO_MAX (8192u * 4u + 1024u)
+#define RS_FRONT_MAX (2u * SPILL_AUDIO_MAX)
+static unsigned char rs_front[RS_FRONT_MAX];
+static size_t rs_front_len, rs_front_pos;    /* bytes live, bytes consumed */
 static double rs_prev[2];               /* last input frame, held between calls */
 static int    rs_have;
 static double rs_frac;                  /* position between rs_prev and the next */
@@ -2509,6 +2532,7 @@ static void rs_reset(void)
     rs_have = 0;
     rs_frac = 0.0;
     rs_step = 1.0;
+    rs_front_len = rs_front_pos = 0;        /* nothing owed from a previous take */
     rs_out_frames = rs_vframes = 0;
     rs_pad_frames = 0;
     rs_raw_win = rs_v_win = 0;
@@ -2718,6 +2742,19 @@ static void rs_update(void)
     double backlog_ms = (double)vq_count * (double)FRAME_MS;
     unsigned long long bpm = aq_bytes_per_ms();
     double ring_ms = bpm ? (double)aq_count / (double)bpm : 0.0;
+    /* The spill backlog is backlog and sound at the same time: every record
+     * is a pending picture (queue side, sp_count x FRAME_MS) plus that
+     * picture's own ring bytes (ring side, sp_sound), and the rs_front
+     * residue is sound already restored from the file and simply not
+     * committed yet - ring class too.  Counted together they cancel out of
+     * E exactly - a spilled minute is neither a lip error nor a reason to
+     * touch step; forgotten on either side and the controller would chase
+     * an invented phase error into the audio (or miss a real one).  This is
+     * writer-thread-only code, which is why rs_front needs no lock. */
+    backlog_ms += (double)sp_count * (double)FRAME_MS;
+    if (bpm)
+        ring_ms += (double)(sp_sound + (rs_front_len - rs_front_pos))
+                 / (double)bpm;
     pthread_mutex_unlock(&vq_mtx);
 
     if (rs_vframes < 125) {                       /* 5 s of video first */
@@ -2969,8 +3006,11 @@ static void cap_feed_silence(size_t nframes)
  * how 59688 pictures (40 minutes of tape) vanished from a 3 h recording on
  * 2026-11-02 while every counter looked alive: the oldest frame is as much of
  * the tape as the newest one, and a file with 22 % of its pictures silently
- * missing is worthless as an archive.  A full queue now ends the capture and
- * says so (see cap_feed_video), which leaves exactly two outcomes - a complete
+ * missing is worthless as an archive.  A full queue no longer overflows
+ * anywhere but onto the local-disk spill (see the spill block below the queue:
+ * pictures plus their sound wait in a scratch file, and the writer walks them
+ * back); only when the file cannot take them - cap, disk error, or
+ * PCTV_SPILL_MB=0 - does the capture end.  The two outcomes stand: a complete
  * file, or a short one with a loud reason.
  *
  * That makes the depth the whole guarantee, so it is sized in seconds of sink
@@ -3009,10 +3049,274 @@ static unsigned long vq_last_ms;       /* when a picture last went out (dup watc
 #define A_CHUNK_MAX 8192                /* 40 ms of audio frames: covers 205 kHz */
 static short  a_chunk[A_CHUNK_MAX * 2];
 static size_t a_chunk_frames, a_chunk_pos;
-static int vq_slot = -1;               /* frame in flight to ffmpeg, -1 = none */
+/* The picture in flight to ffmpeg: a RAM queue slot, or the spill staging
+ * buffer when the commit is being read back from disk (see the spill block).
+ * NULL = none.  It used to be a slot INDEX (vq_slot), which quietly assumed
+ * every picture lives in RAM; the writer below is now agnostic, and
+ * vq_cur_spill is what tells a spilled commit apart from a real one at
+ * completion time (it is the one case where the picture must be copied into
+ * the held slot to keep the duplicate-source invariant). */
+static unsigned char *vq_cur;
+static int vq_cur_spill;
 static size_t vq_off;
 static int vq_slot_dup;
 #define VQ_GRACE_MS 30                 /* be late rather than duplicate */
+
+/* ---- spill: local disk behind the RAM queue --------------------------------
+ * A sink slower than tape - the §14.2b case, GEN8's NFS under the ~20.9 MB/s
+ * a UYVY master needs - used to end the take the moment the 150-frame RAM
+ * queue filled, because RAM was the only place a queued picture could wait.
+ * The pictures are not the problem though; the waiting room is.  With a fast
+ * local disk behind the box the sink may stay slow as long as it likes: every
+ * picture the RAM queue cannot hold is appended to a scratch file on the SSD,
+ * and it walks back into the queue path when the writer next asks for one.
+ * The capture only ends when even the SSD says no (full, failing, disabled).
+ *
+ * A spill record is a PAIR - one picture plus the up-to-FRAME_MS of raw ring
+ * sound it was captured with.  That is not tidiness, it is the coupling
+ * invariant: the sound committed with a picture must be that picture's own,
+ * and once the backlog outlives the 21.8 s ring (16 s after the queue fills -
+ * minutes, not hours, for the chronic-slow case that started this) spilling
+ * pictures alone would commit the wrong sound to the wrong picture, which is
+ * the exact class of damage this file exists to prevent.  So the sound
+ * travels with the picture: cut off the RING TAIL at spill time (the last
+ * FRAME_MS delivered is the arriving picture's own exposure window; while
+ * the file holds records the ALSA thread's bytes are claimed one window per
+ * arrival, which is why the ring does NOT overflow during a spill epoch),
+ * put ahead of the ring at restore time via rs_front, and every seam the
+ * drain already knows how to make soft keeps working, because the spill
+ * moves bytes the ring already accepted without inventing, reordering or
+ * fading any of them.  The audio part is VARIABLE and each record says how
+ * much it carries (struct spill_rec): the ring can hold anything from zero
+ * to a full window (while spilling, ALSA delivers and extraction removes one
+ * window per arrival, so the depth settles at a few ms), and zero-padding a
+ * short window into a fixed one would splice silence into the middle of the
+ * sound - truncation the record admits to beats a lie the drain commits.
+ *
+ * Ordering is one FIFO, and it is strict by position, which costs one
+ * routing rule: WHILE THE FILE HOLDS A BACKLOG THE FILE IS THE ONLY PLACE A
+ * NEW PAIR GOES, room in the RAM queue or not (see cap_feed_video).  The RAM
+ * queue then keeps one contiguous block older than the file's one contiguous
+ * block, and "oldest pending" is a fact about positions instead of about
+ * timestamps nobody can compare.  Without that rule a frame could re-enter
+ * RAM while older ones sat in the file, and the writer - which pops RAM
+ * first, because that is what the audio stream (ring head = the RAM block's
+ * own sound) requires - would commit the newer frame before them.  Producer
+ * and writer touch opposite ends of the file, the fd is only ever closed
+ * with both threads otherwise quiescent, so no disk op here waits on another.
+ *
+ * The clock cannot see any of this, and that is the point: a record carries
+ * a picture and its own ring bytes, so E = queue_ms - ring_ms grows by the
+ * same time on both sides and cancels (rs_update counts both terms - the
+ * pictures via sp_count, the un-restored sound via sp_sound - and they only
+ * cancel when nobody invents or loses samples, which is the same promise the
+ * coupling makes inside the ring).
+ *
+ * Disk discipline: the file is mkstemp'd under a directory this tool owns
+ * and UNLINKED at once, so a crash can leave nothing behind and space is
+ * back the moment the fd closes; space is claimed with posix_fallocate in
+ * chunks so ENOSPC surfaces before a picture is lost, not in someone's
+ * writeback; the cap is PCTV_SPILL_MB, further clamped by the measured free
+ * space at activation minus a 1 GiB floor for the host.  Producer side that
+ * leaves the hot path: one memcpy, one bounded pwrite, no retries, and
+ * nothing that waits for the sink.  A producer-side failure never closes or
+ * rewinds the file: everything already appended is valid, drains back into
+ * the take, and only the failing picture ends the capture.
+ */
+#define SPILL_CAP_DEFAULT_MB 32768ull  /* 32 GB = ~25 min of master at 20.9 MB/s */
+#define SPILL_PREALLOC     (64ull << 20)
+#define SPILL_HDR          64          /* one aligned header block per record */
+#define SPILL_MAGIC        0x50435338u /* 'PCS8': this build's record layout */
+struct spill_rec {
+    unsigned magic;                    /* SPILL_MAGIC */
+    unsigned audio;                    /* bytes of sound following the picture */
+    unsigned long long reserved[7];    /* future: sequence, flags - all zero now */
+};
+_Static_assert(sizeof(struct spill_rec) == SPILL_HDR, "spill header size");
+
+static const char *spill_dir = "/var/tmp";      /* PCTV_SPILL_DIR - local disk! */
+static unsigned long long spill_cap_mb = SPILL_CAP_DEFAULT_MB;  /* 0 = off */
+static unsigned char *sp_out, *sp_in;  /* producer / writer staging, vq_start */
+#define SP_IN_MAX (SPILL_HDR + UV_SIZE + SPILL_AUDIO_MAX)
+static int sp_fd = -1;                 /* >= 0: this take has a scratch file */
+static unsigned long long sp_cap;      /* bytes, set at activation */
+static size_t sp_rec, sp_audio;        /* max record size, max sound part of it */
+static size_t sp_head, sp_tail, sp_pre;/* read offset, write offset, fallocated end */
+                                        /* sp_count / sp_sound live with the
+                                         * ring's counters, above rs_update */
+static unsigned long long cap_spill_frames;  /* records written this take (stats) */
+static int sp_fail_logged;             /* the SPILL FAILED line is a once */
+static char sp_note[64];               /* file name for the log (pre-unlink) */
+
+static const char *spill_why = "";     /* last failure, for the log */
+
+/* Producer side, called with NO lock held (cap_feed_video dropped vq_mtx the
+ * way it drops it for the 3/4 warning - disk I/O and queue locks do not
+ * share a sentence).  Returns 0 when the pair is durably in the spill file,
+ * nonzero when this picture is the last the sink will get, having said so. */
+static int spill_append(const unsigned char *pic)
+{
+    if (!sp_out || !sp_in) { spill_why = "staging buffers never allocated"; goto fail; }
+    if (sp_fd < 0) {
+        /* activation: a directory we own, a name we will immediately unlink */
+        if (mkdir(spill_dir, 0700) != 0 && errno != EEXIST) {
+            spill_why = spill_dir; goto fail;
+        }
+        sp_audio = (size_t)aq_bytes_per_ms() * FRAME_MS;
+        if (!cap_has_audio) sp_audio = 0;       /* nothing is born without sound */
+        if (sp_audio > SPILL_AUDIO_MAX) { spill_why = "audio rate beyond the spill record"; goto fail; }
+        sp_rec = SPILL_HDR + UV_SIZE + sp_audio;
+        unsigned long long cap = spill_cap_mb << 20;
+        struct statvfs sv;
+        if (statvfs(spill_dir, &sv) == 0) {     /* never be the thing that kills
+                                                 * the host's root disk */
+            unsigned long long fr = (unsigned long long)sv.f_bavail * sv.f_frsize;
+            unsigned long long keep = (1ull << 30) + SPILL_PREALLOC;
+            if (fr > keep && fr - keep < cap) cap = fr - keep;
+        }
+        if (cap < sp_rec * 8) { spill_why = "no usable space on the spill disk"; goto fail; }
+        char tmpl[PATH_MAX];
+        snprintf(tmpl, sizeof tmpl, "%s/pctv-spill-XXXXXX", spill_dir);
+        int fd = mkstemp(tmpl);
+        if (fd < 0) { spill_why = tmpl; goto fail; }
+        snprintf(sp_note, sizeof sp_note, "%.63s", strrchr(tmpl, '/') ? strrchr(tmpl, '/') + 1 : tmpl);
+        unlink(tmpl);                           /* crash-clean by construction */
+        sp_fd = fd; sp_cap = cap; sp_head = sp_tail = sp_pre = 0;
+        fprintf(stderr, "pctv-monitor: SPILL ACTIVE: the sink is slower than the"
+                        " tape, so queued pairs (picture + their sound) now"
+                        " overflow to local disk (%s/%s, cap %.1f GB). Nothing is"
+                        " dropped; the capture runs on, and spill done prints"
+                        " when the sink has caught up again.\n",
+                spill_dir, sp_note, (double)cap / 1073741824.0);
+        show_overlay(20000);
+    }
+    struct spill_rec h = { SPILL_MAGIC, 0, { 0 } };
+    size_t rec = SPILL_HDR + UV_SIZE;
+    if (sp_audio) {
+        /* Cut this picture's own sound off the tail of the ring.  Under the
+         * lock, but only as a ring-move: the bytes go to producer-private
+         * staging and aq_count simply shrinks from the tail - aq_head never
+         * moves, so the writer's in-flight read window is untouched.  What
+         * is NOT there is not taken: while the file holds records every
+         * arrival claims a window the moment it is delivered, so the ring
+         * runs shallow (a few ms), and a short record is a truncated window
+         * the drain pads softly, not a failure.  The truncation is bounded
+         * by the crystals (a window is 40 ms of card time, the ring got
+         * 40 ms of ADC time) - never more than about a sample. */
+        pthread_mutex_lock(&vq_mtx);
+        size_t avail = (aq_count - aq_sent) & ~(size_t)3;   /* never touch the
+                                                             * reserved window */
+        size_t take = avail < sp_audio ? avail : sp_audio;
+        aq_count -= take;
+        size_t off = (aq_head + aq_count) % AQ_BYTES;
+        size_t first = take < AQ_BYTES - off ? take : AQ_BYTES - off;
+        memcpy(sp_out + SPILL_HDR + UV_SIZE, aq + off, first);
+        if (first < take)
+            memcpy(sp_out + SPILL_HDR + UV_SIZE + first, aq, take - first);
+        h.audio = (unsigned)take;
+        pthread_mutex_unlock(&vq_mtx);
+        rec += take;
+    }
+    memcpy(sp_out, &h, sizeof h);
+    while (sp_tail + rec > sp_pre) {            /* claim space before writing:
+                                                 * ENOSPC must cost the take,
+                                                 * not the page cache */
+        if (sp_tail + rec > sp_cap) {
+            spill_why = "the scratch file reached its cap (PCTV_SPILL_MB) while"
+                        " the sink was still behind";
+            goto fail;
+        }
+        unsigned long long len = sp_cap - sp_pre;
+        if (len > SPILL_PREALLOC) len = SPILL_PREALLOC;
+        int e = posix_fallocate(sp_fd, (off_t)sp_pre, (off_t)len);
+        if (e == ENOSPC) { spill_why = "the spill disk ran out of space"; goto fail; }
+        if (e != 0) { sp_pre = sp_cap; break; } /* no preallocation here (some
+                                                 * filesystems refuse it): the
+                                                 * pwrite below reports anyway */
+        sp_pre += len;
+    }
+    ssize_t w;
+    do w = pwrite(sp_fd, sp_out, rec, (off_t)sp_tail);
+    while (w < 0 && errno == EINTR);
+    if (w != (ssize_t)rec) { spill_why = strerror(errno ? errno : EIO); goto fail; }
+    pthread_mutex_lock(&vq_mtx);
+    sp_tail += rec;
+    sp_sound += h.audio;
+    sp_count++;
+    pthread_mutex_unlock(&vq_mtx);
+    cap_spill_frames++;
+    if (cap_spill_frames % 250 == 0)
+        fprintf(stderr, "pctv-monitor: spill: %llu pictures (%.1f GB) on local"
+                        " disk, the sink is %llu s behind the tape\n",
+                cap_spill_frames, (double)sp_tail / 1073741824.0,
+                sp_count * FRAME_MS / 1000ull);
+    return 0;
+fail:
+    /* The file keeps its fd and everything already appended: those records
+     * are valid, the drain restores them, and only this picture - the one
+     * that could not be written - ends the capture (the caller stops on any
+     * nonzero return, exactly as the pre-spill design stopped at a full
+     * queue).  Nothing recorded so far becomes a hole over a disk error. */
+    if (!sp_fail_logged) {
+        sp_fail_logged = 1;
+        fprintf(stderr, "pctv-monitor: SPILL FAILED (%s): %s. The capture ends"
+                        " where the pre-spill design used to end: what is in"
+                        " the file is complete, nothing after this is"
+                        " recorded.\n", sp_note[0] ? sp_note : "activation",
+                spill_why);
+    }
+    return -1;
+}
+
+/* Discard everything the sink has not been given - RAM queue, spill file and
+ * both sound buffers - counted, once, loudly through the drain's LOST
+ * PICTURES line.  `inflight` = 1 when the caller's picture (pipe or staging)
+ * should be counted with it.  This is now the only way a picture is lost, so
+ * the spill gave-up-on is walked here too rather than leaking into the next
+ * take. */
+static void vq_abandon_all(int inflight)
+{
+    pthread_mutex_lock(&vq_mtx);
+    unsigned long long gone = (unsigned long long)vq_count + (inflight ? 1 : 0)
+                            + sp_count;
+    unsigned long long agone = aq_count + sp_sound;
+    vq_abandon = 1;
+    aq_closed = 1;                     /* else the ALSA thread keeps refilling a
+                                        * ring nobody drains and the writer can
+                                        * never exit */
+    aq_head = (aq_head + aq_sent) % AQ_BYTES;
+    aq_count = 0; aq_sent = 0;
+    vq_head = 0; vq_count = 0;
+    sp_head = sp_tail = sp_pre = 0; sp_count = sp_sound = 0;
+    if (sp_fd >= 0) { close(sp_fd); sp_fd = -1; }   /* unlinked: the space is
+                                                     * back right now */
+    pthread_mutex_unlock(&vq_mtx);
+    rs_front_len = rs_front_pos = 0;
+    pthread_mutex_lock(&cap_mtx);
+    cap_vdrops += gone; cap_adrop_bytes += agone;
+    pthread_mutex_unlock(&cap_mtx);
+    vq_drain_dropped += gone;
+}
+
+/* A record that cannot be READ BACK is the worst case the spill design has:
+ * the pictures were on disk and now they are not.  Fail the way the pre-spill
+ * §14.2b stop fails - count everything still owed, end the take complete to
+ * the last pair actually in the file - and never reorder to keep them: two
+ * swapped segments of the sound stream are exactly the damage the coupling
+ * exists to make impossible.  (Producer-side failures have their own path in
+ * spill_append; they lose only the picture that failed to write.) */
+static void spill_lost(const char *why)
+{
+    if (!sp_fail_logged) {
+        sp_fail_logged = 1;
+        fprintf(stderr, "pctv-monitor: SPILL FAILED (read %s): %s. The capture"
+                        " ends on the last pair that really was in the scratch"
+                        " file; the backlog that followed it is gone, and"
+                        " counted.\n", sp_note[0] ? sp_note : "activation", why);
+    }
+    vq_abandon_all(0);
+    vq_want_stop = 1;              /* ends the take; the file closes complete */
+}
 /* The last few frame arrivals, so the writer can tell the two reasons its queue
  * can be empty apart:
  *
@@ -3081,17 +3385,38 @@ static void cap_feed_video(int stale)
         pthread_mutex_unlock(&vq_mtx);
         return;
     }
-    if (vq_count + (vq_held >= 0 ? 1 : 0) >= vq_n - 1) {
-        /* Full.  Nothing is thrown away to make room: the capture is over. */
+    int full = vq_count + (vq_held >= 0 ? 1 : 0) >= vq_n - 1;
+    /* Full in RAM, or the scratch file still holds a backlog: this pair goes
+     * to the file (see the spill block - while it holds anything, the RAM
+     * queue must stop receiving or the two blocks stop telling their order
+     * by position alone).  No room and nowhere to put the pair - the capture
+     * is over, exactly as it was before the spill existed. */
+    if (full || sp_count > 0) {
+        if (spill_cap_mb) {
+            pthread_mutex_unlock(&vq_mtx);      /* disk I/O outside the lock */
+            if (spill_append(fuv) == 0)
+                return;                         /* the pair is on disk */
+            pthread_mutex_lock(&vq_mtx);
+        }
         vq_want_stop = 1;
         cap_vrefused++;
         pthread_mutex_unlock(&vq_mtx);
-        fprintf(stderr, "pctv-monitor: SINK STALLED: the frame queue is full (%d"
-                        " frames = %d ms of cushion) and the encoder/disk is not"
-                        " taking pictures. Ending the capture: what is in the"
-                        " file is complete, and nothing further is recorded."
-                        " Raise PCTV_VQ_SLOTS or capture to a faster sink.\n",
-                vq_n, vq_n * FRAME_MS);
+        if (full)
+            fprintf(stderr, "pctv-monitor: SINK STALLED: the frame queue is full"
+                            " (%d frames = %d ms of cushion) and the encoder/disk"
+                            " is not taking pictures. Ending the capture: what is"
+                            " in the file is complete, and nothing further is"
+                            " recorded. Raise PCTV_VQ_SLOTS, give PCTV_SPILL_DIR"
+                            " a bigger local disk to spill onto (PCTV_SPILL_MB"
+                            " caps it, 0 turns the spill off), or capture to a"
+                            " faster sink.\n",
+                    vq_n, vq_n * FRAME_MS);
+        else
+            fprintf(stderr, "pctv-monitor: capture ends: the scratch file failed"
+                            " while it still held the backlog, and this newer"
+                            " picture cannot go into the RAM queue without being"
+                            " committed before them (see the SPILL FAILED line"
+                            " above). What is in the file is complete.\n");
         return;
     }
     arr_t[arr_i++ % ARR_N] = SDL_GetTicks();
@@ -3202,14 +3527,31 @@ static void a_make_chunk(void)
     }
     size_t got = 0;
     for (;;) {
+        /* The input stream is [rs_front .. ring] (see rs_front for why a
+         * restored record lands in front of the ring instead of inside it:
+         * the ring's own read window and the producer's eviction are both
+         * ring-circular-buffer facts this keeps untouched).  The window is
+         * overfed exactly like the pre-spill code overfed it - whatever the
+         * step did not reach is replayed by the next call: in the ring by
+         * the aq_sent release below, in the stub by a cursor that only
+         * advances by what was consumed.  Two mechanisms, one stream. */
+        size_t fneed = rs_front_len - rs_front_pos;
         size_t avail = (aq_count - aq_sent) & ~(size_t)3;
-        size_t takeb = avail > (size_t)RS_MAX_OUT * 4 ? (size_t)RS_MAX_OUT * 4 : avail;
-        if (!takeb || got >= need) break;               /* ring dry: pad below */
-        size_t off = (aq_head + aq_sent) % AQ_BYTES;
-        size_t first = takeb < AQ_BYTES - off ? takeb : AQ_BYTES - off;
-        memcpy(rs_buf, aq + off, first);
-        if (first < takeb) memcpy((char *)rs_buf + first, aq, takeb - first);
-        aq_sent += takeb;                   /* reserve across the resample */
+        size_t takeb = fneed + avail;
+        if (takeb > (size_t)RS_MAX_OUT * 4) takeb = (size_t)RS_MAX_OUT * 4;
+        if (!takeb || got >= need) break;             /* stream dry: pad below */
+        size_t fromf = takeb < fneed ? takeb : fneed;
+        if (fromf) memcpy(rs_buf, rs_front + rs_front_pos, fromf);
+        if (takeb > fromf) {
+            size_t off = (aq_head + aq_sent) % AQ_BYTES;
+            size_t first = takeb - fromf;
+            if (first > AQ_BYTES - off) first = AQ_BYTES - off;
+            memcpy((char *)rs_buf + fromf, aq + off, first);
+            if (takeb - fromf > first)
+                memcpy((char *)rs_buf + fromf + first, aq, takeb - fromf - first);
+        }
+        size_t fromr = takeb - fromf;        /* only ring bytes need reserving */
+        aq_sent += fromr;
         pthread_mutex_unlock(&vq_mtx);
 
         size_t used = 0;
@@ -3218,10 +3560,29 @@ static void a_make_chunk(void)
         got += produced;
 
         pthread_mutex_lock(&vq_mtx);
-        size_t rel = used * 4;              /* into the file with this commit */
-        aq_head = (aq_head + rel) % AQ_BYTES;
-        aq_count -= rel;
-        aq_sent -= rel;                     /* the rest of the window stays held */
+        /* Release what the resampler actually consumed, stub first: the stub
+         * needs no release bookkeeping (it is a cursor, and an unfinished
+         * residue at rs_front_len stays put for the NEXT picture - it is the
+         * front of its chunk), while ring bytes leave the ring proper. */
+        if (used) {
+            size_t usedb = used * 4;
+            size_t from_f = usedb <= fromf ? usedb : fromf;
+            rs_front_pos += from_f;                 /* stub: a cursor, and an
+                                                     * unfinished residue stays
+                                                     * put for the next commit */
+            size_t rel = usedb - from_f;            /* ring bytes consumed */
+            if (rel) {
+                aq_head = (aq_head + rel) % AQ_BYTES;
+                aq_count -= rel;
+            }
+            aq_sent -= rel;                         /* exactly the pre-spill
+                                                     * rule: what the window
+                                                     * did not spend stays
+                                                     * reserved for the next
+                                                     * pass */
+            if (rs_front_pos == rs_front_len)
+                rs_front_len = rs_front_pos = 0;    /* stub drained: rewind */
+        }
         if (!used && !produced) break;      /* cannot happen (4-byte frames);
                                              * bounded either way, no spin */
     }
@@ -3258,7 +3619,7 @@ static void *vq_thread(void *unused)
         /* A chunk of sound waiting for its picture's pipe is work; a ring
          * full of audio with no picture to pair it with is NOT - the coupled
          * design never drains audio on its own. */
-        int idle = !vq_count && vq_slot < 0 && !a_chunk_frames;
+        int idle = !vq_count && !sp_count && !vq_cur && !a_chunk_frames;
         int stopping = vq_stop;
         if (!stopping) {
             struct timespec ts;
@@ -3267,7 +3628,7 @@ static void *vq_thread(void *unused)
             if (ts.tv_nsec >= 1000000000L) { ts.tv_nsec -= 1000000000L; ts.tv_sec++; }
             pthread_cond_timedwait(&vq_cv, &vq_mtx, &ts);
         }
-        int work = vq_count || vq_slot >= 0 || a_chunk_frames;
+        int work = vq_count || sp_count || vq_cur || a_chunk_frames;
         pthread_mutex_unlock(&vq_mtx);
         if (stopping && !work) break;
 
@@ -3282,8 +3643,12 @@ static void *vq_thread(void *unused)
                 pthread_mutex_lock(&vq_mtx);
                 vq_head = 0; vq_count = 0; vq_held = -1;
                 aq_head = aq_count = aq_sent = 0;
+                sp_head = sp_tail = sp_pre = 0; sp_count = sp_sound = 0;
+                if (sp_fd >= 0) { close(sp_fd); sp_fd = -1; }
                 pthread_mutex_unlock(&vq_mtx);
                 a_chunk_frames = a_chunk_pos = 0;   /* we own it: no lock needed */
+                rs_front_len = rs_front_pos = 0;
+                vq_cur = NULL; vq_cur_spill = 0; vq_off = 0;
             }
             usleep(20000);
             continue;
@@ -3326,8 +3691,9 @@ static void *vq_thread(void *unused)
          * see cap_feed_video.)
          *
          * Draining (stop pressed) is not the time to invent pictures: only
-         * real queued frames go out, and when the queue is empty the thread
-         * is done.  (Counting the duplicate source as "work" here is what
+         * real queued frames go out - RAM block first, then the file's
+         * records, oldest to newest - and when both are empty the thread is
+         * done.  (Counting the duplicate source as "work" here is what
          * made cap_stop() hang: the writer re-sent the last frame into
          * ffmpeg forever, the main loop stopped pumping the probe, and 480 MB
          * of tape went past into a full stream queue.)
@@ -3365,11 +3731,13 @@ static void *vq_thread(void *unused)
                 break;              /* -2: the audio pipe is full; next pass in */
             }
 
-            if (vq_slot >= 0) {
-                /* The picture half, resumed where the pipe last left off. */
+            if (vq_cur) {
+                /* The picture half, resumed where the pipe last left off.  It
+                 * lives in a RAM slot or in the spill staging buffer - the
+                 * write itself cannot tell and does not need to. */
                 unsigned long m = SDL_GetTicks();
                 size_t done = 0;
-                int st = pipe_write(vfd, vq[vq_slot] + vq_off, UV_SIZE - vq_off,
+                int st = pipe_write(vfd, vq_cur + vq_off, UV_SIZE - vq_off,
                                     3000, &done);
                 vq_off += done;
                 if (done) vq_progress_ms = SDL_GetTicks();   /* the sink is alive */
@@ -3379,7 +3747,19 @@ static void *vq_thread(void *unused)
                     if (vq_slot_dup) cap_vrepeats++;
                     pthread_mutex_unlock(&cap_mtx);
                     int dup = vq_slot_dup;
-                    vq_slot = -1; vq_off = 0;
+                    if (vq_cur_spill) {
+                        /* Keep the duplicate-source invariant (see the queue
+                         * block): the most recent picture must be in a RAM
+                         * slot even when it arrived from disk, so a later
+                         * duplicate never needs a disk read.  No lock: the
+                         * writer owns vq_held - the producer never touches
+                         * the held slot, and nothing popped since this commit
+                         * was taken (a spilled commit is only ever taken with
+                         * the RAM queue empty). */
+                        if (vq_held >= 0 && vq_held < vq_n)
+                            memcpy(vq[vq_held], sp_in, UV_SIZE);
+                    }
+                    vq_cur = NULL; vq_cur_spill = 0; vq_off = 0;
                     if (dup)
                         /* A repeat is not a real-time event, so the watchdog
                          * moves by exactly one frame instead of re-anchoring:
@@ -3398,7 +3778,7 @@ static void *vq_thread(void *unused)
                 } else if (st == -1) {          /* the reader is gone: EPIPE */
                     pthread_mutex_lock(&cap_mtx); cap_vdrops++;
                     pthread_mutex_unlock(&cap_mtx);
-                    vq_slot = -1; vq_off = 0;
+                    vq_cur = NULL; vq_cur_spill = 0; vq_off = 0;
                     a_chunk_frames = a_chunk_pos = 0;
                     cap_died();
                     break;
@@ -3422,25 +3802,15 @@ static void *vq_thread(void *unused)
                      * still be lost, so it is counted, named in the log, and
                      * only ever reaches the tail of the file - never a hole in
                      * the middle. */
-                    pthread_mutex_lock(&vq_mtx);
-                    unsigned gone = vq_count + 1;          /* + the frame in flight */
-                    vq_abandon = 1;
-                    aq_closed = 1;                        /* else the ALSA thread keeps
-                                                           * refilling a ring nobody
-                                                           * drains and the writer can
-                                                           * never exit */
-                    size_t agone = aq_count;
-                    aq_head = (aq_head + aq_sent) % AQ_BYTES;
-                    aq_count = 0; aq_sent = 0;
-                    vq_head = 0; vq_count = 0;
-                    pthread_mutex_unlock(&vq_mtx);
-                    pthread_mutex_lock(&cap_mtx);
-                    cap_vdrops += gone; cap_adrop_bytes += agone;
-                    pthread_mutex_unlock(&cap_mtx);
-                    vq_drain_dropped += gone;
-                    vq_slot = -1; vq_off = 0;
-                    a_chunk_frames = a_chunk_pos = 0;     /* the sound half of the
-                                                           * frame given up on */
+                    /* The one way a picture is lost now: everything the sink
+                     * never got - RAM queue, spill file, the in-flight commit
+                     * and all of their sound - is counted and cleared in one
+                     * place, because since the spill arrived the dropped set
+                     * is bigger than the queue. */
+                    vq_abandon_all(1);                /* 1: commit in flight */
+                    vq_cur = NULL; vq_cur_spill = 0; vq_off = 0;
+                    a_chunk_frames = a_chunk_pos = 0; /* the sound half of the
+                                                       * frame given up on */
                     break;
                 }
                 /* st == -2: ffmpeg is behind. Keep the half-written frame and
@@ -3460,6 +3830,7 @@ static void *vq_thread(void *unused)
             unsigned long m = SDL_GetTicks();
             pthread_mutex_lock(&vq_mtx);
             int queued = vq_count;
+            unsigned long long spilled = sp_count;
             int arrivals = 0;
             for (int i = 0; i < ARR_N; i++)
                 if (arr_t[i] && (long)(m - arr_t[i]) <= ARR_WINDOW_MS) arrivals++;
@@ -3467,32 +3838,111 @@ static void *vq_thread(void *unused)
 
             int take = 0, want_dup = 0;
             if (stopping)
-                take = queued > 0;
-            else if (queued > 0)
+                take = queued > 0 || spilled > 0;   /* a drain drains BOTH */
+            else if (queued > 0 || spilled > 0)
                 take = 1;
             else if (arrivals < ARR_N / 2 && !stream_pending() &&
                      (long)(m - vq_last_ms) >= (long)(FRAME_MS + VQ_GRACE_MS)) {
-                /* nothing queued, nothing waiting to be parsed, nothing has
-                 * arrived recently: the source has really stopped */
+                /* nothing queued, nothing on disk, nothing waiting to be
+                 * parsed, nothing has arrived recently: the source has
+                 * really stopped */
                 take = 1;
                 want_dup = 1;
             }
             if (!take) break;
 
-            int slot = -1, dup = 0;
-            pthread_mutex_lock(&vq_mtx);
-            if (vq_count > 0) {
-                vq_held = vq_head;                   /* the old one is released */
-                vq_head = (vq_head + 1) % vq_n;
-                vq_count--;
-                slot = vq_held;
-            } else if (vq_held >= 0 && want_dup) {
-                slot = vq_held;                      /* nothing new: re-send it */
-                dup = 1;
+            int slot = -1, dup = 0, from_spill = 0;
+            if (queued == 0 && spilled > 0) {
+                /* The RAM block is drained, so the file's head record IS the
+                 * next pair (see the spill block's routing rule).  Two
+                 * preads because a record's sound length lives in its
+                 * header: the body then reads exactly what was written -
+                 * never a short read off the end of the allocation, and
+                 * never bytes of the record behind it.  No lock around the
+                 * reads: sp_head is this thread's while sp_count > 0, the
+                 * producer only appends at sp_tail, and the fd is never
+                 * closed while a restore might be here. */
+                struct spill_rec h;
+                ssize_t r;
+                do r = pread(sp_fd, &h, sizeof h, (off_t)sp_head);
+                while (r < 0 && errno == EINTR);
+                if (r != (ssize_t)sizeof h || h.magic != SPILL_MAGIC ||
+                        h.audio > sp_audio) {
+                    spill_lost("the scratch file's record header did not read"
+                               " back intact (a disk error)");
+                    break;
+                }
+                size_t body = UV_SIZE + h.audio;
+                unsigned char *bp = sp_in + SPILL_HDR;
+                size_t got = 0;
+                while (got < body) {
+                    do r = pread(sp_fd, bp + got, body - got,
+                                 (off_t)(sp_head + SPILL_HDR + got));
+                    while (r < 0 && errno == EINTR);
+                    if (r <= 0) break;
+                    got += (size_t)r;
+                }
+                if (got != body) {
+                    spill_lost("a record did not read back from the scratch"
+                               " file (a disk error)");
+                    break;
+                }
+                pthread_mutex_lock(&vq_mtx);
+                sp_head += SPILL_HDR + body; sp_count--; sp_sound -= h.audio;
+                int drained = sp_count == 0;
+                pthread_mutex_unlock(&vq_mtx);
+                if (drained && cap_spill_frames)
+                    fprintf(stderr, "pctv-monitor: spill done: the sink caught"
+                                    " up, all %llu pairs that went to local"
+                                    " disk this take are back in the file."
+                                    " Continuing from live.\n",
+                            cap_spill_frames);
+                if (h.audio) {
+                    /* The record's sound goes in FRONT of the ring: while
+                     * the file holds records its head carries only crystal
+                     * surplus (older than every record) and post-record
+                     * live bytes (newer than all of them), and the chunk
+                     * this commit builds has to see the capture-order
+                     * stream [stub .. ring] (see rs_front).  Compact the
+                     * previous commit's residue down first: small move, not
+                     * a hot path. */
+                    if (rs_front_pos) {
+                        memmove(rs_front, rs_front + rs_front_pos,
+                                rs_front_len - rs_front_pos);
+                        rs_front_len -= rs_front_pos;
+                        rs_front_pos = 0;
+                    }
+                    if (rs_front_len + h.audio > RS_FRONT_MAX) {
+                        /* Two full records plus slack is the budget, a
+                         * commit leaves a crystal fraction of one behind,
+                         * and getting here means the drift outgrew that
+                         * across the whole backlog - a fact, not a
+                         * warning, and it lands like any other lost read
+                         * rather than wrapping sound around the buffer. */
+                        spill_lost("the drain stub overflowed: the ADC drift"
+                                   " outgrew the spill accounting");
+                        break;
+                    }
+                    memcpy(rs_front + rs_front_len, bp + UV_SIZE, h.audio);
+                    rs_front_len += h.audio;
+                }
+                from_spill = 1;
+            } else {
+                pthread_mutex_lock(&vq_mtx);
+                if (vq_count > 0) {
+                    vq_held = vq_head;               /* the old one is released */
+                    vq_head = (vq_head + 1) % vq_n;
+                    vq_count--;
+                    slot = vq_held;
+                } else if (vq_held >= 0 && want_dup) {
+                    slot = vq_held;                  /* nothing new: re-send it */
+                    dup = 1;
+                }
+                pthread_mutex_unlock(&vq_mtx);
             }
-            pthread_mutex_unlock(&vq_mtx);
-            if (slot < 0) break;                     /* no picture yet */
-            vq_slot = slot;                          /* ours until it is in */
+            if (slot < 0 && !from_spill) break;      /* no picture yet */
+            vq_cur = from_spill ? sp_in + SPILL_HDR : vq[slot];
+            vq_cur_spill = from_spill;               /* ours until it is in */
             vq_off = 0;
             vq_slot_dup = dup;
         }
@@ -3531,6 +3981,16 @@ static int vq_start(void)
         mlock(aq, AQ_BYTES);
     }
     rs_reset();
+    /* A new take starts with no scratch file and no backlog.  The staging
+     * buffers are once per process (they are 830 KB each and cost nothing
+     * idle); if their allocation ever failed the spill quietly degrades to
+     * the pre-2026-11-04 behaviour - spill_append says so once, on the
+     * first use, and the capture ends where it used to end. */
+    if (!sp_out) sp_out = malloc(SP_IN_MAX);
+    if (!sp_in)  sp_in  = malloc(SP_IN_MAX);
+    if (sp_fd >= 0) { close(sp_fd); sp_fd = -1; }
+    sp_head = sp_tail = sp_pre = 0; sp_count = sp_sound = 0;
+    cap_spill_frames = 0; sp_fail_logged = 0; sp_note[0] = '\0';
     /* The hole detector starts from here, not from whenever the ALSA thread last
      * happened to read: an anchor from before this take would be read as one
      * enormous hole and filled with 2 s of invented silence in front of frame 0. */
@@ -3545,8 +4005,16 @@ static int vq_start(void)
     fprintf(stderr, "pctv-monitor: capture queue: %d slots = %d ms of sink-stall"
                     " cushion (%.0f MB)\n", vq_n, vq_n * FRAME_MS,
             (double)vq_n * UV_SIZE / 1048576.0);
+    if (spill_cap_mb)
+        fprintf(stderr, "pctv-monitor: spill: local-disk overflow on %s, cap"
+                        " %llu MB (PCTV_SPILL_DIR, PCTV_SPILL_MB)\n",
+                spill_dir, spill_cap_mb);
+    else
+        fprintf(stderr, "pctv-monitor: spill: DISABLED (PCTV_SPILL_MB=0): a full"
+                        " queue ends the capture (the pre-2026-11-04"
+                        " behaviour)\n");
     vq_held = -1;
-    vq_slot = -1; vq_off = 0; vq_slot_dup = 0;
+    vq_cur = NULL; vq_cur_spill = 0; vq_off = 0; vq_slot_dup = 0;
     vq_last_ms = SDL_GetTicks();
     memset(arr_t, 0, sizeof arr_t);
     arr_i = 0;
@@ -3573,7 +4041,7 @@ static void vq_stop_and_drain(void)
      * both streams move 40 ms at a time, together.) */
     pthread_mutex_lock(&vq_mtx);
     vq_stopping = 1;
-    unsigned long qn = (unsigned)(vq_count + (vq_held >= 0 ? 1 : 0));
+    unsigned long qn = (unsigned)(vq_count + sp_count + (vq_held >= 0 ? 1 : 0));
     vq_drain_deadline = SDL_GetTicks() + 30000u + qn * 100u;
     vq_progress_ms = SDL_GetTicks();
     vq_stop = 1;
@@ -3590,6 +4058,10 @@ static void vq_stop_and_drain(void)
     vq_drain_dropped = 0;
     vq_started = 0;
     vq_held = -1;
+    /* The writer is joined: nobody restores and nobody appends any more.  A
+     * drained file is normally already at EOF-as-end; either way this is
+     * where the unlinked file's space comes back. */
+    if (sp_fd >= 0) { close(sp_fd); sp_fd = -1; }
 }
 
 static int cap_start(void)
@@ -3911,13 +4383,13 @@ static void cap_stop(void)
     unsigned long long bpm = aq_bytes_per_ms();
     int ring_tail_ms = bpm ? (int)(ring_tail / bpm) : 0;
     fprintf(stderr, "pctv-monitor: capture stopped: %s (%lld B, %llu frames "
-                    "[dup %llu, skip %llu, refused %llu, qmax %d/%d frames = %d ms], "
+                    "[dup %llu, skip %llu, refused %llu, spill %llu, qmax %d/%d frames = %d ms], "
                     "%llu B audio "
                     "(%llu B silence for %llu PCM holes, %llu B padded at the drain), "
                     "%llu video drops, %llu audio drops/%llu B, %llu xruns, "
                     "ADC %+d ppm vs the card, A/V phase %+d ms, ring tail %d ms, "
                     "%llu clock windows discarded)\n",
-            cap_path, (long long)sz, vf, rp, sk, rf, qmax, vq_n, vq_n * FRAME_MS, ab,
+            cap_path, (long long)sz, vf, rp, sk, rf, cap_spill_frames, qmax, vq_n, vq_n * FRAME_MS, ab,
             sil, gaps, rs_pad_frames * 2u * 2u,
             vd, ad, adb, xr,
             (int)lrint((rs_step - 1.0) * 1e6), rs_phase_ms, ring_tail_ms,
@@ -4259,6 +4731,22 @@ int main(int argc, char **argv)
      * was the worst measured stall to GEN8 over NFS, and 2026-11-02 lost 40 min
      * of tape with a 960 ms cushion in front of a local encoder).  RAM is the
      * only cost: 829 KB per slot. */
+    {   /* spill: where and how much local disk the queue may overflow onto.
+         * The default directory must be LOCAL disk (on the capture host
+         * /var/tmp is the SSD; /tmp is not the same bet on every box), and
+         * the cap exists so a chronic-slow NFS sink can never be what
+         * fills the host's root filesystem: the effective figure is further
+         * min()'d with measured free space minus a 1 GiB floor at
+         * activation.  0 disables the spill entirely: a full queue then
+         * ends the capture, the pre-2026-11-04 behaviour. */
+        const char *v = getenv("PCTV_SPILL_MB");
+        if (v) {
+            unsigned long long n = strtoull(v, NULL, 10);
+            spill_cap_mb = n > 4194304ull ? 4194304ull : n;   /* 4 TiB guard */
+        }
+        v = getenv("PCTV_SPILL_DIR");
+        if (v && *v) spill_dir = v;
+    }
     {
         const char *s = getenv("PCTV_VQ_SLOTS");
         if (cap_master != MASTER_DVD && vq_n == VQ_SLOTS_DEFAULT)
