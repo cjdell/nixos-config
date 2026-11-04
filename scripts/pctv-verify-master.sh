@@ -14,10 +14,10 @@
 #   4. field order       idet pixel vote over 4 sampled windows
 #                        (content agrees with the flags?)
 #   5. audio             PTS continuity, peak/clipping (Flat factor),
-#                        and the tail vs the video track (the monitor's
-#                        end-of-take flush leaves ~0.3 s of audio-only
-#                        tail: harmless, but it should be ~constant, not
-#                        growing)
+#                        and the tail vs the video track: since the
+#                        2026-11-04 coupled writer the two must agree to
+#                        well under a frame - the check is symmetric and
+#                        tight (see §14.2d of the doc for what it catches)
 # Exit 0 = every check passed on every file.
 #
 # A take can only be fully verified once pctv-monitor has stopped writing
@@ -101,24 +101,22 @@ for F in "$@"; do
   note "  audio level: $lvl"
   printf '%s' "$lvl" | grep -qE 'max (-)?0(\.0+)? dB' && bad "audio peaked at 0 dB (clipping)"
   vl=$($FP -v error -select_streams v:0 -show_entries packet=pts_time,duration_time -of csv=p=0 "$F" 2>/dev/null | tail -1 | awk -F, '{printf "%.3f", $1+$2}')
-  # Signed, because the sign is the diagnosis. The monitor cuts audio to match a
-  # repeated picture, so a *short* audio track is normal and equals the cut; an
-  # audio track LONGER than the picture means sound went missing and the tracks
-  # were glued back together with stretch instead of silence - which is what a
-  # viewer experiences as the sound lagging, worst at the end of the take
-  # (docs/pctv-analog-capture.md §14.2d: pctv-cap-20261104-015210.mkv, +1.183 s).
+  # Since the 2026-11-04 rewrite the two tracks are COUPLED: audio reaches the
+  # file only inside its picture's commit (one 40 ms chunk per picture, the two
+  # written to the muxer in that order by the one writer thread), so the tracks
+  # are equal by construction and the honest check is symmetric and tight. A
+  # difference of more than a frame and a half in either direction means the
+  # coupling leaked - someone reopened a path that writes audio outside a
+  # commit, or a chunk was lost - and is exactly the class of fault that used
+  # to be diagnosed after the fact (docs/pctv-analog-capture.md §14.2d:
+  # pctv-cap-20261104-015210.mkv, +1.183 s, every counter at zero).
   sgn=$(awk -v a="$alat" -v v="$vl" 'BEGIN{printf "%+.3f", a-v}')
   ppm=$(awk -v a="$alat" -v v="$vl" 'BEGIN{if(v>0)printf "%+.0f", 1e6*(a-v)/v; else print "n/a"}')
   logline=$(grep -F "capture stopped: $(basename "$F")" "$HOME/.local/state/pctv-monitor.log" 2>/dev/null | tail -1)
-  cutb=$(printf '%s' "$logline" | sed -n 's/.* \([0-9]\+\) B cut to match the picture.*/\1/p')
   note "  track tails: video ${vl}s audio ${alat}s (audio ${sgn}s, ${ppm} ppm)"
   [ -n "$logline" ] && note "  monitor said: ${logline#pctv-monitor: }"
-  cut=${cutb:-0}
-  # audio should end up = video - cut, within the ~0.3 s flush tail plus a frame
-  awk -v a="$alat" -v v="$vl" -v cut="$cut" 'BEGIN{exit !((a - v) > 0.5)}' && \
-    bad "audio track is ${sgn}s LONGER than the picture: sound was lost and stretched back (14.2d). Expect the sound to lag by about ${sgn}s by the end of this take"
-  awk -v a="$alat" -v v="$vl" -v cut="$cut" 'BEGIN{exit !((v - a) > cut/192000.0 + 0.5)}' && \
-    bad "audio track ends more than 0.5 s before the picture, beyond its ${cut} B of deliberate cut"
+  awk -v a="$alat" -v v="$vl" 'BEGIN{d=a-v; if(d<0)d=-d; exit !(d > 0.06)}' && \
+    bad "tracks differ by ${sgn}s: coupled writes must agree to well under a frame (0.06 s ceiling) - the A/V sync guarantee leaked (14.2d)"
 
   note "  $(awk "BEGIN{printf \"%.1f s of video, %.1f GB\", $DUR, $(stat -c %s "$F")/1073741824}")"
 done

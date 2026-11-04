@@ -3,10 +3,14 @@
 #
 # The companion to capture-selftest.sh (field-level damage) and queue-selftest.sh
 # (sink-level damage).  This one is the *clock*: it drives the real
-# rs_reset/rs_run/rs_update out of pctv-monitor.c through simulated tapes - a
-# crystal that is 450 ppm off, a hole in the PCM, a stalled sink - and checks the
-# one thing a viewer notices: that the sound and the picture end up on the same
-# tape position.  No deck, no card, no two hours of wall clock.
+# cap_feed_audio/cap_feed_silence/a_make_chunk/rs_update out of pctv-monitor.c
+# through simulated tapes - a crystal that is 450 ppm off, a hole in the PCM
+# caught on time and one caught late, a stalled sink, a paused deck, a
+# chronically deep queue - and checks what the coupling owes: that every byte
+# of sound reaches the file inside its picture's commit, that E (queue depth
+# minus ring depth, the live lip error) pays back what it can see, and that no
+# seam - detected, undetected, or the wrap of the ring itself - arrives on the
+# tape un-ramped.  No deck, no card, no two hours of wall clock.
 #
 #   ./pctv-linux/avclock-selftest.sh [-v]
 #

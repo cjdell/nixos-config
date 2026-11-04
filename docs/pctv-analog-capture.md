@@ -683,6 +683,7 @@ damage: run the same seek against the original and see the identical two lines.
 | `pctv-linux/replayprobe.c` | the *other* harness: **real tape pixels** (a UYVY file) replayed as real-time BT.656, for the tests `fakeprobe` cannot do because its staircase picture is not a picture — queue depth, sink stalls, byte-identity of a master (§14.2b). `PCTV_PROBE=replayprobe REPLAY_UYVY=… PCTV_NO_SUDO=1 pctv-monitor --capture …` |
 | `/ds-public/pctv-masters` (GEN8) | where lossless masters land: 20.9 MB/s, 12.6 GB per 10 min, **151 GB per 2 h tape** — which is why it is a 17 TB pool and not the laptop SSD (§8, §14.2b) |
 | `pctv-linux/queue-selftest.sh` | the *sink* half of the regression suite: freeze ffmpeg with SIGSTOP mid-capture and assert (§14.2b) that nothing inside a file is ever lost, and (§14.2c) that quitting a wedged sink still returns |
+| `pctv-linux/avclock-selftest.sh` (+ `avclock-selftest.c`) | the *clock* half: nine simulated tapes through the real producer/commit/controller, asserting exact track equality, bounded-and-repaid phase E, refused catch-up windows and soft seams (§14.2f) |
 | `pctv-linux/README.md` | usage, keys, options; and why `driver/` (the V4L2 module) is retired |
 | `pctv-linux/COLD-BOOT-NOTES.md` | cold-boot runbook and symptom → cause → fix table |
 | `scripts/pctv-autoend.sh` (+ `-test.sh`) | tape-end watchdog and its harness (§12) |
@@ -785,8 +786,9 @@ Four more things, each cheap once the cause is picked apart:
    is the clock (a queued frame goes out immediately, so the file's cadence is the
    field cadence and no clock difference can evict anything) and the *audio* is
    resampled to the frame count instead - a 0.23 cent pitch shift, and both tracks
-   are the same length by construction.  `PCTV_CLOCK=audio` restores the old
-   writer for A/B runs.
+   are the same length by construction.  `PCTV_CLOCK=audio` restored the old
+   writer for A/B runs until it, and the whole either/or, was replaced on
+   2026-11-04 by the coupled commit (§14.2f).
 3. **Sync was measured by track *length*, not by tape position.** A duplicated or
    evicted picture advances the file's video timeline 40 ms without 40 ms of new
    content, so every one of them walks the sound out of step with the picture and
@@ -795,7 +797,9 @@ Four more things, each cheap once the cause is picked apart:
    of audio is dropped whenever a picture is repeated or evicted
    (`aq_skip_bytes`), so the two timelines stay locked to one tape position.  The
    stop line reports it separately (`N B cut to match the picture`) so it can
-   never be mistaken for a dropout.
+   never be mistaken for a dropout.  [Superseded 2026-11-04: the coupling means
+   a repeated picture never owed audio at all, and `cut`/`aq_skip_bytes` are
+   gone - see 14.2f.]
 4. **The first frame and the first audio sample were not the same instant.**
    `cap_start()` waits up to 2 s for the PCM to come up, and the audio queue was
    already filling during that wait - so a capture started right after launch
@@ -1117,6 +1121,96 @@ four spread clips in `/tmp/synccheck/` are the starting points. Note that the dr
 measured *inside* that take is what decides the span table; the 162 ppm average is
 only what its two track lengths imply, and it is not the repair.
 
+### 14.2f One clock, one commit: the coupled A/V writer (2026-11-04)
+
+§14.2d ended with the design reversed (the card is the clock, the sound is
+resampled to it) and that was necessary but not sufficient. Two takes on the
+same afternoon as that diagnosis said so.
+
+**The take that stopped early.** `pctv-cap-20261104-122137.mkv` ended by itself
+after 3827.88 s (63.8 min of a 2 h tape). Every suspect died on evidence: the
+stillness detector (content was moving at the cut point - exonerated), a
+duplicated-frame storm (a full-file framehash scan: zero consecutive identical
+frames), disk full, suspend, OOM, `PCTV_CAPTURE_SECS`, NFS *server* errors - all
+no. What the log did show is the §14.2b path firing as designed: writes to
+`/ds-public` fell below the ~20 MB/s a UYVY master needs, the 150-slot
+(6 s) picture queue filled, and the monitor ended the capture rather than
+evict pictures. That is the correct behaviour of §14.2b, not a new bug; if it
+recurs, look at GEN8 load and network during captures, not at the monitor. Its
+audio track ended 384 ms *before* the video - the same chronic disease as the
+next paragraph, read at the tail.
+
+**A second of sound, lost from the middle of the story.** §14.2d's +1.183 s
+took a repair script; this take arrived with its sound about a second *early*,
+and again no counter complained. The mechanism was structural: the writer paced
+the audio on **wall clock** while pictures committed from behind the picture
+queue, so every second of queue depth was permanently paid for by the file's
+sound sitting that much ahead of the lips of the pictures still waiting to be
+written. A chronically 1 s-deep queue (normal on NFS to `ds-public` - qmax
+reaches 109 of 150) is a chronic 1 s lip error that track lengths cannot see,
+because both tracks advanced at the same real-time rate - together, and one
+second away from the picture that owns the sound.
+
+**The fix is the coupling, not a measurement of it.** A commit is now one
+829440 B picture followed by exactly 40 ms of sound (1920 frames / 7680 B),
+written to ffmpeg's two pipes in that order, by the writer thread, and **no
+other path in the program appends to the audio pipe**. Sound leaves the ring
+only inside a commit, so a diverged pair is not discouraged - it is not
+expressible. Track equality is now exact rather than within-tolerance, and
+`scripts/pctv-verify-master.sh` checks it that way (±0.06 s, symmetric). A
+chunk that stalls in the pipe holds the *next picture* back, so a sink stall
+costs queue depth (and, past 6 s, the §14.2b capture-stop) but never divergence.
+
+What that let the rest of the design become:
+
+* **The ring holds raw ADC frames again** and resampling moved to the drain
+  (`a_make_chunk` → `rs_run_into`/`rs_pad_into`). Producers just write bytes
+  as they arrive; every consumer-visible number is now in the file's time.
+* **Two backlogs, one number.** `E = queue_ms - ring_ms` is the live lip error:
+  queued pictures own the ring's oldest sound, and anything the ring holds
+  beyond the queue's share is ahead of the lips. A sink stall deepens both at
+  the same 1000 ms/s and E does not move; a hole moves exactly one. E is what
+  the overlay (`card clock +135 ppm ph +0 ms`), the `PCTV_VERBOSE` line
+  (`ring %dms ph %+d`) and the stop line report, and what the resampler spends
+  itself draining over `RS_DRAIN_S` 120 s within ±3000 ppm.
+* **The crystal is measured over arrivals only** (`aq_raw_frames`), because
+  since the coupling the drain *is* the resampler - reading consumption back
+  would wire the instrument to its own output. A window that reads more than
+  ±5000 ppm is the pipeline, not a crystal (the 12 s SIGSTOP of §14.2d
+  measured +42362 ppm that way), is discarded, and counted as
+  `clock windows discarded`. The first good window **seeds** the step outright;
+  blending even 2 %/s from 1.0 left a ~50 s ramp in which a cold −300 ppm ADC
+  starved the drain for 16 ms of invented silence in an otherwise clean take
+  (the self-test found this too, and the cold-start residue is now < 2 ms).
+* **The 4 MiB (21.8 s) ring cannot make the muxer miss its 10 s interleave
+  ceiling any more** - not by being smaller, but because the ceiling only ever
+  applied to streams moving independently.
+* **Every seam is soft**, on the standing order from SaLou: a detected hole's
+  zeros ramp *into* the ring at the gap (`cap_feed_silence`); a hole caught
+  late lags by its length, E sees it, and the step pays it back; an undetected
+  one starves the drain, which pads (`rs_pad_into`, now counted as
+  `… B padded at the drain` in the stop line). The fade-down and fade-up are one
+  continuous gain envelope (`rs_gain`, fixed 1/96 per frame) - the self-test's
+  click scan found two real bugs on the way (the fade reading a source it had
+  already zeroed shipped `[last, 0, 0, …]` = 1079 units against a 209-unit tone
+  slope, and a short pad's too-fast re-arm stepped 1248 units).
+* **Frame 0 keeps exactly the queue's own sound.** Everything older is
+  pre-roll (captured before the file's first picture existed) and is dropped -
+  but clearing the *whole* ring also destroyed the sound belonging to pictures
+  already queued at frame 0, the one misalignment E structurally cannot see.
+  And the keep is queue+1: the frame being committed is `vq_held`, not
+  `vq_count`, and dropping its 40 ms put a soft pad and a half-frame lip error
+  at the head of every take.
+
+`pctv-linux/avclock-selftest.c` grew into the gate for all of it: nine simulated
+tapes (both crystals over 2 h, a 12 s sink stall, a hole caught on time, one
+caught late, one caught never, a deck pause, the chronic-deep-queue regression)
+driven through the real producer, real commit and real controller, asserting
+track equality *exactly*, E bounded and paid back, the step settling on the
+injected ppm, catch-up windows refused, and no sample-to-sample step over 800
+anywhere in the recorded audio. `./avclock-selftest.sh` - fast, and the first
+thing to run after touching anything in the commit machine.
+
 ### 14.3 The system tuning that keeps the deadline
 
 All of it in `pctv_probe` at stream start (it is root, and it is the only stage
@@ -1160,13 +1254,13 @@ launched from the menu) and judge it by these numbers, in this order:
 | `skip` | 0 — the counter is now a bug detector, nothing more | it used to mean "the encoder could not keep up, oldest picture evicted". That policy is gone (14.2b); any nonzero `skip` is a defect |
 | `refused` | 0 | pictures that arrived after the queue filled and the capture was ended on purpose. `SINK STALLED` names it. A nonzero `qmax` in the same line (e.g. `qmax 148/150`) says the sink was behind for ~6 s: check the mount, then the master format |
 | `qmax N/150 frames` | ≤ a handful | the deepest the picture queue ever got. Near the depth means the capture stopped because the sink was slower than the tape, not because the tape ran out |
-| `cut to match the picture` | 0 | it is not a dropout - it is the 40 ms of audio removed per repeated/evicted picture to keep the two timelines on the same tape position (14.2.3). It shortens the audio track *on purpose*; it must never pace the resampler (14.2d) |
+| `B padded at the drain` | 0 | sound the *file* needed and the ring could not cover - an **undetected** PCM hole (a detected one reads in `silence for N PCM holes` instead). Every padded stretch is ramped in and out, so it costs audio, never a click; more than a few hundred ms says sound vanished without the gap detector noticing |
 | `ADC +/- ppm` | stable, |x| < 500 | the correction being applied, not an error: the crystal difference, now measured over a 1 s window instead of since the start of the take. It is bounded to 3000 ppm because resampling harder than that would be audible, and a window reading more than 5000 ppm is discarded as not-a-crystal (a stall, a reopen, a device that stopped) and counted in `clock windows discarded` instead of believed |
 | `A/V phase +/- ms` | inside ±20 ms at the end | **this is the lip-sync error**, in milliseconds, and it is the number that was missing on 2026-11-04: a 2 h take finished 1.183 s out of step with every other counter reading zero (14.2d). Over 100 ms the monitor says so at stop. Watch the *tail* of a take, not the head - the error accumulates |
 | `silence for N PCM holes` | 0, or a few hundred ms over hours | sound the ADC lost (overrun, reopen, PipeWire restart, the audio thread not scheduled) and the monitor stood in for, at the instant it went missing. The picture stays true to the tape; this is what the tape is missing. Unfilled, those holes used to be paid for by stretching the rest of the recording - that was the second of desync |
 | `xruns` | 0, or a handful over hours | ALSA said the overrun out loud; each one is also a `PCM hole` and filled with silence |
 | `clock windows discarded` | 0, or a couple over hours | windows too far off the card to be a crystal. A large number means the pipeline, not the clocks - read it with `A/V phase` |
-| video vs audio stream duration | audio shorter by exactly `cut`, otherwise equal | a *longer* audio track is the bug signal: it means sound was lost and the tracks were glued together with stretch instead of silence (14.2d). `pctv-verify-master.sh` prints this; `A/V phase` in the log is the same measurement before the file is even closed |
+| video vs audio stream duration | **equal to well under a frame**, both directions | since the coupled writer (14.2f) the two tracks advance 40 ms together or not at all, so *any* difference over ~0.06 s means the coupling leaked - a path that writes audio outside a commit came back. `pctv-verify-master.sh` enforces this symmetrically; `A/V phase` in the log is the same clock's live reading before the file is even closed |
 
 **Or prove it without a deck:**
 
@@ -1198,6 +1292,8 @@ fast and the audio would be resampled 0.5 % to match (8 cents - audible on music
 irrelevant on speech, and physically correct: both are on the same capstan).  A
 VCR's servo holds the field rate to ~0.1 % anyway, and the alternative - letting
 the picture hitch to protect a pitch nobody can hear - is the wrong trade for a
-picture archive.  `PCTV_CLOCK=audio` is there if a run ever wants the other side of
-it.
+picture archive.  The alternative `PCTV_CLOCK=audio` offered was retired on
+2026-11-04: with the coupled commit (§14.2f) there is no longer a second
+mode - the sound is written *with* each picture, and the resampler ratio is
+what spends the crystals' disagreement instead of a mode switch.
 

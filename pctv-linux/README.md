@@ -393,22 +393,31 @@ Matroska twin (which fixes the label, never the MPEG-2 bitstream).
   watchdog: if the source stops producing frames for longer than a frame period
   (+30 ms) the last picture is repeated, so a paused deck or an input switch
   cannot shorten the video track.  The overlay calls this `card clock`.
-  `PCTV_CLOCK=audio` restores the 2026-11-01 design (the writer paced by the PCM
-  byte count), which is exact in the file and pays with a duplicated/evicted
-  frame every time the clocks disagree by 40 ms.  Full reasoning and the
-  measurements: `docs/pctv-analog-capture.md` §11 and §14.
+* **One commit, one pair: the audio is written as part of the picture's
+  commit.**  Since 2026-11-04 the writer's unit of work is one 829440 B picture
+  followed by exactly 40 ms of sound (1920 frames at 48 kHz), to the two pipes in
+  that order and by no other path in the program.  Sound leaves the audio ring
+  *only* inside a commit, so the muxer can never see one track advance without
+  the other and A/V sync is a property of the write, not something a log line
+  reports afterwards.  `PCTV_CLOCK` (the audio-paced legacy writer of
+  2026-11-01) was retired the same day; setting it now only prints a warning.
+  Full reasoning and the measurements: `docs/pctv-analog-capture.md` §11, §14.2f.
 * **The audio is resampled onto that timeline.**  The card's 25 fps comes from
   the incoming video signal and the PCM from the host codec's own crystal; on
   this box they differ by ~135 ppm = 1 s per two hours.  Rather than let that
-  cost pictures, `rs_update()` measures the ratio against the number of frames
-  written and linearly resamples the audio by it (0.23 cents of pitch - nothing
-  on a tape).  Both tracks are then the same length by construction, and the
-  overlay/stop line print the measured ppm.
-* Nothing is dropped to keep up any more: the audio queue is 1 MiB (5.5 s), the
-  video ring 960 ms and the encoder's own video pipe 8 MiB (10 frames), and both
-  pipes are non-blocking with a resume-on-partial write, so a stalled encoder
-  costs latency and, at the very worst, counted drops - never a wedged GUI, a
-  corrupted stream or a hung `c`.
+  cost pictures, `rs_update()` measures the crystals' ratio over the ADC's
+  *arrivals* (reading the drain back would be an instrument wired to its own
+  output) and spends it - plus the live phase error `E` = picture-queue depth
+  - audio-ring depth - linearly resampling the sound at the commit (the
+  overlay shows both: `+135 ppm  ph +0 ms`; on a tape 0.23 cents of pitch is
+  nothing).  Both tracks are then the same length by construction, exactly, and
+  the stop line repeats the figures.
+* Nothing is dropped to keep up any more: the audio ring is 4 MiB of raw ADC
+  frames (21.8 s - the depth only ever matters against the 6 s picture queue it
+  shadows), the video ring 960 ms and the encoder's own video pipe 8 MiB
+  (10 frames), and both pipes are non-blocking with a resume-on-partial write,
+  so a stalled encoder costs latency and, at the very worst, counted drops -
+  never a wedged GUI, a corrupted stream or a hung `c`.
 * **`dup` and `skip` are the two numbers that say whether the recording kept every
   picture.** `dup` = the source delivered no new picture in time (one frame
   written twice - a visible drag); `skip` = the queue filled and the oldest frame
@@ -455,7 +464,7 @@ Knobs for the capture path (all environment, all optional):
 | `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
 | `PCTV_URBS` | 128 | how many 32 KiB URBs stay posted on the endpoint: the card's *own* FIFO cushion, 8..512 (128 = 4 MiB = 155 ms). 24 (~28 ms) was the old value and cost a field every few seconds on a busy box |
 | `PCTV_TUNE` | 1 | `0` skips the probe's stream-time tuning (cpu_dma_latency, cpufreq `performance`, usbfs_memory_mb) for an A/B run |
-| `PCTV_CLOCK` | `video` | `video` = the card is the clock and the audio is resampled to it (the default, cannot cost a picture); `audio` = the 2026-11-01 audio-paced writer |
+| `PCTV_CLOCK` | - | **retired 2026-11-04**: both capture-clock modes were replaced by the coupled commit (one picture + its 40 ms of sound, written together - see §14.2f of the doc); setting it only logs a warning now |
 | `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
 | `PCTV_LOG` | file when detached | `$XDG_STATE_HOME/pctv-monitor.log` holds every line when there is no terminal (the desktop launcher has none, so `dup`/`skip`/`held` used to vanish with it); `PCTV_LOG=/path` picks the file, `PCTV_LOG=0` keeps stderr as-is |
 | `PCTV_MASTER` | `dvd` | `dvd` / `uyvy` / `ffv1` (`--master` on the command line) |
