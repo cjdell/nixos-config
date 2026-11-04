@@ -106,7 +106,16 @@ let
       packDir = "${modelDir}/pack/ud-iq4-xs";
       nativeGguf = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-GGUF/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf";
       pleGguf = null;
-      modelName = "qwen3.8-flash-next-ud-iq4-xs";
+      # The "-unsloth-" marker is load-bearing since 2026-11-04: DFlash2's gate
+      # (strata_control/drafting.py _SUPPORTED_NAME) accepts only
+      # -gyro-* / -unsloth-* / a bare (q|iq|tq)N quant suffix after
+      # "qwen3.8-flash-next", and the old "...-ud-iq4-xs" shape silently lost
+      # DFlash2 ("Drafting: MTP (DFlash2 is for Qwen3.8-Flash-Next only)").
+      # UD *is* Unsloth Dynamic, so the marker is honest. The name is cosmetic
+      # at runtime: serve routes any requested model to the loaded one, so no
+      # client config depends on it - but /v1/models and /metrics echo it, and
+      # it must keep matching that regex (re-check on version bumps).
+      modelName = "qwen3.8-flash-next-unsloth-ud-iq4-xs";
       extraArgs = [
         "--resident-budget-gib"
         "55"
