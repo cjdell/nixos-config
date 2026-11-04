@@ -1048,6 +1048,75 @@ through simulated tapes with time driven by hand — a 2 h tape in milliseconds:
 | 2 h, 12 s sink stall | 0 ms | bounded (this used to read +42362 ppm) |
 | 6 min, flow reads +18000 ppm | reported, not smeared | 0 ppm: 356 windows discarded as not-a-crystal |
 
+### 14.2e Repairing a master that is already out of step, without re-capturing (2026-11-04)
+
+The capture is fixed for takes from today on, but the masters already on `ds-public`
+still have it, and **the lag grows**, so the two obvious repairs are both wrong. A
+single shift (`-af adelay`) is right at one instant and wrong everywhere else. A
+single tempo change - a shift's other form, `-af asetrate=48000*1.000162,aresample=48000`
+for the Cotswold take's 162 ppm - assumes the drift was linear in time, and it was
+not: the rate tracked how long the picture queue spent deep (§14.2d), so it wanders
+inside one take and changes sign between takes. The tool for the existing files is
+`scripts/pctv-desync-repair.sh`.
+
+**What works is a piecewise tempo correction.** Measure the lag at a handful of
+timestamps, treat it as piecewise linear between them, and give each span the tempo
+that loses exactly the drift that span collected:
+
+```
+new[p] = old[p + d(p)]            factor = (L + drift) / L
+```
+
+A 1200 s span shedding 195 ms plays at 1.000163: 163 ppm, 0.28 cents - the same
+inaudible order of resampling the capture path already does by design (§14.2.2).
+Nothing is cut out of the middle and nothing is spliced, so there are no clicks and
+no lost content; the sound is *stretched*, it lands exactly on the picture at every
+anchor, and between anchors it is off by less than the anchors are apart. Only the
+front `d0` ms is dropped, which is sound from before the first picture.
+
+Two implementation traps, both hit here:
+
+- **Not `atempo`.** It is WSOLA; at 1.0002 it does arithmetic the signal does not
+  need and can breathe on sustained tones. Plain resampling does this exactly.
+- **`asetrate` takes an *integer* sample rate**, so at 48 kHz its tempo granularity
+  is 1/48000 = 20.8 ppm - 25 ms over a 20-minute span, which is most of the error
+  being repaired. Every span therefore goes up to 480 kHz first, is reinterpreted
+  there (1.04 ppm granularity) and comes back: 0.3 ppm measured, under a millisecond
+  over a 1200 s span.
+
+### The procedure
+
+1. **Measure.** `--clip OUT.mp4 T FILE [NUDGE_MS]` cuts a 12 s preview at picture
+   time `T`; the master seeks instantly (its cues), so this is seconds. `NUDGE_MS`
+   moves the clip's audio to test a guess - positive moves the sound *earlier*,
+   which is what a late sound needs - so an anchor converges in two or three cuts:
+   nudge 600 and it is still late, nudge 1200 and it is early, the truth is near
+   900. Write the table down as `picture_seconds:ms_behind`. Keep the clips on
+   `/tmp`, never on `ds-public` (§12.3). Take an anchor every 15-20 min, and one at
+   the very start and the very end.
+2. **`--plan FILE "P:MS,..."`** prints the spans, the source window each one reads,
+   the factor and the ppm, and writes nothing. Read it: a span asking for more than
+   ~3000 ppm means two anchors are too close or one was mis-measured, and the script
+   refuses to go on. The total removed must equal the measured end lag.
+3. **Fix the audio, not the master** - `--audio fixed.wav FILE "P:MS,..."`. It reads
+   the master once (its PCM is interleaved with 152 GB of video, so that read is
+   unavoidable) and writes 1.4 GB. Then let the encode you were going to do anyway
+   carry it: `ffmpeg -i master.mkv -i fixed.wav -map 0:v:0 -map 1:a:0 -c:v <encode>
+   -c:a pcm_s16le out.mkv`. `--remux` will instead rebuild the master with the video
+   stream-copied - bit-identical frames - but it reads *and writes* the whole 152 GB,
+   so it is for when you truly want the master back in step, not for the delivery
+   copy. `--from WAV` reuses an audio extract already made; `--to S` forces the track
+   to the video's length (default: the master's video duration tag).
+4. **Verify.** Re-cut an anchor clip from the output and check the lag reads 0 there
+   (`--clip` with no nudge), then `scripts/pctv-verify-master.sh`, which now reports
+   the tail difference signed and in ppm (§14.2d).
+
+The anchors for the Cotswold take (`Cotswold ⁄ Holidays ⁄ Chris in School at
+Christmas.mkv`, 1.183 s late at the end, 162 ppm average) are not measured yet - the
+four spread clips in `/tmp/synccheck/` are the starting points. Note that the drift
+measured *inside* that take is what decides the span table; the 162 ppm average is
+only what its two track lengths imply, and it is not the repair.
+
 ### 14.3 The system tuning that keeps the deadline
 
 All of it in `pctv_probe` at stream start (it is root, and it is the only stage
