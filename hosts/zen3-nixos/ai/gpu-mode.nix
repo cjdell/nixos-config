@@ -25,6 +25,7 @@
         lib.makeBinPath [
           pkgs.coreutils
           pkgs.curl
+          pkgs.gnugrep # in_flight() greps /slots; grep is NOT in coreutils
           pkgs.gnused
           pkgs.rocmPackages.amdsmi
           pkgs.systemd

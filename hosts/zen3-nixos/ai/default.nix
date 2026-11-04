@@ -32,7 +32,9 @@
     # ./diamcp.nix
     ./gpu-panel.nix
     ./gpu-mode.nix
-    # ./llama-log-viewer.nix
+    # Re-enabled 2026-11-04: avalon.nix passes --log-prompts-dir, so
+    # llama-logs/ is being written again and the viewer has something to read.
+    ./llama-log-viewer.nix
     # llama-swap is DISABLED while the single-model Qwen3.8-Flash-Next server
     # runs: both want the R9700's VRAM and tens of GB of RAM, and that server
     # exists to run a model llama.cpp (stock) cannot fit. Re-enable this import

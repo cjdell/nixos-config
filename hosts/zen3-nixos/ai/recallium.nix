@@ -235,37 +235,46 @@ in
         # Stable LLM endpoint for Recallium's OpenAI provider (container's
         # base_url in llm_provider_accounts id 3 is fixed at
         # http://host.containers.internal/recallium-llm). The prefix is
-        # stripped and the call is proxied to Strata on loopback (./strata.nix,
-        # 127.0.0.1:8080) - the same upstream as the strata.ai.chrisdell.info
-        # vhost, reached directly instead of hairpinning through TLS and the
-        # public IPv6 address. Nothing in the container's DB has to change:
-        # Strata serves one model and routes by engine, not by the requested
-        # name, so the stale `Qwen3-4B-Instruct-2507-Q4_K_M` in
-        # llm_provider_configs still works (verified: /v1/chat/completions with
-        # an unknown model returns the loaded qwen3.8-flash-next-ud-iq4-xs).
+        # rewritten to /v1/ and the call is proxied to Avalon on loopback
+        # (./avalon.nix, 127.0.0.1:8080) - the same upstream as the
+        # strata.ai.chrisdell.info vhost, reached directly instead of
+        # hairpinning through TLS and the public IPv6 address. Nothing in the
+        # container's DB has to change: llama-server ignores the requested
+        # model name, so the stale `Qwen3-4B-Instruct-2507-Q4_K_M` in
+        # llm_provider_configs still works (verified 2026-11-04: a
+        # /v1/chat/completions with an unknown model returns the loaded
+        # qwen3.8-flash-next).
         "/recallium-llm/" = {
           proxyPass = "http://127.0.0.1:8080";
           extraConfig = ''
             rewrite ^/recallium-llm/?(.*)$ /v1/$1 break;
-            # Strata's DNS-rebinding guard 403s any Host it was not told about
-            # ("Host 'host.containers.internal' is not allowed"), and
-            # recommendedProxySettings forwards the client's Host verbatim -
-            # which from the container is host.containers.internal. The upstream
-            # IS loopback, so name it: 127.0.0.1 is allowed by default, while
-            # strata.nix's allowed_hosts carries only the public names.
+            # llama-server's DNS-rebinding guard (httplib + CDM delay) refuses
+            # or stalls any Host it was not told about - from the container
+            # that would be host.containers.internal. The upstream IS loopback,
+            # so name it: 127.0.0.1 is allowed by default.
             proxy_set_header Host 127.0.0.1;
-            # LLM calls can take minutes: Strata serves ONE slot
-            # (concurrency.serving: 1), so a Recallium metadata extraction can
-            # queue behind a full-length interactive request before it is even
-            # prefilled. Match strataRootLocation's timeout.
+            # The rest of recommendedProxySettings, spelled out - NOT via
+            # recommendedProxySettings itself: its include re-sets
+            # `proxy_set_header Host $host`, nginx then sends TWO Host lines,
+            # and llama.cpp's httplib answers the duplicate with a bare 400
+            # (Content-Length: 0). Strata's aiohttp tolerated the duplicate,
+            # so this only broke when :8080 moved to Avalon on 2026-11-04.
+            # Verified: one Host line (any name) = 200, two = 400.
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # LLM calls can take minutes: the engine serves ONE slot
+            # (--parallel 1), so a Recallium metadata extraction can queue
+            # behind a full-length interactive request before it is even
+            # prefilled. Match avalonRootLocation's timeout.
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
             # A memory-processing prompt carries the whole session; nginx's
             # 1 MiB default body cap would 413 a large-context extraction
-            # before Strata saw it (Strata's own cap is 32 MiB).
+            # before the engine sees it (Strata's own cap was 32 MiB).
             client_max_body_size 32m;
           '';
-          recommendedProxySettings = true;
+          recommendedProxySettings = false;
         };
 
         # The Recallium UI derives its API base URL from the page's origin
