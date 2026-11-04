@@ -52,15 +52,42 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.2.7.1";
+  version = "0.2.10";
 
-  # v0.2.7.1 (2026-10-28, rev 46c152a1) - the current release AND main's HEAD at update time: the annotated
-  # tag v0.2.7.1 points exactly at 46c152a1, so this is bleeding edge with nothing newer above it.  Follows
-  # 0.2.2..0.2.7 (2026-10-21..27).  CMakeLists.txt:11 `project(strata VERSION 0.1.53 LANGUAGES CXX)` is the
-  # engine (the app/Terminal/Control are 0.2.7.1 and NOT built here).  Like 0.2.x before it, we build only
-  # the engine + serve layer from source, and serve/ still IMPORTS strata_control/strata_cli (installPhase
-  # ships them).  NOTE: upstream rewrote this repo's history on 2026-10-06, so pins older than that have no
-  # common ancestor with main - diff two trees, not GitHub.
+  # v0.2.10 (2026-11-02, rev db0500a5) - the current release AND main's HEAD at
+  # update time (the GitHub compare of v0.2.10...main says "identical"), engine
+  # 0.1.56 (CMakeLists.txt:11). Follows 0.2.7.1/46c152a1 (2026-10-28).
+  #
+  # 0.2.7.1 -> 0.2.10 (checked against the trees, not the changelog; only what this build touches):
+  #   * The pinned llama.cpp is UNCHANGED: setup.py:237 LLAMA_CPP_COMMIT is still 3cf03257, so our `llama`
+  #     fetch and every ggml hash move not at all.
+  #   * THE AUDIT PATCH RE-BASED 2026-11-04: 3 of the 19 hunks rejected and were re-placed by hand, all
+  #     pure context shifts with the audit lines byte-identical: two in verify.cpp (upstream inserted a
+  #     strata::dispatch::notef() between the hits_in_combine compute and moe_hit_add, and widened the
+  #     tap_on_ gate to `(!batch_rec_ || tap_batch_)` for DFlash2) and one in iq_kernels.cu (the trailing
+  #     context line native_expert_set_expdec gained a tri-state: `on < 0 ? -1 : (on ? 1 : 0)`). The other
+  #     16 moved by offsets only. Regenerated from the patched tree: `patch -p1 --fuzz=0` with NO offsets
+  #     and `git apply --check` both clean on db0500a5. The #879 anchors (nf_mask_, hits_in_combine) intact.
+  #   * postPatch clamps: kv_q8.cu's target is still UNIQUE and still unclamped, still at :55;
+  #     prefill/kernels.cu's moved from :2257 to :2509 (was 2199 on 0.2.1.1), still exactly once and still
+  #     unclamped, hf_sat still defined above it. Both --replace-fail targets re-checked on db0500a5.
+  #   * serve/server.py: both installPhase rewrite targets still present exactly once; the retryable
+  #     "server error" prefix rewrite still applies. The engine launch is unchanged.
+  #   * Python surface: server.py gained three module-scope imports (strata_control.tls, .drafting,
+  #     .vram_fit) - all stdlib-only on that path (tls: ssl/sys; drafting: + mmap; vram_fit: clean), so
+  #     serverPython needs no changes.
+  #   * DRAFTING, the behaviour change to KNOW: 0.2.10 makes DFlash2 - a downloadable block drafter
+  #     (tools/dflash2_pack.py), not the MTP - the Auto pick for Qwen3.8-Flash-Next on CUDA/HIP/Metal/SYCL,
+  #     upstream measuring +6.6 % short / +4.2 % long decode on an R9700. We stay on the MTP: the config
+  #     now pins "drafting": "mtp" (see ./strata.nix) - decide() answers MTP anyway because the pack is
+  #     NOT_DOWNLOADED (data/ lives in the read-only store), but the pin survives any future default or
+  #     data_dir change. An engine started without --draft dflash2 never loads DFlash2 (default mtp).
+  #   * The 0.2.10 all-cards split engine starts from `strata launch`/the Terminal and needs exactly two
+  #     NVIDIA cc 8.6/12.0 or four R9700 cards - our serve + --config path and our one card are both out
+  #     of its way; no split_engine config key needed.
+  #   * 0.2.8: the automatic expert cache now respects the requested VRAM reserve (#4474). 0.2.9: fixes a
+  #     Qwen3.6 warm-up KV overrun - not our family. The gfx12 defaults notes for 0.2.5-0.2.7 below still
+  #     describe our runtime.
   #
   # 0.2.1.1 -> 0.2.7.1 (checked against the trees, not the changelog; only what this build touches):
   #   * THE AUDIT PATCH IS STILL THE ONLY NON-UPSTREAM CODE, AND #879 IS NOT DEAD (the 2026-10-19 repro on
@@ -139,8 +166,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "46c152a1310f77cd2f0ce2c7cd213962df14fe83";
-    hash = "sha256-NVlhcOgfpAkfI6Qk9RTD5caMNQlmALcT+YGyRMSR9sw=";
+    rev = "db0500a53119a349fa44497099d6e28a83ded34a";
+    hash = "sha256-cIBcdKRYVH78bu4sElF0XK/wedcLTK8tu12c0Alzlw8=";
   };
 
   nativeBuildInputs = [
@@ -181,15 +208,14 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Our kernel AUDIT port (2026-10-05, from the 0.1.35 audit build; the HIP-adapted copy
   # of the upstream #879 reporter's instrumentation, gist 66419118nnn /
-  # 7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact pin 46c152a1 (v0.2.7.1) on
-  # 2026-10-29: all 19 hunks apply with --fuzz=0 and NO offsets (checked against the fetched
+  # 7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact pin db0500a5 (v0.2.10) on
+  # 2026-11-04: all 19 hunks apply with --fuzz=0 and NO offsets (checked against the fetched
   # tree with both `patch -p1 --fuzz=0` and `git apply --check`), landing in
   # Verifier::init/record_window/run and inside native_expert_grouped - the #879 suspect site,
-  # still untouched upstream (0.2.2..0.2.7's changed lines in iq_kernels.cu are the S26/S27
-  # v2/v2k expert paths, the nibble/expdec launch branches and the NVFP4 dequant work, not our
-  # IQ4_XS kernels).  The 280 added
-  # lines are byte-identical to the 0.2.1.1 file - only the hunk line numbers moved (six
-  # hunks were re-placed by hand: see the src comment).  Regenerated
+  # still untouched upstream (0.2.8..0.2.10's changed lines in iq_kernels.cu are the
+  # DFlash2 kernels the split engine work added and the expdec tri-state setters, not our
+  # IQ4_XS kernels).  The added lines are byte-identical to the 0.2.7.1 file - three hunks
+  # were re-placed by hand (see the src comment), the rest moved by offsets.  Regenerated
   # from the patched tree, so every hunk applies with --fuzz=0; do not re-apply an old
   # file with fuzz (fuzz 3 once put the arena carve inside the mapped() chain and the
   # input audit inside the PLE try block).  #879 proved the repeated-token degeneration
@@ -219,9 +245,9 @@ stdenv.mkDerivation (finalAttrs: {
   # degeneracy the guard in serve/server.py exists to end (upstream #606;
   # ggml-org/llama.cpp#23606 is the same defect).
   #
-  # STATUS ON 0.2.7.1 (checked against the tree, not the changelog): 0.2.2..0.2.7 changed NEITHER
+  # STATUS ON 0.2.10 (checked against the tree, not the changelog): 0.2.8..0.2.10 changed NEITHER
   # clamp site into a clamp - kv_q8.cu's int8 append is still unclamped at :55 (still unique), and
-  # prefill/kernels.cu's clamp (3) target is still unclamped, having moved to :2257 -
+  # prefill/kernels.cu's clamp (3) target is still unclamped, having moved to :2509 -
   # and upstream #1448
   # ("q8_1 scale overflow at the three remaining emit sites is clamped like the
   # others") landed in 0.1.41 and took over one of ours.  The three sites our 0.1.39
@@ -233,11 +259,11 @@ stdenv.mkDerivation (finalAttrs: {
   # GONE here: its target strings no longer exist and --replace-fail would break the
   # build.  What is still unclamped upstream, and still ours:
   #   * the int8 KV cache block scale, decode (kv_q8.cu:55) and prompt
-  #     (kv_append_kernel, prefill/kernels.cu:2257 - it moved from 2199 in 0.2.1.1, 1702 in
-  #     0.1.44.1, 1691 in 0.1.43 and 1340 in 0.1.42; hf_sat is still defined above it, at :64) -
+  #     (kv_append_kernel, prefill/kernels.cu:2509 - it moved from 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in
+  #     0.1.44.1, 1691 in 0.1.43 and 1340 in 0.1.42; hf_sat is still defined above it) -
   #     never covered by #606 nor by #1448, and the site our incident-2
   #     132,947-token prompt was fixed by.  Still live: we run --kv int8.  Both --replace-fail
-  #     targets are still UNIQUE in their file (checked on 46c152a1).
+  #     targets are still UNIQUE in their file (checked on db0500a5).
   # #1448 also clamped the two sites we had deliberately left alone - fused_gr.cu
   # gr_q8_tail and verify_kernels.cu gdn_q8_1_store, both behind STRATA_QFUSE (off on
   # gfx1201) - so that "re-visit if STRATA_QFUSE is ever turned on" note is closed:
