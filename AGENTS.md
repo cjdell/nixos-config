@@ -680,7 +680,8 @@ its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
   **`client_max_body_size 32m;`** (nginx's 1 MiB default 413s a whole-session
   metadata prompt).
 - **Active model:** whatever the :8080 engine serves — Strata's
-  `qwen3.8-flash-next-ud-iq4-xs` via `config.ai.strataModel` again since
+  `qwen3.8-flash-next-unsloth-ud-iq4-xs` (renamed 2026-11-04 for the DFlash2
+  name gate, see the Strata section) via `config.ai.strataModel` again since
   2026-11-04 (the brief Avalon interlude served `--alias qwen3.8-flash-next`).
   Recallium's DB row still says
   `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, provider
@@ -1138,15 +1139,29 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
 `hosts/zen3-nixos/ai/strata.nix`. Upstream's R9700 rows: 0.1.43 decode +2–10 % / prompt
 +12–14 %; 0.1.44 adds +2.5–4 % from HC_Q8. Details: `docs/strata.md` "0.1.43".
 
-- **0.2.10 made DFlash2 the `auto` drafter pick** (a downloadable block drafter from
-  `tools/dflash2_pack.py`, NOT the MTP head) for Qwen3.8-Flash-Next on CUDA/HIP/Metal/SYCL —
-  upstream measures +6.6 % short / +4.2 % long decode on an R9700, one-request-at-a-time only.
-  We pin **`"drafting": "mtp"`** in `strata.nix`'s `configFile`: without a pack,
-  `strata_control/drafting.py::decide()` already answers MTP (`not-downloaded` — `data/` lives
-  in the read-only store, so a pack cannot appear by accident), and an engine started without
-  `--draft dflash2` never loads DFlash2 at all; the explicit pin just survives any future
-  default change. Trying DFlash2 for real = build the pack and point the drafting choice at
-  it (config keys in `strata.nix`), then A/B decode + draft acceptance.
+- **DFlash2 is LIVE as the drafter since 2026-11-04** (`"drafting": "dflash2"` in
+  `strata.nix`'s `configFile`): 0.2.10 made it the `auto` pick for Qwen3.8-Flash-Next on
+  CUDA/HIP/Metal/SYCL — incoai's block drafter (packed from their pinned safetensors by
+  `strata_control/drafting_fetch.ensure()`, pack sha checked against upstream's PINNED
+  bytes), which serve's `drafting.apply()` starts **instead of** the MTP head (strips
+  `--mtp`/`--spec-min-p`/our `--spec`, adds `--draft dflash2 --draft-model <pack>
+  --draft-fallback none --spec 8 --draft-conf 0.5`). The packs live in
+  `/home/cjdell/Strata/dflash2/` (`data_dir` derives from our `--mtp` arg) — the
+  **selq4** pack (339 MB, selector codebooks Q4_0, "about 174 MiB less") is the one
+  `pack_path()` picks because our HIP engine reads it. A/B on identical 700-token prompts
+  (6+6 samples): **decode 60.6 vs 59.1 mean (+2–2.5 %, upstream claims +6.6/+4.2 on
+  IQ3_S), draft acceptance 71–78 % vs MTP's 68.7 %, and expert slots UP 10608→10717** —
+  the VRAM-contention worry never materialised, the selq4 drafter costs less than the MTP
+  draft path it replaces; live agent traffic shows 95–98 % cache hits.
+  ⚠️ **Name gate:** `drafting.py::_SUPPORTED_NAME` accepts only `qwen3.8-flash-next` +
+  `-gyro-*`/`-unsloth-*`/a `(q|iq|tq)N` quant suffix, so the pack was renamed
+  **`qwen3.8-flash-next-unsloth-ud-iq4-xs`** (`modelName` in `strata.nix`) — the old
+  `...-ud-iq4-xs` shape silently answered `Drafting: MTP (DFlash2 is for
+  Qwen3.8-Flash-Next only)`. The name is cosmetic at runtime (serve routes by engine) but
+  `/v1/models` and `/metrics` echo it and **it must keep matching that regex on any
+  future rename or Strata bump**. `--draft-fallback none` means a drafter that cannot
+  start FAILS the service start rather than silently running MTP — if strata ever
+  crash-loops on boot after a bump, `"drafting": "mtp"` is the one-line revert.
 - **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
   sets `"ud-iq4-xs"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
   carries `models.iq3s` / `models.ud-iq4-xs` (GGUF + pack paths, `--ple-gguf` only for
