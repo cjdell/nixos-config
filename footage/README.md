@@ -171,6 +171,27 @@ just footage  --denoise light --grade --crop 700x556+10+2 captures/pctv-cap-x.mk
   **utvideo** masters carry no per-frame flags at all — players show them as
   25p unless told; footage-clean still deinterlaces them correctly from the
   container tag, and `pctv-field-order --relabel` (on the Mac) fixes playback.
+* **Coded order ≠ temporal order: measure before raw bobbing.** The archive
+  `Disney.mkv` (tagged `tb`, coded top first) plays correctly with **bff**
+  bobs: the cross-frame field diff (bottom field of frame *n* vs top field of
+  *n+1*) measured ~3× the same-frame diff (PSNR 14.1 vs 17.4 dB, two
+  timestamps), and a `parity=tff` bob alternates consecutive-frame diffs —
+  visible as field-rate jitter, "double vision" — while `parity=bff` is
+  uniform. QTGMC *masks* a coded/temporal mix-up (its motion-compensated
+  reconstruction re-interpolates the true instants; the master measured
+  uniform and looks clean), so a good QTGMC master is NOT proof the flag is
+  right — raw bobs (`bwdif*`, `yadif`, DDD) expose it. Cheap test on any
+  interlaced master:
+
+  ```sh
+  T=7384            # somewhere with real motion
+  ffmpeg -ss $T -i master.mkv -frames:v 2 -vf field=type=top    T%d.png
+  ffmpeg -ss $T -i master.mkv -frames:v 2 -vf field=type=bottom B%d.png
+  ffmpeg -i B1.png -i T1.png -filter_complex psnr -f null -   # 20 ms baseline
+  ffmpeg -i B1.png -i T2.png -filter_complex psnr -f null -   # ≈ baseline → tff;
+                                                              # clearly lower → bff
+  ```
+
 * **Audio:** masters hold lossless PCM. Stream-copying PCM into an `.mp4`
   lands it as `ipcm`, which most players cannot read, so the *final* encode
   transcodes it to aac 192k by default (`--acodec alac` keeps it lossless,

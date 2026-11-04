@@ -265,13 +265,16 @@ if [ "$DEINT" = auto ]; then
     tt|bt) TRUST=1 ;;                      # explicit container flags
     tb|bb) # tb is how ffprobe spells a Matroska master's coded-top-first tag;
            # bb for MPEG-2 .mpg is the ffmpeg probe quirk and lies, so only
-           # lossless masters get believed here.
+           # lossless masters get believed here. NOTE: the first letter is the
+           # CODED order; the temporal order can differ (Disney.mkv bobs
+           # correctly with bff). Fine for QTGMC, which re-interpolates true
+           # instants; run the README's PSNR field test before raw-bobbing.
       [ "$MASTER" = 1 ] && TRUST=1 ;;
   esac
   if [ "$TRUST" = 1 ]; then
     DEINT_APPLIED=qtgmc
     # first letter of the flag = which field is coded first = what a
-    # deinterlacer must assume.
+    # deinterlacer must assume (trusts coded == temporal; see the caveat above).
     if [ "$FIELD" = auto ]; then
       case "$FIELD_ORDER" in t*) FIELD=tff ;; *) FIELD=bff ;; esac
     fi
