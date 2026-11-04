@@ -1095,14 +1095,14 @@ flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
 procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.7.1** (`46c152a1310f77cd2f0ce2c7cd213962df14fe83`, updated 2026-10-29 from
-0.2.1.1 `9ae93f7b` — the v0.2.7.1 tag is exactly main's HEAD, so this is bleeding
+**0.2.10** (`db0500a53119a349fa44497099d6e28a83ded34a`, updated 2026-11-04 from
+0.2.7.1 `46c152a1` — the v0.2.10 tag is exactly main's HEAD, so this is bleeding
 edge). 0.2.0 split the repo into **app + Terminal + engine** — the
-engine source in this tag is version 0.1.53 (`CMakeLists.txt:11`), and `serve/server.py` imports the
+engine source in this tag is version 0.1.56 (`CMakeLists.txt:11`), and `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-10-29 03:11** — `ExecStart` names `/nix/store/yxly8rqbd9cpcd29894mz2baqsafbdhb-strata-0.2.7.1`
-and `/v1/status` reports `"engine": "0.1.53"`):
+2026-11-04 (0.2.10)** — `ExecStart` names `/nix/store/49m09w5f94jlwr5dw01q9wnnzvplrz9q-strata-0.2.10`
+and `/v1/status` reports `"engine": "0.1.56"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -1138,6 +1138,15 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
 `hosts/zen3-nixos/ai/strata.nix`. Upstream's R9700 rows: 0.1.43 decode +2–10 % / prompt
 +12–14 %; 0.1.44 adds +2.5–4 % from HC_Q8. Details: `docs/strata.md` "0.1.43".
 
+- **0.2.10 made DFlash2 the `auto` drafter pick** (a downloadable block drafter from
+  `tools/dflash2_pack.py`, NOT the MTP head) for Qwen3.8-Flash-Next on CUDA/HIP/Metal/SYCL —
+  upstream measures +6.6 % short / +4.2 % long decode on an R9700, one-request-at-a-time only.
+  We pin **`"drafting": "mtp"`** in `strata.nix`'s `configFile`: without a pack,
+  `strata_control/drafting.py::decide()` already answers MTP (`not-downloaded` — `data/` lives
+  in the read-only store, so a pack cannot appear by accident), and an engine started without
+  `--draft dflash2` never loads DFlash2 at all; the explicit pin just survives any future
+  default change. Trying DFlash2 for real = build the pack and point the drafting choice at
+  it (config keys in `strata.nix`), then A/B decode + draft acceptance.
 - **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
   sets `"ud-iq4-xs"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
   carries `models.iq3s` / `models.ud-iq4-xs` (GGUF + pack paths, `--ple-gguf` only for
@@ -1147,7 +1156,7 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   with **`--compat-bf16` required** — its 195 `hc_*` projections are Q8_0, which the
   AMD build cannot read natively in 0.1.41). **Live since 2026-10-09 19:23**, and it
   is **~20 % slower at decode than IQ3_S** (48-57 tok/s at 90-93 % expert-cache hits
-  vs 62-68 at 92-97 %, same 66-70 K depth; on 0.2.7.1 since 2026-10-29 it measures
+  vs 62-68 at 92-97 %, same 66-70 K depth; on 0.2.7.1 (live 2026-10-29, then 0.2.10 on 2026-11-04) it measures
   **60-64 tok/s at 92-94 % hits** - the 0.2.7 RX 9000 decode rework largely closed the gap):
   10,679 cache slots instead of 13,104, so 1.7x the misses at 1.18x the bytes each. Prefill is unchanged (~1,250 tok/s) and
   262144 ctx is unaffected; RAM is calmer (39 GiB, `MemorySwapPeak` 0). Flip the line
@@ -1166,8 +1175,8 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
   `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
   the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
-  `prefill/kernels.cu:2257` (was 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
-  live here because we run `--kv int8`. Still unclamped on 0.2.7.1: the intervening releases moved
+  `prefill/kernels.cu:2509` (was 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
+  live here because we run `--kv int8`. Still unclamped on 0.2.10: the intervening releases moved
   the target lines but clamped neither, so both `postPatch` clamps are still needed and both
   `--replace-fail` targets are still unique.
   Full incident history, the exact sites, and verification
@@ -1196,17 +1205,19 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   MoE path plus a dump in `Verifier::run` that rides on upstream's `nf_mask_` and prints
   *every* fire. It is allocated and launched **only** with `STRATA_KERNEL_AUDIT=1` (set in
   `strata.nix`) because each probe is an extra node in the captured verify graph. Re-based
-  onto 0.2.7.1 on 2026-10-29: **6 of 19 hunks were rejected** by upstream context changes and
-  re-placed by hand (all six pure context shifts: a new `topk_scratch_` member in verify.hpp;
-  the shared-expert site where `if (sh_fork)` grew a `note_prio_tail` body; the `hit_out`
-  `grouped` call gaining a trailing `true` plus a new `ar_on()` branch that needs no audit —
-  `ar_on()` is `all_resident_ && !ar_off_`, never live at our 43 % cache; the new `tap_on_`
-  block after `stamp(l, 24`; `tap_write`/STRATA_LOGITS_DUMP at the run()-tail dump site; and
-  the new `g_exp_phase == 3` bench early-return in iq_kernels.cu, which the gate/up audit now
-  precedes). The other 13 landed with offsets up to +1506. Regenerated from
-  the patched tree: 19 hunks, 280 additions, 0 deletions, byte-identical added lines,
-  `--fuzz=0` with **no offsets** (`patch -p1 --fuzz=0` and `git apply --check` both clean).
-  (The previous re-base, onto 0.2.1.1 on 2026-10-20, had hand-placed 5 hunks.)
+  onto 0.2.10 on 2026-11-04: **3 of 19 hunks were rejected** by upstream context changes
+  and re-placed by hand (all three pure context shifts: a `strata::dispatch::notef()`
+  inserted between the `hits_in_combine` compute and `moe_hit_add`; the `tap_on_` gate
+  widened to `(!batch_rec_ || tap_batch_)` for DFlash2; and `native_expert_set_expdec`
+  growing a tri-state `on < 0` — the trailing context line of the iq_kernels.cu hunk).
+  The other 16 landed with offsets only. Regenerated from the patched tree: 19 hunks,
+  280 additions, 0 deletions, byte-identical added lines, `--fuzz=0` with **no offsets**
+  (`patch -p1 --fuzz=0` and `git apply --check` both clean). (Earlier re-bases: onto
+  0.2.7.1 on 2026-10-29, 6 hand-placed — `topk_scratch_` in verify.hpp, the `sh_fork`
+  `note_prio_tail` body, the `grouped()` trailing `true` + `ar_on()` branch (never live
+  at our 43 % cache), the `tap_on_` block after `stamp(l, 24`, `tap_write`/
+  STRATA_LOGITS_DUMP at the run()-tail dump site, the `g_exp_phase == 3` early-return;
+  onto 0.2.1.1 on 2026-10-20, 5 hunks.)
   Its two anchors are intact: upstream's `nf_mask_` (`Verifier::note_nonfinite` in
   `verify.cpp`) and the `hits_in_combine` gate the routed-total probe checks.
   **#879 is closed but not dead** — closed 2026-10-13 as a stale-tracker sweep, and on
