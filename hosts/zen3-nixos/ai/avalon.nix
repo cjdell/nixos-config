@@ -83,15 +83,20 @@ let
   # The llama-logs capture llama-log-viewer indexes (AGENTS.md "llama-log-viewer").
   logsDir = "/home/cjdell/nixos-config/llama-logs";
 
-  # Image input, parked until first contact: the ISTA mtmd encoder this box
-  # already holds worked under Strata (its strata-vision IS llama.cpp mtmd),
-  # and llama-server reads the same file via --mmproj (+ --no-mmproj-offload
-  # to keep the ~1 GiB encoder off the 232 MiB-short expert cache). Add
-  # "--mmproj /home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf
-  # --no-mmproj-offload" to ExecStart to turn it back on; untested against
-  # this fork's mtmd, so it does not ride along yet - and a rejected mmproj
-  # takes the whole service down at load, which the Strata unit avoided by
-  # running the encoder as a separate process.
+  # Image input (ENABLED 2026-11-04). The ISTA mtmd encoder this box already
+  # held worked under Strata (its strata-vision IS llama.cpp mtmd), and
+  # Avalon's fork reads the same file: its tools/mtmd carries models/qwen3vl.cpp
+  # and accepts the file's `qwen3vl_merger` projector type. Verified before
+  # enabling (zero-risk, CPU-only, did not touch the service): llama-mtmd-cli
+  # with this exact binary + mmproj loaded the encoder and answered "red" on a
+  # 256x256 red PNG. --no-mmproj-offload keeps the ~1 GiB BF16 encoder in RAM:
+  # the expert cache leaves only ~100 MiB of VRAM free, so GPU-offloading it
+  # cannot work. Encoding is ~5 s/image on CPU - same ballpark as the Strata
+  # era, whose encoder also ran as a separate (CPU) process.
+  # NOTE: the flag is unconditional, so deleting this file WITHOUT removing the
+  # flag below takes the whole service down at load (llama.cpp exits on a
+  # missing --mmproj, and Restart=on-failure loops).
+  mmproj = "/home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf";
 
   avalonRootLocation = {
     proxyPass = "http://127.0.0.1:8080";
@@ -133,6 +138,7 @@ in
           -c 262144 -b 9536 -ub 9536 -fa on -ctk q8_0 -ctv q4_0 --jinja --parallel 1 \
           -md ${mtpHead} --spec-type draft-mtp --spec-draft-n-max 2 -ubd 256 -ctkd q8_0 -ctvd q8_0 \
           --alias qwen3.8-flash-next \
+          --mmproj ${mmproj} --no-mmproj-offload \
           --cache-reuse 256 -cram 16384 --slots \
           --log-prompts-dir ${logsDir} \
           --host 127.0.0.1 --port 8080

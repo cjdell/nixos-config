@@ -1056,12 +1056,17 @@ is prefill (~1,500-1,900 t/s vs our ~1,250) and long context. RDNA4 is
   so `gpu-mode sd|game` stopping `avalon.service` IS the eviction (an ad-hoc
   overlap runs SD at GTT-spill speed), and there is no auto-reload — after
   `gpu-mode llm` the unit loads the model before `/health` goes 200. Also
-  parked for now: **vision** (the mtmd `--mmproj` line for the existing
-  mmproj GGUF is documented in avalon.nix but OFF — untested against this
-  fork, and a rejected mmproj kills the service at load),
+  parked for now:
   **multi-conversation KV parking** (a Strata feature; llama.cpp re-reads a
   switched-away prompt, softened by `--cache-reuse`/`-cram`), and
-  >262144-ctx YaRN extrapolation.
+  >262144-ctx YaRN extrapolation. **Vision is ON since 2026-11-04:**
+  `--mmproj /home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf
+  --no-mmproj-offload` (the same ISTA `qwen3vl_merger` encoder Strata's
+  strata-vision used; Avalon's fork carries `tools/mtmd/models/qwen3vl.cpp`,
+  verified by a CPU-only `llama-mtmd-cli` load + red-PNG answer before
+  enabling). The ~1 GiB encoder stays on CPU — the expert cache leaves ~100
+  MiB of VRAM — encoding ~5 s/image. Deleting that file without removing the
+  flag kills the service at load.
 - **Rollback:** swap the `./avalon.nix` / `./strata.nix` imports in
   `hosts/zen3-nixos/ai/default.nix` — Strata's packs, config and
   `rocm10-runtime.nix` are untouched; importing both would double-bind
