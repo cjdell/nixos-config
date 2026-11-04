@@ -918,6 +918,136 @@ climbing through a 12 s freeze; the old unit bug in §14.5's note pushed it to t
 `+50000` clamp). `rs_update()` now holds its last good step while `vq_backlog` is set,
 and `queue-selftest.sh` fails if any drift reading reaches five digits.
 
+> Superseded on 2026-11-04: the freeze was treating a symptom. A windowed measurement
+> cannot be fooled by a stall in the first place (a window with no pictures in it is
+> skipped), and freezing on queue depth was itself costing minutes of uncompensated
+> drift on NFS. See §14.2d, and `avclock-selftest.sh`, which now asserts both.
+
+### 14.2d The sound was a second behind the picture and every counter said zero (2026-11-04)
+
+`pctv-cap-20261104-015210.mkv` plays with the sound more than a second late. Not at
+the start - by the end. Every counter in its stop line was the same as a clean take,
+because not one of them measured what the two tracks disagreed by. Checking the eight
+masters on `ds-public` showed it was never one bad take:
+
+| master | video | audio | audio − video |
+| --- | --- | --- | --- |
+| `Disney Paris` | 8260.120 s | 8260.006 s | −0.114 s |
+| `Disney` | 7390.360 s | 7390.816 s | +0.456 s |
+| `France July 96 No1` | 5401.440 s | 5402.313 s | +0.873 s |
+| `Portugal Spain on Plane` | 4890.800 s | 4889.697 s | −1.103 s |
+| `France 1997` | 4199.720 s | 4201.192 s | +1.472 s |
+| `Portugal Spain` | 6644.960 s | 6646.462 s | +1.502 s |
+| `pctv-cap-20261104-015210` | 7294.960 s | 7296.143 s | **+1.183 s** |
+| `Portugal Spain (continued)` | 363.600 s | 370.107 s | **+6.507 s** (1.8 %) |
+
+Both signs, no clean pattern, and the two short takes worst. Four separate faults
+were involved, and each one on its own looked like a ppm figure rather than a bug.
+
+**The resampler's output was never used.** `rs_run()` interpolates into `rs_buf` and
+returns a count; `cap_feed_audio()` then set `n = nout * 4` and did `memcpy(aq + tail,
+p, first)` — from `p`, the *input*, with the length computed for the *output*. Nothing
+in the program ever read `rs_buf`. So the design in §14.2.2 (a ~135 ppm resample,
+inaudible, holding the tracks together) never reached a tape: what the masters carried
+was the raw ADC bytes with the tail of a block deleted whenever the step was above 1 —
+a hard sample discontinuity roughly 24 times a second at 450 ppm, i.e. a crackle
+riding on the sound and a sound that steps forward in time — and whenever the step was
+below 1, a copy of up to ~400 B *past the end of the audio thread's 4096-byte buffer*
+(stack, whatever it held) into the middle of the tape's audio. A pitch shift that is
+never applied, paid for with sample-dropping instead.
+
+**A ratio cannot see how far behind it is.** `rs_update()` divided *audio fed to the
+resampler* by *samples the pictures written owe*. That answers "how fast should I go"
+and never "what do the two tracks already disagree by", which is the whole of a
+lip-sync error. Any loss of sound — an ALSA overrun (`snd_pcm_recover()` drops the
+samples and says nothing), a device reopen, a PipeWire graph restart, the audio thread
+simply not being scheduled — leaves the sound shorter than the picture *permanently*,
+and the only thing the ratio could do was stretch the rest of the tape to cover it.
+That is the mechanism of the report: a hole at any point becomes a slow error that
+never comes back. The log proved the controller was measuring something other than a
+crystal: `A/V clock` drifted monotonically `−72 → −527 ppm` across one take's first
+minutes and then snapped back (`−487, −396, −163`) the moment the picture queue filled,
+it sat at `+447 ppm` in the next take, and the run reached `−1203` and `+11689 ppm`.
+A crystal is 100–500 ppm (§11 measured 135); the rest of that number was the phase
+error nobody was acting on.
+
+**The cut was charged twice.** `owed -= rs_skipped_frames` told the controller that
+samples deliberately *not kept* still had to be replaced, so it squeezed the remaining
+sound to make them up: sound walking ahead of the picture. That is why `Portugal Spain
+on Plane` ended 1.103 s *short* having cut 1.28 s with `dup 0, skip 0` — the cut is
+supposed to move the sound along the tape, not to shorten the track it travels on.
+
+**Queue depth froze the clock for minutes.** `vq_backlog` means "more than a quarter of
+the picture queue is waiting" — with 150 slots that is 37 frames, 1.5 s of sink stall,
+which a lossless 20.7 MB/s write to NFS exceeds routinely (`qmax 109/150` on
+2026-11-03). Every second the queue stayed deep, the estimate was frozen and the drift
+was added to the file rather than corrected. Which way the error went on a given take
+depended on how much of that take the queue spent deep — the table's scatter, in one
+line.
+
+**What it does now.** Four changes, all in the audio path and none of them touching a
+picture:
+
+* `cap_feed_audio()` queues `rs_buf`, the interpolated samples it always claimed to.
+  That fixes the over-read, the sample-dropping crackle, and makes the ppm figure
+  finally describe something real.
+* `rs_update()` measures over a **window** (input against what the pictures written in
+  that window owe) and then adds a **phase** term: `E = what the file owes − what the
+  resampler made`, and the step consumes input at the flow rate *and* spends
+  `RS_DRAIN_S` (120 s) paying `E` off. With `E = 0` it is the old measurement; with a
+  hole in the sound it walks the tracks back onto each other instead of leaving the
+  debt. The whole step is bounded to `RS_PPM_MAX` (3000 ppm = 3.5 cents — 6× the worst
+  crystal this box has ever shown, and under what anyone hears on speech), so paying an
+  error back is never more destructive than the error: a 1.2 s hole takes ~7 minutes to
+  unwind and not one second of it is audible. A window whose flow reads further than
+  `RS_FLOW_MAX_PPM` (5000) from the card is not a crystal, it is the pipeline, and it
+  is discarded and counted instead of believed.
+* **PCM holes are filled with silence where they happen.** Two counters in the ALSA
+  thread — audio time delivered against wall time since the same anchor, in
+  microseconds, because a 21.33 ms block rounded to 21 ms invents 15 ms of hole every
+  second — and when the difference reaches one ALSA period (`A_GAP_MIN_MS` 60 ms) the
+  missing time is written as silence, faded over 2 ms at both edges so the hole does
+  not click, capped at 2 s. The sound that survives stays exactly on the picture, the
+  gap stays where the gap is, and the stop line says what it cost.
+* The accounting is honest in both directions: samples produced and thrown away (the
+  pre-roll discarded before frame 0, PCM evicted from a full ring) are *owed again*;
+  silence that reached the file without being sampled *reduces* what is owed; the
+  deliberate cuts cancel, and `rs_cut_frames` is reported but never paces anything.
+
+**What to read on a finished take.** The stop line gained four figures, and one log
+line exists that did not:
+
+```
+A/V phase: the sound is 812 ms behind the picture (paying it back at -3000 ppm)
+capture stopped: … 938821828 B audio (245760 B cut to match the picture, 120480 B
+  silence for 4 PCM holes), 0 video drops, 0 audio drops/0 B, 3 xruns,
+  ADC +447 ppm vs the card, A/V phase +14 ms, 2 clock windows discarded)
+```
+
+`A/V phase` at the end is the lip-sync error, in milliseconds, and above 100 ms the
+monitor says so out loud. `silence for N PCM holes` is sound the ADC lost: the picture
+is still true to the tape, and the number says how much of the tape is standing in for
+sound that is not on the source.
+
+**Prove it without a deck:**
+
+```sh
+pctv-linux/avclock-selftest.sh          # add -v for the controller's own decisions
+```
+
+It `#include`s `pctv-monitor.c`, so it drives the shipping `rs_reset`/`rs_run`/`rs_update`
+through simulated tapes with time driven by hand — a 2 h tape in milliseconds:
+
+| case | audio − video | resample |
+| --- | --- | --- |
+| 2 h, ADC +450 ppm, nothing else wrong | 0 ms | +438 ppm (the crystal, correctly) |
+| 2 h, ADC −500 ppm | 0 ms | −500 ppm |
+| 2 h, 200 ms PCM hole every 6 min, filled | 0 ms | 3600 ms of silence, at the holes |
+| 2 h, same holes, filler not there | +3 ms | the phase term paid 4 s back |
+| 2 h, 500 ms hole at 20 min, missed | 0 ms | peak 2281 ppm, inside the bound |
+| 2 h, 12 s sink stall | 0 ms | bounded (this used to read +42362 ppm) |
+| 6 min, flow reads +18000 ppm | reported, not smeared | 0 ppm: 356 windows discarded as not-a-crystal |
+
 ### 14.3 The system tuning that keeps the deadline
 
 All of it in `pctv_probe` at stream start (it is root, and it is the only stage
@@ -961,14 +1091,20 @@ launched from the menu) and judge it by these numbers, in this order:
 | `skip` | 0 — the counter is now a bug detector, nothing more | it used to mean "the encoder could not keep up, oldest picture evicted". That policy is gone (14.2b); any nonzero `skip` is a defect |
 | `refused` | 0 | pictures that arrived after the queue filled and the capture was ended on purpose. `SINK STALLED` names it. A nonzero `qmax` in the same line (e.g. `qmax 148/150`) says the sink was behind for ~6 s: check the mount, then the master format |
 | `qmax N/150 frames` | ≤ a handful | the deepest the picture queue ever got. Near the depth means the capture stopped because the sink was slower than the tape, not because the tape ran out |
-| `cut to match the picture` | 0 | it is not a dropout - it is the 40 ms of audio removed per repeated/evicted picture to keep the two timelines on the same tape position (14.2.3) |
-| `ADC +/- ppm` | stable, |x| < 400 | the correction being applied, not an error. It is biased by up to one audio period at the *end* of a short capture (-0.2 % on 20 s, -7 ppm on a 2 h tape); a value that keeps moving means one of the two clocks is not a crystal (e.g. the sound server resampling) — **or** the pipeline is stalled, which used to read as +42000 ppm and now freezes the correction instead (14.2c) |
-| video vs audio stream duration | equal to one audio frame | anything else is a bug - this is the whole point of 14.2.2 |
+| `cut to match the picture` | 0 | it is not a dropout - it is the 40 ms of audio removed per repeated/evicted picture to keep the two timelines on the same tape position (14.2.3). It shortens the audio track *on purpose*; it must never pace the resampler (14.2d) |
+| `ADC +/- ppm` | stable, |x| < 500 | the correction being applied, not an error: the crystal difference, now measured over a 1 s window instead of since the start of the take. It is bounded to 3000 ppm because resampling harder than that would be audible, and a window reading more than 5000 ppm is discarded as not-a-crystal (a stall, a reopen, a device that stopped) and counted in `clock windows discarded` instead of believed |
+| `A/V phase +/- ms` | inside ±20 ms at the end | **this is the lip-sync error**, in milliseconds, and it is the number that was missing on 2026-11-04: a 2 h take finished 1.183 s out of step with every other counter reading zero (14.2d). Over 100 ms the monitor says so at stop. Watch the *tail* of a take, not the head - the error accumulates |
+| `silence for N PCM holes` | 0, or a few hundred ms over hours | sound the ADC lost (overrun, reopen, PipeWire restart, the audio thread not scheduled) and the monitor stood in for, at the instant it went missing. The picture stays true to the tape; this is what the tape is missing. Unfilled, those holes used to be paid for by stretching the rest of the recording - that was the second of desync |
+| `xruns` | 0, or a handful over hours | ALSA said the overrun out loud; each one is also a `PCM hole` and filled with silence |
+| `clock windows discarded` | 0, or a couple over hours | windows too far off the card to be a crystal. A large number means the pipeline, not the clocks - read it with `A/V phase` |
+| video vs audio stream duration | audio shorter by exactly `cut`, otherwise equal | a *longer* audio track is the bug signal: it means sound was lost and the tracks were glued together with stretch instead of silence (14.2d). `pctv-verify-master.sh` prints this; `A/V phase` in the log is the same measurement before the file is even closed |
 
 **Or prove it without a deck:**
 
 ```sh
 pctv-linux/capture-selftest.sh          # add -v for the anomaly timeline
+pctv-linux/queue-selftest.sh            # sink damage (SIGSTOP of ffmpeg)
+pctv-linux/avclock-selftest.sh          # the clock: crystal, PCM holes, stalls
 ```
 
 It builds `pctv-monitor` and `fakeprobe` (a stand-in for `pctv_probe stream`

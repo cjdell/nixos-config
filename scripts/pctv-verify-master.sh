@@ -101,9 +101,24 @@ for F in "$@"; do
   note "  audio level: $lvl"
   printf '%s' "$lvl" | grep -qE 'max (-)?0(\.0+)? dB' && bad "audio peaked at 0 dB (clipping)"
   vl=$($FP -v error -select_streams v:0 -show_entries packet=pts_time,duration_time -of csv=p=0 "$F" 2>/dev/null | tail -1 | awk -F, '{printf "%.3f", $1+$2}')
-  taildiff=$(awk "BEGIN{d=$alat-$vl; if(d<0)d=-d; printf \"%.3f\", d}")
-  note "  track tails: video ${vl}s audio ${alat}s (delta ${taildiff}s; ~0.3 s of audio-only flush tail is normal)"
-  awk "BEGIN{exit !($taildiff > 1.0)}" && bad "audio/video tails differ by ${taildiff}s — not the usual flush tail"
+  # Signed, because the sign is the diagnosis. The monitor cuts audio to match a
+  # repeated picture, so a *short* audio track is normal and equals the cut; an
+  # audio track LONGER than the picture means sound went missing and the tracks
+  # were glued back together with stretch instead of silence - which is what a
+  # viewer experiences as the sound lagging, worst at the end of the take
+  # (docs/pctv-analog-capture.md §14.2d: pctv-cap-20261104-015210.mkv, +1.183 s).
+  sgn=$(awk -v a="$alat" -v v="$vl" 'BEGIN{printf "%+.3f", a-v}')
+  ppm=$(awk -v a="$alat" -v v="$vl" 'BEGIN{if(v>0)printf "%+.0f", 1e6*(a-v)/v; else print "n/a"}')
+  logline=$(grep -F "capture stopped: $(basename "$F")" "$HOME/.local/state/pctv-monitor.log" 2>/dev/null | tail -1)
+  cutb=$(printf '%s' "$logline" | sed -n 's/.* \([0-9]\+\) B cut to match the picture.*/\1/p')
+  note "  track tails: video ${vl}s audio ${alat}s (audio ${sgn}s, ${ppm} ppm)"
+  [ -n "$logline" ] && note "  monitor said: ${logline#pctv-monitor: }"
+  cut=${cutb:-0}
+  # audio should end up = video - cut, within the ~0.3 s flush tail plus a frame
+  awk -v a="$alat" -v v="$vl" -v cut="$cut" 'BEGIN{exit !((a - v) > 0.5)}' && \
+    bad "audio track is ${sgn}s LONGER than the picture: sound was lost and stretched back (14.2d). Expect the sound to lag by about ${sgn}s by the end of this take"
+  awk -v a="$alat" -v v="$vl" -v cut="$cut" 'BEGIN{exit !((v - a) > cut/192000.0 + 0.5)}' && \
+    bad "audio track ends more than 0.5 s before the picture, beyond its ${cut} B of deliberate cut"
 
   note "  $(awk "BEGIN{printf \"%.1f s of video, %.1f GB\", $DUR, $(stat -c %s "$F")/1073741824}")"
 done
