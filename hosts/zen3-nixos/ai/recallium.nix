@@ -235,8 +235,9 @@ in
         # Stable LLM endpoint for Recallium's OpenAI provider (container's
         # base_url in llm_provider_accounts id 3 is fixed at
         # http://host.containers.internal/recallium-llm). The prefix is
-        # rewritten to /v1/ and the call is proxied to Avalon on loopback
-        # (./avalon.nix, 127.0.0.1:8080) - the same upstream as the
+        # rewritten to /v1/ and the call is proxied to the model server on
+        # loopback (:8080 - whichever of ./strata.nix / ./avalon.nix
+        # ../default.nix imports) - the same upstream as the
         # strata.ai.chrisdell.info vhost, reached directly instead of
         # hairpinning through TLS and the public IPv6 address. Nothing in the
         # container's DB has to change: llama-server ignores the requested
@@ -266,7 +267,7 @@ in
             # LLM calls can take minutes: the engine serves ONE slot
             # (--parallel 1), so a Recallium metadata extraction can queue
             # behind a full-length interactive request before it is even
-            # prefilled. Match avalonRootLocation's timeout.
+            # prefilled. Match the root LLM location's timeout.
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
             # A memory-processing prompt carries the whole session; nginx's

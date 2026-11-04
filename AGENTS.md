@@ -611,12 +611,14 @@ because the LLM and SD split one 32 GiB card.
 
 ## GPU modes: `gpu-mode llm | sd | game` (zen3-nixos)
 
-(Since 2026-11-04 the `llm` lease commands `avalon.service`, not
-`strata.service` — same semantics, see the Avalon section; llama.cpp has no
-`POST /v1/unload`, so unit state IS the eviction, and "ready" comes from
-`GET /health` instead of Strata's `/v1/status`.)
+(The `llm` lease commands `strata.service` again since 2026-11-04, after the
+same-day Avalon interlude — "ready" comes from Strata's `/v1/status`
+`loaded:true`, and sd/game evict via `POST /v1/unload` + stopping
+`strata.service`; if you ever flip back to Avalon, revert `gpu-mode.sh` from
+git history too — it is engine-specific. See the Avalon section for that
+lease's `/health` + `/slots` form.)
 
-One 32 GiB card, three jobs that each want it whole: the Avalon LLM, Stable
+One 32 GiB card, three jobs that each want it whole: the Strata LLM, Stable
 Diffusion, and (occasionally) a game. `gpu-mode`
 (`hosts/zen3-nixos/ai/gpu-mode.nix` + `./gpu-mode.sh`, installed on PATH)
 makes the card a **lease**:
@@ -677,9 +679,10 @@ its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
   public names are what `allowed_hosts` in `strata.nix` carries) and
   **`client_max_body_size 32m;`** (nginx's 1 MiB default 413s a whole-session
   metadata prompt).
-- **Active model:** whatever the :8080 engine serves — since 2026-11-04 Avalon's
-  llama-server, `--alias qwen3.8-flash-next` (before that: Strata's
-  `qwen3.8-flash-next-ud-iq4-xs` via `config.ai.strataModel`). Recallium's DB row still says
+- **Active model:** whatever the :8080 engine serves — Strata's
+  `qwen3.8-flash-next-ud-iq4-xs` via `config.ai.strataModel` again since
+  2026-11-04 (the brief Avalon interlude served `--alias qwen3.8-flash-next`).
+  Recallium's DB row still says
   `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, provider
   account id 3) and that is **harmless**: Strata routes by engine, not by the
   requested name, so an unknown/absent model name still gets the loaded model
@@ -1002,7 +1005,15 @@ junk (`target/`, `web/node_modules/`, `web/dist/`) is **not** copied into the
 build. Keep `git status` in the crate clean-ish, so the working tree that Nix
 reads corresponds to something reviewable.
 
-## Avalon (Qwen3.8-Flash-Next on the R9700, live since 2026-11-04)
+## Avalon (Qwen3.8-Flash-Next on the R9700 — DISABLED 2026-11-04, same day)
+
+⚠️ **Rolled back to Strata on 2026-11-04.** Avalon ran on `:8080` for part of
+that day; the flip-back is the import swap in `hosts/zen3-nixos/ai/default.nix`
+(comment `./avalon.nix`, uncomment `./strata.nix`) **plus** restoring
+`gpu-mode.sh` + `sd-gate.nix` to the matching era's version from git history —
+the lease logic is engine-specific. Everything below stays as the deployment
+record (it worked: 2,115 t/s prefill, 89 t/s decode, vision via mtmd) and the
+rollback procedure.
 
 **Avalon** (github.com/freriadoc/Avalon) replaced Strata on `127.0.0.1:8080`
 on 2026-11-04 — deliberately, keeping **every client URL identical**: it is a
@@ -1072,14 +1083,16 @@ is prefill (~1,500-1,900 t/s vs our ~1,250) and long context. RDNA4 is
   `rocm10-runtime.nix` are untouched; importing both would double-bind
   :8080, so never enable them at once.
 
-## Strata (Qwen3.8-Flash-Next on the R9700 — DISABLED 2026-11-04)
+## Strata (Qwen3.8-Flash-Next on the R9700 — LIVE AGAIN since 2026-11-04)
 
-⚠️ **Superseded by the Avalon section above**, which took over `:8080` and
-every nginx location this one owned on 2026-11-04. Everything below stays as
-the rollback procedure and the incident history (`./strata.nix` is
-unimported; its packs, the ROCm-10 runtime input and the audit diff are
-untouched). Re-enabling = swap the `./strata.nix` / `./avalon.nix` imports
-in `hosts/zen3-nixos/ai/default.nix`.
+⚠️ **Re-enabled 2026-11-04**, the same day the Avalon section above briefly
+took over `:8080` and every nginx location this one owns. `./strata.nix` is
+imported again (its packs, the ROCm-10 runtime input and the audit diff were
+untouched throughout — `ai.strataModel` never moved off `ud-iq4-xs`);
+flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
+`hosts/zen3-nixos/ai/default.nix` **and** restore the matching era's
+`gpu-mode.sh` + `sd-gate.nix` from git history. Everything below is live
+procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
 **0.2.7.1** (`46c152a1310f77cd2f0ce2c7cd213962df14fe83`, updated 2026-10-29 from

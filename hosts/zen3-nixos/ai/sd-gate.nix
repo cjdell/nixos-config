@@ -10,12 +10,12 @@
 # in VRAM) alive while it is used. 120 s idle -> killed -> VRAM freed.
 #
 # This service is NOT wantedBy multi-user: `gpu-mode sd` starts it (and stops
-# Avalon), `gpu-mode llm|game` stops it. See ./gpu-mode.nix. Since 2026-11-04
-# there is no cooperative eviction: llama.cpp's server (./avalon.nix) has no
-# unload endpoint, so the LLM's VRAM only frees when avalon.service stops -
-# and that IS `gpu-mode sd`. If the gate is started ad-hoc next to a loaded
-# Avalon it proceeds anyway and SDXL runs at GTT-spill speed (the
-# --llm-unload-url flag, retired with Strata, used to post /v1/unload).
+# Strata), `gpu-mode llm|game` stops it. See ./gpu-mode.nix. If it ever runs
+# next to a loaded Strata it takes the card anyway: before spawning it posts
+# to Strata's /v1/unload (--llm-unload-url) and waits for the VRAM; Strata's
+# serve layer reloads the LLM on the next LLM request, and its before_load
+# hook (./strata.nix) stops THIS service when it does - whoever holds the
+# card last is the owner, nothing loops.
 #
 # nginx: owns the /sd* locations on the IP vhost plus the public
 # sd.ai.chrisdell.info subdomain (static UI at the root, API, status page).
@@ -81,7 +81,7 @@ in
     description = "On-demand stable-diffusion.cpp server (loads on first request, unloads when idle)";
     after = [ "network.target" ];
     # Deliberately NO wantedBy: the card is a lease, and `gpu-mode sd` owns
-    # starting/stopping this unit (boot default is the llm lease - avalon).
+    # starting/stopping this unit (boot default is the llm lease - strata).
 
     # Pin the spawned sd-server to the R9700 with the same device-select layer
     # pin the llama-swap routers used: without MESA_VK_DEVICE_SELECT the
@@ -98,11 +98,10 @@ in
       # on the R9700, and the SDXL VAE decode graph (~8.5 GB) OOMs without it.
       # --max-vram -1 sizes compute graphs to whatever VRAM is free so SD stays
       # polite next to llama-swap's resident model. See AGENTS.md.
-      # --min-vram-gib 10: below 10 GiB free (i.e. the LLM is resident) the
-      # gate just loads anyway - llama.cpp has no unload endpoint to post to,
-      # and the proper eviction is `gpu-mode sd` (stops avalon.service).
-      # Status page: /sd-status/ via nginx.
-      ExecStart = "${sd-gate}/bin/sd-gate --listen 127.0.0.1:8084 --status-listen 127.0.0.1:8086 --upstream 127.0.0.1:8085 --idle 120 --ready-timeout 180 --min-vram-gib 10 --vram-tool /run/current-system/sw/bin/amd-smi -- ${stable-diffusion-cpp-vulkan}/bin/sd-server --listen-ip 127.0.0.1 --listen-port 8085 --backend diffusion=vulkan0,clip=vulkan0,vae=vulkan0 --vae-tiling --max-vram -1 -m /home/cjdell/sd-models/sd_xl_base_1.0.safetensors --vae /home/cjdell/sd-models/sdxl_vae.fp16.safetensors --clip_l /home/cjdell/sd-models/clip_l.fp16.safetensors --clip_g /home/cjdell/sd-models/clip_g.fp16.safetensors";
+      # --min-vram-gib 10: below 10 GiB free (i.e. Strata's LLM is resident)
+      # the gate posts to Strata's /v1/unload and waits for the VRAM before
+      # loading SDXL. Status page: /sd-status/ via nginx.
+      ExecStart = "${sd-gate}/bin/sd-gate --listen 127.0.0.1:8084 --status-listen 127.0.0.1:8086 --upstream 127.0.0.1:8085 --idle 120 --ready-timeout 180 --min-vram-gib 10 --llm-unload-url http://127.0.0.1:8080/v1/unload --vram-tool /run/current-system/sw/bin/amd-smi -- ${stable-diffusion-cpp-vulkan}/bin/sd-server --listen-ip 127.0.0.1 --listen-port 8085 --backend diffusion=vulkan0,clip=vulkan0,vae=vulkan0 --vae-tiling --max-vram -1 -m /home/cjdell/sd-models/sd_xl_base_1.0.safetensors --vae /home/cjdell/sd-models/sdxl_vae.fp16.safetensors --clip_l /home/cjdell/sd-models/clip_l.fp16.safetensors --clip_g /home/cjdell/sd-models/clip_g.fp16.safetensors";
       # Safety net: if the gate is SIGKILLed (stop timeout), kill the
       # sd-server it spawned so its VRAM is not left loaded.
       ExecStop = "${pkgs.bash}/bin/bash -c 'if [ -f /run/sd-gate.pid ]; then kill \"$(cat /run/sd-gate.pid)\" 2>/dev/null || true; rm -f /run/sd-gate.pid; fi'";

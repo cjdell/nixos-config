@@ -32,25 +32,25 @@
     # ./diamcp.nix
     ./gpu-panel.nix
     ./gpu-mode.nix
-    # Re-enabled 2026-11-04: avalon.nix passes --log-prompts-dir, so
-    # llama-logs/ is being written again and the viewer has something to read.
+    # Re-enabled 2026-11-04 while Avalon was live (it passes
+    # --log-prompts-dir). Under Strata nothing new is written to llama-logs/,
+    # so the viewer keeps serving the historical index; harmless either way.
     ./llama-log-viewer.nix
     # llama-swap is DISABLED while the single-model Qwen3.8-Flash-Next server
     # runs: both want the R9700's VRAM and tens of GB of RAM, and that server
     # exists to run a model llama.cpp (stock) cannot fit. Re-enable this import
-    # only by also disabling ./avalon.nix below.
+    # only by also disabling ./strata.nix below.
     # ./llama-swap.nix
-    # Strata (./strata.nix) ran the model from 2026-10-01 to 2026-11-04. It is
-    # superseded by ./avalon.nix - the same llama.cpp-fork idea (experts in
-    # RAM, GPU expert cache, MTP) with a llama.cpp-native serve surface, no
-    # Python serve layer, no 32 GB watchdog core dumps (docs/strata-hang.md),
-    # no ROCm-10 runtime override, and Avalon's own IQ3_KS-hybrid pack.
-    # To switch back: comment ./avalon.nix, uncomment ./strata.nix, and flip
-    # ai.strataModel back on (its unit refuses to start a pack that has not
-    # been prepared, so an unimported avalon.nix + commented strata.nix never
-    # double-binds :8080).
-    # ./strata.nix
-    ./avalon.nix
+    # Strata (./strata.nix) is the model server again since 2026-11-04: it was
+    # superseded by ./avalon.nix that morning and rolled back the same day.
+    # ai.strataModel is still "ud-iq4-xs" (below), so no pack flip-back was
+    # needed. To flip engines: swap the two imports below - and revert
+    # ./gpu-mode.sh + ./sd-gate.nix to the matching era's version from git
+    # history: the lease is engine-specific (Strata: /v1/status + POST
+    # /v1/unload; Avalon: /health + /slots + unit-state eviction). Never
+    # import both - they double-bind :8080.
+    ./strata.nix
+    # ./avalon.nix
     # ./ollama-bridge.nix
     ./recallium.nix
     # SD shares the card with Strata via the gpu-mode lease (./gpu-mode.nix):
