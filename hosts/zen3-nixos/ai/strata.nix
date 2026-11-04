@@ -249,16 +249,19 @@ let
     builtins.toJSON {
       exe = "${strata}/bin/strata";
       args = engineArgs;
-      # 0.2.10 made DFlash2 (a downloadable block drafter, tools/dflash2_pack.py)
-      # the Auto pick for Qwen3.8 on CUDA/HIP/Metal/SYCL. We pin MTP: the DFlash2
-      # pack is not in the store, so drafting.decide() would land on MTP anyway
-      # ("not downloaded"), but an explicit choice keeps a future data/ or
-      # default change from silently swapping our drafter. The engine's own
-      # --mtp below is then honoured as-is. Measured upside if DFlash2 is ever
-      # tried on this card: +6.6 % short / +4.2 % long decode (0.2.10 notes),
-      # one-request-at-a-time only - and our MTP numbers already include its
-      # drafts.
-      drafting = "mtp";
+      # Drafting. 0.2.10 made DFlash2 (incoai's block drafter, packed under
+      # /home/cjdell/Strata/dflash2/ by drafting_fetch.ensure() from pinned
+      # safetensors - pack sha checked against upstream's PINNED bytes) the Auto
+      # pick for Qwen3.8 on HIP too; "mtp" was the 0.2.7.1-era behaviour and the
+      # A/B baseline (MTP: 48-66 tok/s decode on real 250 K traffic, 68.7 % draft
+      # acceptance, spec 6). serve's strata_control/drafting.apply() shapes the
+      # args below for whichever drafter is chosen: dflash2 strips
+      # --mtp/--spec-min-p/our --spec and adds --draft dflash2 --draft-model
+      # <pack> --draft-fallback none --mtp-draft-vocab ... --spec 6 --draft-conf
+      # <by free VRAM>, picking the SELQ4 pack (0.72 GB VRAM vs 0.89) because our
+      # HIP engine reads it. With --draft-fallback none, a DFlash2 that cannot
+      # start FAILS the start rather than silently running MTP: revert = "mtp".
+      drafting = "dflash2";
       cwd = "/var/lib/strata";
       tokenizer = "${m.packDir}/tokenizer";
       model_name = m.modelName;
