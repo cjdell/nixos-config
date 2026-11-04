@@ -17,10 +17,14 @@
 # nvidia-smi segfaults on every call (AGENTS.md, "patchelf 0.19.2 breaks
 # NVIDIA and CUDA binaries"). Networking is systemd-networkd, not
 # NetworkManager: ./networking.nix builds the br0 bridge (with the MAC the
-# router's lease for .55 is pinned to) and slaves en* into it.
+# router's lease for .55 is pinned to) and slaves en* into it. And
+# ./cpu-cap.nix holds the i7-7700 at 2.4 GHz: this board exposes no fan
+# control to Linux at all, so keeping the CPU cool is the only way to make its
+# BIOS Smart Fan slow down.
 { sops-nix, ... }:
 
 [
+  ./cpu-cap.nix
   ./folding.nix
   ./hardware-configuration.nix
   ./networking.nix
