@@ -37,17 +37,6 @@ let
   cfg = config.services.folding-at-home-native;
   fahPackages = import ./fah-packages.nix pkgs;
 
-  # "HH:MM" -> minutes since midnight, for the pause-window comparison in the
-  # schedule oneshot (the client itself has no schedule primitive).
-  toMinutes =
-    spec:
-    let
-      parts = lib.strings.splitString ":" spec;
-    in
-    lib.strings.toInt (builtins.elemAt parts 0) * 60 + lib.strings.toInt (builtins.elemAt parts 1);
-  pauseStartMinutes = toMinutes cfg.pauseStart;
-  pauseEndMinutes = toMinutes cfg.pauseEnd;
-
   # The provisioning script connects over loopback to the first configured
   # listen address (a wildcard bind is fine to reach that way).
   provisionAddress =
@@ -331,8 +320,14 @@ in
         ExecStart = pkgs.writeShellScript "fah-pause-window" ''
           set -eu
           systemctl=${pkgs.systemd}/bin/systemctl
+          # Minutes since midnight. 10# forces base-10 so a leading zero
+          # ("08", "00") is never read as octal by the shell.
           now=$((10#$(date +%H) * 60 + 10#$(date +%M)))
-          if [ "$now" -ge ${toString pauseStartMinutes} ] && [ "$now" -lt ${toString pauseEndMinutes} ]; then
+          start='${cfg.pauseStart}'
+          end='${cfg.pauseEnd}'
+          s=$((10#''${start%:*} * 60 + 10#''${start#*:}))
+          e=$((10#''${end%:*} * 60 + 10#''${end#*:}))
+          if [ "$now" -ge "$s" ] && [ "$now" -lt "$e" ]; then
             systemctl stop fah-client.service
           elif systemctl is-active --quiet llama-server.service; then
             echo "fah-client left stopped: llama-server.service (gpu-mode llm) is active"
