@@ -19,6 +19,11 @@
 #   5. PCTV_SPILL_MB=0 restores the pre-spill behaviour exactly: the full queue
 #      stops the take (case spill-off-12s-freeze).
 #
+# And in every case it checks the always-on log the take was written to
+# (PCTV_LOG): every line - monitor, probe and ffmpeg alike - carries a
+# microsecond wall-clock stamp, and the once-a-second HB line's counters add
+# up to the take it was taken during.
+#
 # It runs against real tape pixels, not synthetic ones: replayprobe.c replays a
 # UYVY file as real-time BT.656, so nothing about a deck or the card can excuse a
 # loss.  Provide one with REPLAY_UYVY (any 720x576 PAL UYVY; 30 s is plenty), or
@@ -72,6 +77,11 @@ alive() { local s; s=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
 run() {
   local label=$1 freeze=$2 expect=$3 extraenv=${4:-}
   local log="$OUT/$label.log"
+  # The monitor's own always-on log (the PCTV_LOG default is a file; here one
+  # per case).  Everything the test greps below still comes from $log - the
+  # monitor log is checked for ITS promises: every line stamped, and a
+  # heartbeat whose frame counts add up to the take.
+  local mlog="$OUT/$label.monitor.log"
   pkill -9 -x replayprobe 2>/dev/null; pkill -9 -x ffmpeg 2>/dev/null; sleep 1
   # Start it as OUR child and keep that pid.  `pgrep -x | head -1` picks the
   # OLDEST match, so a leftover monitor from a previous case (or from a failed
@@ -79,7 +89,8 @@ run() {
   # unobserved - which is exactly how this script produced a nondeterministic
   # "quit lockup" FAIL.  Same for ffmpeg: it is a child of the monitor, so ask
   # pgrep for that relationship instead of guessing by name.
-  env PCTV_SPILL_DIR="$SPILL_DIR" ${extraenv:+$extraenv} \
+  rm -f "$mlog"      # the log is opened O_APPEND: a rerun must not see the last one
+  env PCTV_SPILL_DIR="$SPILL_DIR" PCTV_LOG="$mlog" ${extraenv:+$extraenv} \
       ./pctv-linux/pctv-monitor --capture --capture-seconds "$SECS" \
       --master uyvy --out-dir "$OUT" >/dev/null 2>"$log" &
   local mp=$!
@@ -160,6 +171,35 @@ run() {
   printf '%-22s PTS steps off 40 ms: %s | span %s s (%s pictures) | SINK STALLED: %s | spill: %s active, %s done, %s failed, %s pairs | %s\n' \
          "" "$bad" "$(echo "$span" | cut -d' ' -f1)" "$frames" "$stalled" \
          "$spill_act" "$spill_done" "$spill_fail" "${spilled_n:-?}" "$f"
+
+  # The always-on log: PCTV_LOG=<path> must have produced the file, every one
+  # of its lines (the monitor's, the probe's, ffmpeg's - all share fd 2) must
+  # carry the [ISO-8601.µs] stamp, and the once-a-second HB line must tell the
+  # truth about the take: its per-second `f=` deltas summed are the frames
+  # the capture stopped with, and its count is the seconds it ran.
+  [ -s "$mlog" ] \
+    || { echo "$label: FAIL - PCTV_LOG file missing or empty"; fail=1; }
+  # NB: grep -c PRINTS 0 and EXITS 1 on "no lines selected", so no `|| echo`
+  # here - that appends a second "0" and the comparison then sees "0\n0".
+  local untagged; untagged=$(grep -vcE \
+      '^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}\] ' \
+      "$mlog" 2>/dev/null); untagged=${untagged:-1}
+  [ "$untagged" = "0" ] \
+    || { echo "$label: FAIL - $untagged monitor-log lines carry no [..µs] stamp"; fail=1; }
+  grep -q 'log start: .*wall .*mono ' "$mlog" \
+    || { echo "$label: FAIL - no clock anchor line in the monitor log"; fail=1; }
+  grep -q 'log end: wall' "$mlog" \
+    || { echo "$label: FAIL - log never ended (tee did not drain at exit)"; fail=1; }
+  local hb; hb=$(grep -ac 'monitor: HB t=' "$mlog")
+  [ "${hb:-0}" -ge 10 ] && [ "$hb" -le $((SECS + 8)) ] \
+    || { echo "$label: FAIL - $hb heartbeat lines in a $SECS s run (want ~1/s)"; fail=1; }
+  local hbf; hbf=$(grep -a 'monitor: HB t=' "$mlog" \
+                   | sed -n 's/.* f=\([0-9]*\) .*/\1/p' | awk '{s+=$1}END{print s+0}')
+  local hberr=$((hbf - frames)); [ $hberr -lt 0 ] && hberr=$((-hberr))
+  [ $hberr -le 60 ] \
+    || { echo "$label: FAIL - HB frame deltas sum to $hbf, capture committed $frames"; fail=1; }
+  printf '%-22s monitor log: %s lines, %s heartbeats, HB f-sum %s vs %s frames\n' \
+         "" "$(wc -l < "$mlog")" "$hb" "$hbf" "$frames"
 
   [ "${bad:-1}" = "0" ] || { echo "$label: FAIL - video PTS is not contiguous"; fail=1; }
   # A stall must not be read as a crystal error: the drift figure used to run away

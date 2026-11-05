@@ -448,8 +448,9 @@ uyvy` (a memcpy) is the mode that structurally cannot be.
   Observed 2026-11-01 when an agent ran a "quick verification capture" over a
   user's tape; the holes in the user's file were the evidence.  `stream` now
   treats a failed claim as fatal (`ctl`/diagnostics still tolerate it, because
-  re-tuning a live capture is a legitimate thing to do), and the monitor logs to
-  a file when detached so the counters outlive the desktop launcher.
+  re-tuning a live capture is a legitimate thing to do), and the monitor logs
+  every line - stamped to the microsecond - to its log file (§14.5) so the
+  counters outlive the desktop launcher.
 * **A stalled encoder is not a dead encoder.** An intermediate version called
   `cap_died()` when an audio write did not finish in 3 s - and a muxer waiting for
   video does exactly that, so an FFV1 capture at about 1.0x died at 42 s with
@@ -1333,8 +1334,15 @@ look like the old, less smooth capture no matter what the file contains.
 
 ### 14.5 How to tell whether a run was clean
 
-Run with `PCTV_VERBOSE=1` (or read `$XDG_STATE_HOME/pctv-monitor.log` when it was
-launched from the menu) and judge it by these numbers, in this order:
+Since 2026-11-05 the monitor **always** logs: every line it, the probe and
+FFmpeg write goes to `$XDG_STATE_HOME/pctv-monitor.log` *and* to the terminal,
+each stamped `[YYYY-MM-DDTHH:MM:SS.µs]` by a tee thread (fd 2 is a nonblocking
+pipe: a full one drops log lines rather than ever blocking a capture thread,
+and the tee runs SCHED_OTHER so a stalled disk cannot stall the take through
+it). A `log start:` line pairs the wall clock with the monotonic clock at the
+moment the run began, so an NTP step mid-take is visible and every internal
+figure can still be trusted to microseconds. `PCTV_LOG=/path` moves the file;
+`PCTV_LOG=0` drops it. Judge a run by these numbers, in this order:
 
 | line | clean | what a bad value means |
 | --- | --- | --- |
@@ -1354,11 +1362,43 @@ launched from the menu) and judge it by these numbers, in this order:
 | `clock windows discarded` | 0, or a couple over hours | windows too far off the card to be a crystal. A large number means the pipeline, not the clocks - read it with `A/V phase` |
 | video vs audio stream duration | **equal to well under a frame**, both directions | since the coupled writer (14.2f) the two tracks advance 40 ms together or not at all, so *any* difference over ~0.06 s means the coupling leaked - a path that writes audio outside a commit came back. `pctv-verify-master.sh` enforces this symmetrically; `A/V phase` in the log is the same clock's live reading before the file is even closed |
 
+#### The `HB` line: one second of the take, diffable
+
+The stop line only exists if the take ends; the log keeps a running version.
+Every second, whatever else is on or off (it is not a `PCTV_VERBOSE` thing),
+one line lands:
+
+```
+monitor: HB t=899068.776592 f=25 fld=50.0 a=48000 q=1 sp=0 e=+0 dup=0 skip=0 ref=0 spill=0 pad=0 sil=0 xrun=0 adrop=0
+```
+
+`t` is `CLOCK_MONOTONIC` in seconds - the same instant the stamp on that log
+line names, on the wall clock. `fld` is what the ADC delivered (fields/s),
+`f` what the muxer committed (pictures/s): watching them together, `fld 50`
+while `f` drops below 25 is the pipeline falling behind, live, seconds before
+any stop line could exist. `a` is audio samples/s into the file. `q` and `sp`
+are the instantaneous queue depths (RAM slots / spilled pairs, §14.2g) and
+`e` the live A/V phase the resampler is steering. Everything after `e=` is a
+**per-second delta** of the counters in the table above, so an unbroken line
+of zeros is a healthy take and the second the zeros stop is the second
+something happened - `queue-selftest.sh` asserts exactly this sum (its `f=`
+column against the stop line) on every case.
+
+This is what makes a take repairable while it is still rolling rather than
+post-mortem: the HB seconds say *where* to look, and the master's fixed grid
+(829440 B of video + 1920 B of audio per 40 ms frame, §14) turns a summed `f`
+straight into a byte offset to start reading from. `HB`-index plus the seam
+math of §14.2e is the recipe; per-frame logging was considered and rejected -
+the master is a fixed grid, a second of counters already names every byte.
+
 **Or prove it without a deck:**
 
 ```sh
 pctv-linux/capture-selftest.sh          # add -v for the anomaly timeline
-pctv-linux/queue-selftest.sh            # sink damage (SIGSTOP of ffmpeg)
+pctv-linux/queue-selftest.sh            # sink damage (SIGSTOP of ffmpeg),
+                                        # and the always-on log itself: every
+                                        # line stamped, HB counters summing
+                                        # to the take
 pctv-linux/avclock-selftest.sh          # the clock: crystal, PCM holes, stalls
 ```
 

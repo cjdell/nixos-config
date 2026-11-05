@@ -4547,19 +4547,99 @@ static void draw_audio_panel(SDL_Renderer *ren)
 
 /* -------------------------------------------------------------------- main */
 
-/* Every line the monitor writes.  Launched from the desktop there is no
- * terminal, so stderr goes wherever the launcher puts it - which is nowhere -
- * and the counters that make a capture diagnosable (dup, skip, held, gaps,
- * xruns) are thrown away with it.  When stderr is not a terminal, append to a
- * log file instead; a run in a terminal still prints.  PCTV_LOG=<path> forces a
- * file, PCTV_LOG=0 turns this off.  The probe and FFmpeg inherit fd 2, so one
- * file holds the whole story. */
+/* Every line the monitor writes - and every line the probe and FFmpeg write,
+ * because they inherit fd 2 - passes through a tee: it gains a microsecond
+ * wall-clock stamp, goes to wherever stderr pointed when we started (the
+ * launching terminal, the systemd journal), and is appended to a log file.
+ * Launched from the desktop there is no terminal, so before this existed the
+ * counters that make a capture diagnosable (dup, skip, held, gaps, xruns)
+ * were thrown away with stderr; and when they were kept, they were kept as a
+ * stream of untimestamped lines, which cannot be lined up against a suspect
+ * second of tape.  The file defaults to $XDG_STATE_HOME/pctv-monitor.log and
+ * is written whether or not stderr is a terminal; PCTV_LOG=<path> moves it,
+ * PCTV_LOG=0 drops the file (terminal output then runs undecorated).
+ *
+ * Plumbing: fd 2 becomes the write end of a pipe and a tee thread reads it
+ * back.  A write() shorter than PIPE_BUF - every line any of these programs
+ * produces - arrives whole, and the tee stamps it as it is received, which
+ * trails the write by the thread's wake-up latency, not by anything worse;
+ * the pipe is drained the moment it has bytes.  The write end is O_NONBLOCK
+ * (and O_NONBLOCK survives exec, so the children share it): a full pipe -
+ * tee starved of CPU, log disk hung - drops log lines instead of ever
+ * blocking a capture thread.  Logging that can stop a take is worse than a
+ * missing line.  For the same reason the tee drops itself to SCHED_OTHER
+ * (it is created after become_rt and would inherit SCHED_FIFO): a realtime
+ * thread holding the CPU across a blocked writeback is exactly the stall the
+ * capture cannot afford.  The two clocks are paired on one line at session
+ * start so an NTP step mid-take is visible - every internal figure lives on
+ * the monotonic side of that pair. */
+static int log_term = -1;                 /* where fd 2 pointed pre-pipe */
+static int log_fd   = -1;                 /* the log file; -1 = none (PCTV_LOG=0) */
+static int log_rd   = -1, log_wr = -1;    /* the pipe */
+static pthread_t log_tee;
+static int log_tee_up;
+
+static void log_line(const char *line, size_t n)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tmv;
+    localtime_r(&ts.tv_sec, &tmv);
+    char out[4200];
+    int pre = snprintf(out, sizeof out,
+                       "[%04d-%02d-%02dT%02d:%02d:%02d.%06ld] ",
+                       tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                       tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                       (long)ts.tv_nsec / 1000);
+    if (pre < 0) return;
+    if (n > sizeof out - (size_t)pre - 2)
+        n = sizeof out - (size_t)pre - 2;     /* the stamp wins, the tail loses */
+    memcpy(out + pre, line, n);
+    out[pre + n] = '\n';
+    size_t total = (size_t)pre + n + 1;
+    for (int i = 0; i < 2; i++) {
+        int fd = i ? log_fd : log_term;
+        if (fd < 0) continue;
+        size_t off = 0;
+        while (off < total) {
+            ssize_t w = write(fd, out + off, total - off);
+            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
+            off += (size_t)w;
+        }
+    }
+}
+
+static void log_finish(void);
+
+static void *log_tee_main(void *unused)
+{
+    (void)unused;
+    struct sched_param sp = { .sched_priority = 0 };
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+    char buf[4096], line[4096];
+    size_t ln = 0;
+    for (;;) {
+        ssize_t n = read(log_rd, buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;                /* EOF: fd 2 closed, buffer drained */
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == '\n') { if (ln) log_line(line, ln); ln = 0; }
+            else if (ln < sizeof line) line[ln++] = buf[i];
+            /* an endless \r without \n (someone's progress bar) fills the
+             * line buffer and then discards - nothing worth keeping lives
+             * in the tail of one of those anyway */
+        }
+    }
+    if (ln) log_line(line, ln);
+    return NULL;
+}
+
 static void log_to_file(const char *why)
 {
     const char *e = getenv("PCTV_LOG");
     if (e && !strcmp(e, "0")) return;
-    if (isatty(2) && !e) return;
     char path[512];
+    int have_path = 1;
     if (e)
         snprintf(path, sizeof path, "%s", e);
     else {
@@ -4573,15 +4653,89 @@ static void log_to_file(const char *why)
         }
     }
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd < 0) return;
-    dup2(fd, 2);
-    close(fd);
-    char ts[32];
-    time_t now = time(NULL);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tmv);
-    fprintf(stderr, "pctv-monitor: %s at %s: logging to %s\n", why, ts, path);
+    if (fd < 0) {
+        /* A file we chose ourselves failing is fatal for the file only; the
+         * stamped terminal copy is still worth having. */
+        if (e) return;                    /* asked for and refused: stay plain */
+        have_path = 0;
+    }
+    int p[2];
+    if (pipe(p)) { if (fd >= 0) close(fd); return; }
+    int fl = fcntl(p[1], F_GETFL, 0);
+    if (fl >= 0) fcntl(p[1], F_SETFL, fl | O_NONBLOCK);
+    log_term = dup(2);                    /* the terminal/journal, out of harm's way */
+    if (log_term < 0) { close(p[0]); close(p[1]); if (fd >= 0) close(fd); return; }
+    dup2(p[1], 2);
+    close(p[1]);
+    /* Our own reference to the write end: shutdown closes it and then hands
+     * fd 2's back, and only then may the tee see EOF - the children holding
+     * inherited copies are all reaped by that point. */
+    log_wr = dup(2);
+    log_rd = p[0];
+    log_fd = fd;
+
+    struct sched_param sp0 = { .sched_priority = 0 };
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+    pthread_attr_setschedparam(&at, &sp0);
+    if (pthread_create(&log_tee, &at, log_tee_main, NULL) != 0) {
+        pthread_attr_destroy(&at);
+        /* Fall back to the pre-tee behaviour: file only, no stamps. */
+        if (fd >= 0) { dup2(fd, 2); close(fd); }
+        else dup2(log_term, 2);
+        close(log_term);
+        close(log_rd); close(log_wr);
+        log_fd = log_rd = log_wr = log_term = -1;
+        return;
+    }
+    pthread_attr_destroy(&at);
+    log_tee_up = 1;
+    atexit(log_finish);       /* every exit path: main's, and the early ones */
+
+    struct timespec rt, mt;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    clock_gettime(CLOCK_MONOTONIC, &mt);
+    fprintf(stderr, "pctv-monitor: log start: %s -> %s, wall %lld.%06ld, mono "
+                    "%lld.%06ld (pid %d)\n",
+            why, have_path ? path : "terminal only, file not openable",
+            (long long)rt.tv_sec, rt.tv_nsec / 1000,
+            (long long)mt.tv_sec, mt.tv_nsec / 1000, (int)getpid());
+}
+
+/* Drain what is already in the pipe, stop the tee, and hand fd 2 back.  After
+ * this (two lines' worth of) output goes straight to the terminal and the
+ * file, still stamped, written by whoever still needs it. */
+static void log_finish(void)
+{
+    if (!log_tee_up) return;
+    log_tee_up = 0;
+    close(log_wr);   log_wr = -1;
+    close(2);        /* our write ends: the tee drains, then sees EOF */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 2;
+    /* `stuck` is only reachable when an abandoned child - the "encoder
+     * ignored SIGTERM and SIGKILL" path - still holds an inherited write
+     * end, so EOF never comes.  Everything already written HAS been
+     * flushed: the tee drains eagerly and only ever rests in read() with
+     * an empty buffer.  Leave it running; the process exit closes it. */
+    int stuck = pthread_timedjoin_np(log_tee, NULL, &deadline) == ETIMEDOUT;
+    dup2(log_term, 2);               /* so anything still printing has a 2 */
+    struct timespec rt, mt;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    clock_gettime(CLOCK_MONOTONIC, &mt);
+    char msg[160];
+    int n = snprintf(msg, sizeof msg,
+                     "pctv-monitor: log end: wall %lld.%06ld, mono %lld.%06ld",
+                     (long long)rt.tv_sec, rt.tv_nsec / 1000,
+                     (long long)mt.tv_sec, mt.tv_nsec / 1000);
+    if (n > 0) log_line(msg, (size_t)n);
+    if (!stuck) {
+        if (log_fd >= 0) { close(log_fd); log_fd = -1; }
+        close(log_term); log_term = -1;
+    }
 }
 
 int main(int argc, char **argv)
@@ -5271,6 +5425,56 @@ int main(int argc, char **argv)
                      INPUT_LABEL[cur_input], grey ? " [grey]" : "",
                      recording ? " [RAW]" : "", recmode, fps);
             SDL_SetWindowTitle(win, title);
+            /* One line a second, with or without PCTV_VERBOSE: the take as a
+             * diffable record.  `fld` is what the ADC delivered, `f` what the
+             * muxer committed - the difference is the pipeline's debt, and
+             * `q`/`sp` say where it lives; `e` is the part of it that shows
+             * up at the lips.  Everything after e= is a per-second delta of
+             * a counter that is otherwise cumulative: an unbroken line of
+             * zeros is a healthy take, and the second the zeros stop is the
+             * second to go look at.  Together with the µs stamp on every log
+             * line this is the repair index: it says where in the file to
+             * look, and the master's fixed grid (829440 B of video, 1920 B
+             * of audio per 40 ms frame, docs/pctv-analog-capture.md §14)
+             * turns a frame count straight into a byte offset. */
+            {
+                static unsigned long long pv, pa, prp, psk, prf, psp, ppd, psl, pxx, pda;
+                static int primed;
+#define HBDEL(cur, prev) ((cur) >= (prev) ? (cur) - (prev) : (cur))
+                struct timespec mt;
+                clock_gettime(CLOCK_MONOTONIC, &mt);
+                unsigned long long vf, ab, rp, sk, rf, da;
+                pthread_mutex_lock(&cap_mtx);
+                vf = cap_vframes; rp = cap_vrepeats; sk = cap_vskips;
+                rf = cap_vrefused; ab = cap_abytes; da = cap_adrops;
+                pthread_mutex_unlock(&cap_mtx);
+                int q, sp;
+                pthread_mutex_lock(&vq_mtx);
+                q = vq_count; sp = (int)sp_count;
+                pthread_mutex_unlock(&vq_mtx);
+                if (primed) {
+                    /* a take reset the counters mid-window (cap_vframes is
+                     * zeroed at take start): HBDEL reads that as "everything
+                     * since the last line" and the next second is exact. */
+                    fprintf(stderr,
+                            "monitor: HB t=%.6f f=%llu fld=%.1f a=%llu q=%d sp=%d "
+                            "e=%+d dup=%llu skip=%llu ref=%llu spill=%llu pad=%llu "
+                            "sil=%llu xrun=%llu adrop=%llu\n",
+                            (double)mt.tv_sec + mt.tv_nsec / 1e9,
+                            HBDEL(vf, pv), fps,
+                            HBDEL(ab, pa) / 4u,        /* stereo s16: 4 B a sample */
+                            q, sp, rs_phase_ms,
+                            HBDEL(rp, prp), HBDEL(sk, psk), HBDEL(rf, prf),
+                            HBDEL(cap_spill_frames, psp), HBDEL(rs_pad_frames, ppd),
+                            HBDEL(cap_a_silence_bytes, psl) / 4u,
+                            HBDEL(xruns_total, pxx), HBDEL(da, pda));
+                }
+                pv = vf; pa = ab; prp = rp; psk = sk; prf = rf;
+                psp = cap_spill_frames; ppd = rs_pad_frames; psl = cap_a_silence_bytes;
+                pxx = xruns_total; pda = da;
+                primed = 1;
+#undef HBDEL
+            }
             if (getenv("PCTV_VERBOSE")) {
                 stage_max[1] = feed_max_ms; feed_max_ms = 0;
                 pthread_mutex_lock(&vq_mtx);

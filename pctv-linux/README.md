@@ -468,7 +468,7 @@ Knobs for the capture path (all environment, all optional):
 | `PCTV_TUNE` | 1 | `0` skips the probe's stream-time tuning (cpu_dma_latency, cpufreq `performance`, usbfs_memory_mb) for an A/B run |
 | `PCTV_CLOCK` | - | **retired 2026-11-04**: both capture-clock modes were replaced by the coupled commit (one picture + its 40 ms of sound, written together - see §14.2f of the doc); setting it only logs a warning now |
 | `PCTV_FFMPEG_DEBUG` | - | print the whole ffmpeg command line at capture start |
-| `PCTV_LOG` | file when detached | `$XDG_STATE_HOME/pctv-monitor.log` holds every line when there is no terminal (the desktop launcher has none, so `dup`/`skip`/`held` used to vanish with it); `PCTV_LOG=/path` picks the file, `PCTV_LOG=0` keeps stderr as-is |
+| `PCTV_LOG` | **always on** | every line - monitor, probe and ffmpeg alike - goes to `$XDG_STATE_HOME/pctv-monitor.log` AND to the terminal, each stamped `[YYYY-MM-DDTHH:MM:SS.µs]` by a tee thread that can never block a capture thread (a full log pipe drops lines, never stalls the take); a `log start:` line pairs wall-clock with the monotonic clock so an NTP step mid-take is visible. `PCTV_LOG=/path` moves the file, `PCTV_LOG=0` drops it and leaves stderr undecorated |
 | `PCTV_MASTER` | `dvd` | `dvd` / `uyvy` / `ffv1` (`--master` on the command line) |
 | `PCTV_RT_PRIO` | monitor 8, probe 10 | `0` turns RT off for an A/B run.  Inside the monitor the capture writer and the ALSA reader always sit one level above the parser/renderer (9 vs 8), and never below whatever this sets |
 | `PCTV_VERBOSE` | - | one status line per second, including `q <depth> dup N skip N` |
@@ -521,6 +521,26 @@ That breakdown is the instrument for "the picture froze": a large `render` gap
 is the display path, a large `parse` gap is the incoming stream, and a `feed`
 gap or a full queue means the encoder is not keeping up.  `PCTV_HELP=1` starts
 with the help overlay up (it is normally toggled with `H`).
+
+Independent of `PCTV_VERBOSE`, one `HB` line lands in the log every second -
+the take as a diffable record, with `f`/`a`/`dup`/... as **deltas over the last
+second** and `q`/`sp`/`e` as instantaneous values:
+
+```
+monitor: HB t=899068.776592 f=25 fld=50.0 a=48000 q=1 sp=0 e=+0 dup=0 skip=0 ref=0 spill=0 pad=0 sil=0 xrun=0 adrop=0
+```
+
+`t` is the monotonic clock in seconds (it pairs with the `log start:` anchor
+line; every log line's stamp is the same moment on the wall clock), `fld` the
+fields/s the ADC delivered, `f` the pictures the muxer committed - a `fld` of
+50 with an `f` below 25 is the pipeline falling behind, live. `q`/`sp` say
+where the backlog lives (RAM queue / spilled to disk, §14.2g), `e` is the
+A/V phase the resampler is steering. The rest are the loss counters of the
+stop line, one second at a time: an unbroken line of zeros is a healthy take,
+and **the second the zeros stop is the second to go look at**. Frame numbers
+map straight into the master - 829440 B of video and 1920 B of audio per
+40 ms frame - so `f`-sums are byte offsets: this is the index a repair pass
+(starting where §14.2e leaves off) reads instead of re-watching tape.
 
 With **no source playing** the decoder's lock poll (`poll for a real lock`,
 16 × 500 ms in `analog2_bringup`) delays the first data by ~8 s; the monitor
