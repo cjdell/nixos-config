@@ -36,10 +36,14 @@ let
 
   # serve/server.py needs jinja2 (chat template) and regex (tokenizer);
   # pillow (WebP image parts) and psutil (Monitor) are optional; numpy is
-  # only used by the one-time pack tools, bundled for convenience.  0.2.7.1
-  # adds NO required import: jsonschema/referencing stay a lazy optional
-  # import in serve/structured.py (absent -> "one JSON object" only), and
-  # textual/rich/requests/tqdm are Terminal/monitor-only.
+  # only used by the one-time pack tools, bundled for convenience.  0.2.11
+  # adds NO required import: the only module-scope addition in server.py is
+  # PICTURE_FORMATS from serve.ds_pictures (internal, stdlib); the new
+  # strata_control modules (sysinfo.py, arg_layers.py) are stdlib-only and
+  # the strata_control.runtime import is function-local; jsonschema/
+  # referencing stay a lazy optional import in serve/structured.py (absent ->
+  # "one JSON object" only), and textual/rich/requests/tqdm are
+  # Terminal/monitor-only.
   serverPython = python3.withPackages (
     ps: with ps; [
       jinja2
@@ -52,42 +56,71 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.2.10";
+  version = "0.2.11";
 
-  # v0.2.10 (2026-11-02, rev db0500a5) - the current release AND main's HEAD at
-  # update time (the GitHub compare of v0.2.10...main says "identical"), engine
-  # 0.1.56 (CMakeLists.txt:11). Follows 0.2.7.1/46c152a1 (2026-10-28).
+  # v0.2.11 (2026-11-05, rev c3b3f503) - the current release; main is 3 commits ahead of the tag and all
+  # three are README/FUNDING/docker, so the tag is the pin. Engine 0.1.57 (CMakeLists.txt:11), app/Terminal
+  # 0.2.11. Follows 0.2.10/db0500a5 (2026-11-02).
   #
-  # 0.2.7.1 -> 0.2.10 (checked against the trees, not the changelog; only what this build touches):
-  #   * The pinned llama.cpp is UNCHANGED: setup.py:237 LLAMA_CPP_COMMIT is still 3cf03257, so our `llama`
+  # 0.2.10 -> 0.2.11 (checked against the trees, not the changelog; only what this build touches):
+  #   * The pinned llama.cpp is UNCHANGED: setup.py:240 LLAMA_CPP_COMMIT is still 3cf03257, so our `llama`
   #     fetch and every ggml hash move not at all.
-  #   * THE AUDIT PATCH RE-BASED 2026-11-04: 3 of the 19 hunks rejected and were re-placed by hand, all
-  #     pure context shifts with the audit lines byte-identical: two in verify.cpp (upstream inserted a
-  #     strata::dispatch::notef() between the hits_in_combine compute and moe_hit_add, and widened the
-  #     tap_on_ gate to `(!batch_rec_ || tap_batch_)` for DFlash2) and one in iq_kernels.cu (the trailing
-  #     context line native_expert_set_expdec gained a tri-state: `on < 0 ? -1 : (on ? 1 : 0)`). The other
-  #     16 moved by offsets only. Regenerated from the patched tree: `patch -p1 --fuzz=0` with NO offsets
-  #     and `git apply --check` both clean on db0500a5. The #879 anchors (nf_mask_, hits_in_combine) intact.
-  #   * postPatch clamps: kv_q8.cu's target is still UNIQUE and still unclamped, still at :55;
-  #     prefill/kernels.cu's moved from :2257 to :2509 (was 2199 on 0.2.1.1), still exactly once and still
-  #     unclamped, hf_sat still defined above it. Both --replace-fail targets re-checked on db0500a5.
-  #   * serve/server.py: both installPhase rewrite targets still present exactly once; the retryable
-  #     "server error" prefix rewrite still applies. The engine launch is unchanged.
-  #   * Python surface: server.py gained three module-scope imports (strata_control.tls, .drafting,
-  #     .vram_fit) - all stdlib-only on that path (tls: ssl/sys; drafting: + mmap; vram_fit: clean), so
-  #     serverPython needs no changes.
-  #   * DRAFTING, the behaviour change to KNOW: 0.2.10 makes DFlash2 - a downloadable block drafter
-  #     (tools/dflash2_pack.py), not the MTP - the Auto pick for Qwen3.8-Flash-Next on CUDA/HIP/Metal/SYCL,
-  #     upstream measuring +6.6 % short / +4.2 % long decode on an R9700. We stay on the MTP: the config
-  #     now pins "drafting": "mtp" (see ./strata.nix) - decide() answers MTP anyway because the pack is
-  #     NOT_DOWNLOADED (data/ lives in the read-only store), but the pin survives any future default or
-  #     data_dir change. An engine started without --draft dflash2 never loads DFlash2 (default mtp).
-  #   * The 0.2.10 all-cards split engine starts from `strata launch`/the Terminal and needs exactly two
-  #     NVIDIA cc 8.6/12.0 or four R9700 cards - our serve + --config path and our one card are both out
-  #     of its way; no split_engine config key needed.
-  #   * 0.2.8: the automatic expert cache now respects the requested VRAM reserve (#4474). 0.2.9: fixes a
-  #     Qwen3.6 warm-up KV overrun - not our family. The gfx12 defaults notes for 0.2.5-0.2.7 below still
-  #     describe our runtime.
+  #   * THE AUDIT PATCH RE-BASED 2026-11-05: ZERO rejected hunks, for the first re-base in this file's
+  #     history. All 19 landed with `patch -p1 --fuzz=0`; four in iq_kernels.cu carried a +3-line offset,
+  #     everything else applied at its own line numbers. Regenerated from the patched tree: 19 hunks, 280
+  #     additions, 0 deletions, added lines BYTE-IDENTICAL to the 0.2.10 file (only context and hunk
+  #     headers moved), `patch -p1 --fuzz=0` with NO offsets and `git apply --check` both clean on
+  #     c3b3f503. The #879 anchors intact: nf_mask_/note_nonfinite (11 lines in verify.cpp) and
+  #     hits_in_combine. 0.2.11's touches to the audited files are the sfnx split-engine work and the
+  #     DFlash2 batch drafters - not our single-card IQ4_XS kernels.
+  #   * postPatch clamps: kv_q8.cu's target is still UNIQUE and still unclamped, still at :55 (zero "65504"
+  #     in the file); prefill/kernels.cu's is still exactly once and still unclamped, STILL at :2509 (the
+  #     0.2.10 line), hf_sat still defined above it (now :65). Both --replace-fail targets re-checked on
+  #     c3b3f503.
+  #   * serve/server.py: the installPhase rewrite targets MOVED - the mid-stream EngineDied message is now
+  #     built by died_note(e) (server.py:437, used by `err = ...died_note(e)` at :8658; the EngineDied 503
+  #     paths also call it but were never rewritten), so the first substituteInPlace below rewrites the
+  #     died_note call and prefixes "server error: " to its result. The ValueError target ("# headers are
+  #     sent, so no 400 now") is untouched at :8670. Upstream's #1892 guard is intact: all 17 non-finite/
+  #     retry lines still present. The engine launch is unchanged: popen([exe, "--serve", *args]).
+  #   * DFlash2 is LIVE as our drafter since 2026-11-04 ("drafting": "dflash2", see ./strata.nix) and
+  #     0.2.11 does not move our path: _SUPPORTED_NAME regex identical (qwen3.8-flash-next-unsloth-ud-iq4-xs
+  #     still passes, re-checked against the regex), SPEC_WINDOW 6 / DRAFT_CONF 0.35, drafting_fetch.py's
+  #     pinned bytes/sha/URLs unchanged so /home/cjdell/Strata/dflash2/'s selq4 pack is reused (no
+  #     re-download), and apply() shapes exactly the same flags (strips --mtp/--spec-min-p/our --spec, adds
+  #     --draft dflash2 --draft-model <pack> --draft-fallback none --spec 6 --draft-conf by-VRAM).
+  #   * Python surface: see the serverPython comment above - no changes needed.
+  #   * Build surface unchanged in every way the installPhase assumes: no install() rules; add_executable
+  #     (strata src/program/generate.cpp) now at CMakeLists.txt:898; STRATA_GGML_DIR still a CACHE PATH
+  #     (:2062); every cmake flag we pass is still an option; tools/vision still builds strata-vision with
+  #     the same LLAMA_DIR/STRATA_VISION_CUDA/STRATA_PORTABLE flags and the SVE1 record format lives in the
+  #     same two files; serve/ tools/ data/ strata_control/ strata_cli/ all still exist; iq_pack.py
+  #     --compat-bf16, expert-profile.bin, draft_vocab.bin, mtp_fetch/mtp_pack/mtp_rt all still there; all
+  #     18+ engine args ./strata.nix passes are still parsed by generate.cpp; so are every config key
+  #     (exe args drafting cwd tokenizer model_name log allowed_hosts backend lib_dirs vision env
+  #     before_load) and the --engine/--config/--host/--port CLI.
+  #   * gfx12/R9700 BEHAVIOUR CHANGES to EXPECT (from the release's "Behaviour that changed"; the full
+  #     comments are in ./strata.nix's env section): `--prefill auto` now tops out at a 32768-token chunk
+  #     (was 16384 since 0.1.44; RAM guard steps 32768->16384->8192; revert STRATA_GFX12_CHUNK=16/=0), the
+  #     prompt staging ring grows to 256/192 slots from 96 (bit-identical logits in upstream's test;
+  #     revert STRATA_GFX12_RING=0), and the K-quant prompt kernels turn on on gfx12 - for UD-Q4/Q5/Q6_K_XL
+  #     files; our pack is IQ4_XS, whose MMQ prompt path was already built in. Setup writing
+  #     STRATA_ROUTE_TAIL_SKIP=0 for Unsloth files is gone - never applied to us (our config is Nix-made and
+  #     the skip has been the engine default here since 0.1.43 at our 43 % expert cache). A VRAM-short
+  #     start with our named DFlash2 is now retried once with NO drafter (new SHORT_OF_VRAM reason, never
+  #     silently with MTP) - relevant at 232 MiB free; watch for "short of memory" in strata.log.
+  #   * NOT APPLICABLE HERE (checked so nobody re-reads the changelog): Unsloth's new v3.1 GGUF sets
+  #     (UD-IQ4_XS-v31 is a DIFFERENT set from our pack; ours keeps running untouched) and their new Q5_0
+  #     expert format; the 4x-R9700 all-cards split engine Auto pick (one card; our serve + --config path
+  #     stays out of its way); named-DFlash2 per-request drafters with --batch (one slot here); NVIDIA
+  #     K-quant kernels + 32768 chunk + FP16 weight cache; the PCIe CPU-pool follow-up rule (CUDA layer
+  #     splits and single NVIDIA cards - "HIP layer splits keep the old rule"); short-card layer-split
+  #     trim/walk; app chat-file storage and every Windows/app/Terminal fix; the DGX Spark.
+  #   * FIXED on the serve layer, free win: #2892, a reply going to the wrong request between model
+  #     replicas (Python-only; we run one slot). KNOWN, affects us, watch: #5153 - with a DFlash2-only run
+  #     (us since 2026-11-04, and this predates 0.2.11) saving/restoring a parked conversation can fail
+  #     "conversation snapshot: invalid K/V extent"; the turn survives, the next request just re-reads the
+  #     prompt. grep /var/lib/strata/strata.log for it if parked-conversation reuse ever drops.
   #
   # 0.2.1.1 -> 0.2.7.1 (checked against the trees, not the changelog; only what this build touches):
   #   * THE AUDIT PATCH IS STILL THE ONLY NON-UPSTREAM CODE, AND #879 IS NOT DEAD (the 2026-10-19 repro on
@@ -166,8 +199,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "db0500a53119a349fa44497099d6e28a83ded34a";
-    hash = "sha256-cIBcdKRYVH78bu4sElF0XK/wedcLTK8tu12c0Alzlw8=";
+    rev = "c3b3f5035506f3e966f1b4b7b188aeaabae92f1d";
+    hash = "sha256-YTKrlOqN97ISsaNZfpEqzLBAvglOI8Lq5G2KFTKQXWE=";
   };
 
   nativeBuildInputs = [
@@ -208,14 +241,13 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Our kernel AUDIT port (2026-10-05, from the 0.1.35 audit build; the HIP-adapted copy
   # of the upstream #879 reporter's instrumentation, gist 66419118nnn /
-  # 7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact pin db0500a5 (v0.2.10) on
-  # 2026-11-04: all 19 hunks apply with --fuzz=0 and NO offsets (checked against the fetched
-  # tree with both `patch -p1 --fuzz=0` and `git apply --check`), landing in
+  # 7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact pin c3b3f503 (v0.2.11) on
+  # 2026-11-05: zero rejections - all 19 hunks apply with --fuzz=0 (four in iq_kernels.cu with a +3-line
+  # offset only, the rest at their own line numbers), landing in
   # Verifier::init/record_window/run and inside native_expert_grouped - the #879 suspect site,
-  # still untouched upstream (0.2.8..0.2.10's changed lines in iq_kernels.cu are the
-  # DFlash2 kernels the split engine work added and the expdec tri-state setters, not our
-  # IQ4_XS kernels).  The added lines are byte-identical to the 0.2.7.1 file - three hunks
-  # were re-placed by hand (see the src comment), the rest moved by offsets.  Regenerated
+  # still untouched upstream (0.2.11's changed lines in iq_kernels.cu are the sfnx split-engine
+  # kernels and the DFlash2 batch-draft paths, not our IQ4_XS kernels).  The added lines are
+  # byte-identical to the 0.2.10 file.  Regenerated
   # from the patched tree, so every hunk applies with --fuzz=0; do not re-apply an old
   # file with fuzz (fuzz 3 once put the arena carve inside the mapped() chain and the
   # input audit inside the PLE try block).  #879 proved the repeated-token degeneration
@@ -245,9 +277,9 @@ stdenv.mkDerivation (finalAttrs: {
   # degeneracy the guard in serve/server.py exists to end (upstream #606;
   # ggml-org/llama.cpp#23606 is the same defect).
   #
-  # STATUS ON 0.2.10 (checked against the tree, not the changelog): 0.2.8..0.2.10 changed NEITHER
-  # clamp site into a clamp - kv_q8.cu's int8 append is still unclamped at :55 (still unique), and
-  # prefill/kernels.cu's clamp (3) target is still unclamped, having moved to :2509 -
+  # STATUS ON 0.2.11 (checked against the tree, not the changelog): neither clamp site moved into a clamp -
+  # kv_q8.cu's int8 append is still unclamped at :55 (still unique, and the file contains no "65504" at
+  # all), and prefill/kernels.cu's clamp (3) target is still unclamped and STILL at :2509 -
   # and upstream #1448
   # ("q8_1 scale overflow at the three remaining emit sites is clamped like the
   # others") landed in 0.1.41 and took over one of ours.  The three sites our 0.1.39
@@ -260,10 +292,11 @@ stdenv.mkDerivation (finalAttrs: {
   # build.  What is still unclamped upstream, and still ours:
   #   * the int8 KV cache block scale, decode (kv_q8.cu:55) and prompt
   #     (kv_append_kernel, prefill/kernels.cu:2509 - it moved from 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in
-  #     0.1.44.1, 1691 in 0.1.43 and 1340 in 0.1.42; hf_sat is still defined above it) -
+  #     0.1.44.1, 1691 in 0.1.43 and 1340 in 0.1.42, and 0.2.11 did not move it; hf_sat is still defined
+  #     above it) -
   #     never covered by #606 nor by #1448, and the site our incident-2
   #     132,947-token prompt was fixed by.  Still live: we run --kv int8.  Both --replace-fail
-  #     targets are still UNIQUE in their file (checked on db0500a5).
+  #     targets are still UNIQUE in their file (checked on c3b3f503).
   # #1448 also clamped the two sites we had deliberately left alone - fused_gr.cu
   # gr_q8_tail and verify_kernels.cu gdn_q8_1_store, both behind STRATA_QFUSE (off on
   # gfx1201) - so that "re-visit if STRATA_QFUSE is ever turned on" note is closed:
@@ -385,10 +418,14 @@ stdenv.mkDerivation (finalAttrs: {
 
     # (4, cont.) the retryable-guard rewrite, on the installed copy (see the
     # postPatch comment). substituteInPlace only uses sed, so it is safe here.
+    # 0.2.11 moved the EngineDied mid-stream message into died_note(e)
+    # (server.py:437); the rewrite wraps its result. The EngineDied 503 paths
+    # also call died_note but were never rewritten ("headers are sent" cases
+    # are the ones the client can only read as text).
     substituteInPlace $out/share/strata/serve/server.py \
       --replace-fail \
-        'err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}' \
-        'err = {"error": {"type": "server_error", "message": f"server error: {e}; the next request restarts it"}}' \
+        'err = {"error": {"type": "server_error", "message": died_note(e)}}' \
+        'err = {"error": {"type": "server_error", "message": "server error: " + died_note(e)}}' \
       --replace-fail \
         'err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now' \
         'err = {"error": {"type": "server_error", "message": "server error: " + str(e)}}   # headers are sent, so no 400 now'

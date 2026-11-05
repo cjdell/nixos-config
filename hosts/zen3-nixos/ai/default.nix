@@ -89,13 +89,19 @@
     #   "ud-iq4-xs"  Unsloth UD-IQ4_XS, 93.7 GB, ~4-bit dynamic: +8.6 GiB of
     #                experts and a smaller GPU expert cache, so slower at long
     #                context (docs/strata.md "UD-IQ4_XS")
+    #   "ud-iq4-xs-v31"
+    #                Unsloth's "Dynamic v3.1" re-cut of that same quant (2026-11-04):
+    #                four shards instead of three, 345 of 1224 tensors re-typed and
+    #                33 expert layers moved to Q5_0.  Needs the engine 0.1.57 that
+    #                ships with Strata 0.2.11.
     strataModel = lib.mkOption {
       type = lib.types.enum [
         "iq3s"
         "ud-iq4-xs"
+        "ud-iq4-xs-v31"
       ];
       default = "iq3s";
-      description = "the quant Strata serves: iq3s (GSQ-RCO) or ud-iq4-xs (Unsloth)";
+      description = "the quant Strata serves: iq3s (GSQ-RCO) or ud-iq4-xs[-v31] (Unsloth)";
     };
   };
 
@@ -103,7 +109,8 @@
     # The quant this box serves. Both packs are built by hand under
     # /home/cjdell/Strata/pack and the unit's ConditionPathExists refuses to
     # start one that is not there, so moving between them is this one line + a
-    # rebuild.  ud-iq4-xs since 2026-10-09 (docs/strata.md "UD-IQ4_XS").
+    # rebuild.  ud-iq4-xs since 2026-10-09 (docs/strata.md "UD-IQ4_XS"); flip to
+    # "ud-iq4-xs-v31" only once pack/ud-iq4-xs-v31 is packed and verified.
     ai.strataModel = "ud-iq4-xs";
 
     environment.systemPackages = with pkgs; [

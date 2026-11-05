@@ -49,8 +49,10 @@
 # nginx, the config JSON) is shared. The second pack is Unsloth's UD-IQ4_XS -
 # 93.7 GB in three shards instead of 78 GB in two:
 #
-#   scripts/fetch-strata-udiq4xs.sh    # 3 shards, size + sha256 verified
-#   scripts/repack-strata-udiq4xs.sh   # iq_pack.py --compat-bf16 (REQUIRED here)
+#   scripts/fetch-strata-udiq4xs.sh       # 3 shards, size + sha256 verified
+#   scripts/repack-strata-udiq4xs.sh      # iq_pack.py --compat-bf16 (REQUIRED here)
+#   scripts/fetch-strata-udiq4xs-v31.sh   # "Dynamic v3.1" re-cut: 4 shards
+#   scripts/repack-strata-udiq4xs-v31.sh  # same recipe, pack/ud-iq4-xs-v31
 #
 # Its experts are 59.5 GB (55.4 GiB) against IQ3_S's 51.05 GB, so it needs
 # --resident-budget-gib (see models.ud-iq4-xs below) and it costs GPU expert
@@ -119,6 +121,29 @@ let
       extraArgs = [
         "--resident-budget-gib"
         "55"
+      ];
+    };
+
+    # Unsloth "Dynamic v3.1" UD-IQ4_XS (2026-11-04 re-upload, revision
+    # d9620119), FOUR shards (1 = metadata only, 2/3 = tensors, 4 = the 26.8
+    # GiB PLE table). Another file than the three-shard set above: 345 of 1224
+    # tensors changed type and 33 expert layers moved to Q5_0, which is what
+    # engine 0.1.57 (Strata 0.2.11, UNSLOTH_V31_ENGINE in setup.py) is needed
+    # for. experts_bpw is unchanged at 3.999; the arena is 60.4 GB (55's cap
+    # was arena 59.5 -> int(59.5/1.0737) = 55, here int(60.4/1.0737) = 56).
+    # --native is shard 1 again and --ple-gguf stays null: with >2 shards the
+    # engine scans the shard set itself for the PLE table.
+    ud-iq4-xs-v31 = {
+      ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-v31-GGUF";
+      packDir = "${modelDir}/pack/ud-iq4-xs-v31";
+      nativeGguf = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-v31-GGUF/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00004.gguf";
+      pleGguf = null;
+      # "-unsloth-" keeps the DFlash2 name gate (see the entry above); the
+      # "-v31" tail stays inside its [a-z0-9._-]+ character class.
+      modelName = "qwen3.8-flash-next-unsloth-ud-iq4-xs-v31";
+      extraArgs = [
+        "--resident-budget-gib"
+        "56"
       ];
     };
   };
@@ -270,6 +295,16 @@ let
       # <by free VRAM>, picking the SELQ4 pack (0.72 GB VRAM vs 0.89) because our
       # HIP engine reads it. With --draft-fallback none, a DFlash2 that cannot
       # start FAILS the start rather than silently running MTP: revert = "mtp".
+      # 0.2.11 adds two things to know: a start that DIES of short VRAM is
+      # retried once with NO drafter (new reason SHORT_OF_VRAM, never silently
+      # MTP) - worth watching at 232 MiB free, "short of memory" in
+      # strata.log; and its #5153 known-problem applies to our DFlash2-only
+      # run: a parked-conversation snapshot can fail "conversation snapshot:
+      # invalid K/V extent", costing the next request a full prompt re-read
+      # (predates 0.2.11; grep strata.log if reuse drops, fix in a later
+      # engine). The name regex, SPEC_WINDOW 6, DRAFT_CONF and the
+      # drafting_fetch pack pins are all byte-identical on 0.2.11 - the
+      # existing selq4 pack is reused, no re-download.
       drafting = "dflash2";
       cwd = "/var/lib/strata";
       tokenizer = "${m.packDir}/tokenizer";
@@ -369,13 +404,24 @@ let
       #     requantizes that BF16 copy to Q8_0 at load - a little more load time and arena.
       #     Revert: env.STRATA_HC_Q8 = "0";
       #   * STRATA_GFX12_CHUNK - a bare `--prefill auto` (what engineArgs passes) may now chunk
-      #     prompts at 16384 instead of 8192 on gfx12. 0.1.44's #2090 guard keeps 8192 when the
-      #     available RAM does not cover the extra slot loan + 6 GiB, which is the case worth
-      #     watching here: --resident-budget-gib 55 on 94 GB. Revert: env.STRATA_GFX12_CHUNK =
-      #     "0"; (or STRATA_GFX12_DEFAULTS = "0" for both at once).
+      #     prompts at 32768 since 0.2.11 (16384 in 0.1.44-0.2.10, 8192 before; the RAM guard steps
+      #     32768 -> 16384 -> 8192 when available RAM does not cover the extra slot loan + 6 GiB,
+      #     which is the case worth watching here: --resident-budget-gib 55 on 94 GB; watch RAM during
+      #     long prompts and the "chunk" lines in strata.log). Upstream on an R9700: IQ3_S 20K +12.1 %,
+      #     UD-Q4_K_XL 20K +26 %; the "Known problems" note says chunk-size changes flip a few agent
+      #     prompts via near-tie block selection - answers CAN differ from 0.2.10 at those depths.
+      #     Revert: env.STRATA_GFX12_CHUNK = "16" (keep 16384) or "0" (8192);
+      #     STRATA_GFX12_DEFAULTS = "0" reverts all gfx12 defaults at once.
+      #     Same release on gfx12, both fine here: the prompt staging ring grows 96 -> 256/192 slots
+      #     (STRATA_GFX12_RING=0 back; upstream: first-token logits and greedy hashes identical), and
+      #     the K-quant MMQ prompt kernels turn on for UD-Q4/Q5/Q6_K_XL files (STRATA_MMQ_KQ=0 back) -
+      #     our pack is IQ4_XS, an i-quant, whose MMQ prompt path was already built in.
       # Carried over from 0.1.43 and unchanged: STRATA_ROUTE_TAIL_SKIP=7 and the measured PCIe
       # share are still on for gfx12 (we hold ~43% of the experts in the GPU cache, so the skip
-      # is active; KL ~0.003-0.006). `STRATA_ROUTE_TAIL_SKIP=0 --pcie-frac 0` is the A/B the
+      # is active; KL ~0.003-0.006). 0.2.11 additionally stopped having setup write
+      # STRATA_ROUTE_TAIL_SKIP=0 for Unsloth files on these cards - never applied to us, this
+      # config is Nix-made and the skip has been our engine default since 0.1.43.
+      # `STRATA_ROUTE_TAIL_SKIP=0 --pcie-frac 0` is the A/B the
       # maintainer asks for while #879 is open - pin those before reporting a capture.
       # Hang watchdog (#29) work-around, 2026-10-08: ROCr maps paged host
       # allocations through a KFD userptr, and while the kernel reclaims those

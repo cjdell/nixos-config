@@ -258,10 +258,10 @@ index 47977c1..497b9bf 100644
      // AFTER the window (the stream is synchronised above and the graph capture is over, so a plain copy is legal -
      // the same place STRATA_DBG_NAN copies from).  One record is
 diff --git a/src/kernels/cuda/iq_kernels.cu b/src/kernels/cuda/iq_kernels.cu
-index ee55718..a0b22a7 100644
+index 3053183..49fc1c5 100644
 --- a/src/kernels/cuda/iq_kernels.cu
 +++ b/src/kernels/cuda/iq_kernels.cu
-@@ -6235,6 +6235,59 @@ bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
+@@ -6238,6 +6238,59 @@ bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
  
  void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
  
@@ -321,7 +321,7 @@ index ee55718..a0b22a7 100644
  void native_expert_set_expdec(int on) { g_expdec = on < 0 ? -1 : (on ? 1 : 0); }
  int native_expert_expdec() { return expdec_mode(); }
  void native_expert_set_expdec_params(const NativeExpertExpdecParams& p) {
-@@ -6449,6 +6502,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+@@ -6452,6 +6505,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
      }
  #endif
      check("native_expert_grouped/gu");
@@ -330,7 +330,7 @@ index ee55718..a0b22a7 100644
      if (g_exp_phase == 3) return;   // the bench: gate/up only
      const long long nh = (long long) cap_entries * L.n_ff;
  #if defined(STRATA_HIP_GFX906)
-@@ -6465,6 +6520,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+@@ -6468,6 +6523,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
          if (L.had_block > 0)   // APR: the down weights are Hadamard-folded, so is their input (in place, every entry row)
              hadamard_rows(h, h, cap_entries, L.n_ff, L.had_block, L.d_signs, s);
          quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
@@ -338,7 +338,7 @@ index ee55718..a0b22a7 100644
      } else {
          swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, grp_start, n_groups,
                                                                                  (int) L.n_ff, hq);
-@@ -6520,6 +6576,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+@@ -6523,6 +6579,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
          default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
      }
      check("native_expert_grouped/down");
