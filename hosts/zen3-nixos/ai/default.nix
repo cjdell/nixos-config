@@ -109,9 +109,10 @@
     # The quant this box serves. Both packs are built by hand under
     # /home/cjdell/Strata/pack and the unit's ConditionPathExists refuses to
     # start one that is not there, so moving between them is this one line + a
-    # rebuild.  ud-iq4-xs since 2026-10-09 (docs/strata.md "UD-IQ4_XS"); flip to
-    # "ud-iq4-xs-v31" only once pack/ud-iq4-xs-v31 is packed and verified.
-    ai.strataModel = "ud-iq4-xs";
+    # rebuild.  ud-iq4-xs since 2026-10-09 (docs/strata.md "UD-IQ4_XS"), and
+    # its "Dynamic v3.1" re-cut since 2026-11-05 - packed same day, 35 layers
+    # with gate/up/down split across shards (native_experts v4, engine 0.1.57).
+    ai.strataModel = "ud-iq4-xs-v31";
 
     environment.systemPackages = with pkgs; [
       rocmPackages.rocminfo
