@@ -340,6 +340,9 @@ in
     systemd.timers."fah-pause-window" = lib.mkIf cfg.pauseFolding {
       description = "Trigger the Folding@home pause window at its edges (${cfg.pauseStart}-${cfg.pauseEnd})";
       wantedBy = [ "timers.target" ];
+      # Same-stem units are connected only by systemd's implicit Wants; state it
+      # explicitly so the trigger is visible in the rendered timer.
+      wants = [ "fah-pause-window.service" ];
       timerConfig = {
         OnCalendar = [
           cfg.pauseStart
