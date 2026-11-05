@@ -332,7 +332,8 @@ let
       # (vs 2/1399 on 7.2.3 the same day; the ROCm 7.2.1 r9700 libs fire again).
       # docs/strata-degeneration.md, docs/strata-maintainer-report.md.
       # Until 2026-10-14 this was /opt/rocm-10.0/lib laid down by hand by
-      # scripts/setup-rocm10-libs.sh. child_env() silently DROPS a missing dir,
+      # scripts/setup-rocm10-libs.sh (long since deleted with the /opt tree).
+      # child_env() silently DROPS a missing dir,
       # so that needed an ExecStartPre `test -e` to stop a silent fall back to
       # the buggy 7.2.3; a store path cannot be missing, so the guard is gone.
       lib_dirs = [ "${rocm10}/lib" ];

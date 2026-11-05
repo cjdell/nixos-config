@@ -1,8 +1,10 @@
 # Strata on zen3-nixos (Qwen3.8-Flash-Next)
 
-Status: **live on UD-IQ4_XS** since 2026-10-09 19:23 (IQ3_S from 2026-10-06,
-IQ3_XXS before that). `ai.strataModel` switches pack in one line, and IQ3_S is the
-faster of the two (~20 % on decode) — see "UD-IQ4_XS" below. Strata
+Status: **live on UD-IQ4_XS "Dynamic v3.1"** since 2026-11-05 15:20 (the October
+three-shard UD-IQ4_XS from 2026-10-09, IQ3_S from 2026-10-06, IQ3_XXS before
+that; both older packs deleted). `ai.strataModel` switches pack in one line, but
+with the GGUFs gone the other `models` entries are re-downloadable schema only.
+Strata
 (`github.com/Niko1221/Strata`) is the engine that runs the ~84-94 GB Qwen3.8-Flash-Next
 on the 32 GiB R9700 that llama.cpp could only do at ~6.5 tok/s. It
 replaces llama-swap on this box (see "Why llama-swap is off" below). This doc
@@ -18,6 +20,45 @@ the measured context / memory ceilings that were the point of the exercise.
 is available and deliberately **not enabled** — on this card it buys second-session
 waiting time and costs expert-cache slots and the MTP draft path. Analysis, the
 upstream measurement tables and the numbers to watch if that changes: [`strata-batching.md`](./strata-batching.md).
+
+## Dynamic v3.1 + Strata 0.2.10/0.2.11 (2026-11-04 / 11-05)
+
+**Strata 0.2.11** (`c3b3f503`, engine 0.1.57, live 2026-11-05) — bump from
+0.2.10 (`db0500a5`, live 2026-11-04) which was from 0.2.7.1. Nothing moved that
+matters operationally: same ggml pin, both `postPatch` clamp targets
+(`kv_q8.cu:55`, `prefill/kernels.cu:2509`) unmoved and still unclamped upstream,
+audit patch re-based with zero rejects (only 4 hunk headers moved, +3 lines in
+`iq_kernels.cu`), `SPEC_WINDOW` still 6, `LEADER_QUEUE` default unchanged. The
+installPhase retryable-guard rewrite was retargeted to the new `died_note(e)`
+mid-stream call (server.py:8658).
+
+**DFlash2 is the drafter** since 0.2.10 (`"drafting": "dflash2"`): incoai's block
+drafter replaces the MTP head (`--draft dflash2 --draft-model
+Strata/dflash2/…-selq4.pack --draft-fallback none --spec 6 --draft-conf 0.5`;
+`hnq4` was the A/B alternative, +2.7 tok/s worse over 24 samples, kept on disk).
+Measured here on identical 700-token prompts: decode 60.6 vs 59.1 mean, draft
+acceptance 71–78 % vs MTP's 68.7 %, expert slots UP 10608→10717 (the selq4
+drafter costs less VRAM than the MTP path it replaced). ⚠️ Two gates to
+remember: the model **name** must match `drafting.py::_SUPPORTED_NAME`
+(`-gyro-`/`-unsloth-` + a `(q|iq|tq)N`-style suffix — hence `…-unsloth-…-v31`),
+and `--draft-fallback none` makes a drafter that cannot start fail the service
+rather than silently running MTP. One-line revert: `"drafting": "mtp"`.
+
+**Dynamic v3.1** is Unsloth's 2026-11-02 re-cut of UD-IQ4_XS (HF rev
+`d9620119…`): same 3.999 bpw mix as the October set, but 345 of 1224 tensors
+re-typed (an entropy-coded rounding re-solve), 33 expert layers switched to the
+new **Q5_0** `down` format, `hc_match_*` bf16 copies now stored `bf16, bf16,
+bf16, q8_0`, and the shards are **4 instead of 3** with gate/up/down of 35
+layers landing in *different* shards — so `native_experts.txt` is the **v4
+per-role** form and `UNSLOTH_V31_ENGINE = "0.1.57"` makes engine ≥ 0.1.57 a
+hard requirement. `--resident-budget-gib 56` (setup.py's
+`int(arena_gb 60.4 / 1.0737)` cap). `--compat-bf16` is still REQUIRED (the
+`hc_match_*` q8_0 tensors, same as the October pack). Fetch + pack:
+`scripts/fetch-strata-udiq4xs-v31.sh` / `scripts/repack-strata-udiq4xs-v31.sh`
+(same sha-pinned, resumable, verify-before-pack shape as the ones they
+replace). Decode is in the same **60–64 tok/s at 92–94 %** band as the October
+UD pack on 0.2.7+ (it is the same quant family at the same bpw); the v31 upside
+is quality, not speed.
 
 ## IQ3_XXS -> IQ3_S (2026-10-06)
 
@@ -47,10 +88,11 @@ all; UD-IQ4_XS is analysed under "UD-IQ4_XS" below. (Nothing "squeezes the PLE
 page cache": the PLE table is read with `--ple-io direct` — the default,
 `generate.cpp:374` — unbuffered from NVMe, so it never competes for RAM.)
 
-When IQ3_S is trusted, reclaim the old files with
+When IQ3_S was trusted, the old IQ3_XXS files were reclaimed with
 `scripts/cleanup-strata-iq3xxs.sh --yes` (~46 GB: shard 1 and the iq3xxs pack;
-shard 2 is a hardlink, so unlinking it frees nothing). It refuses unless the
-engine is live and serving IQ3_S, and defaults to a dry run.
+shard 2 was a hardlink, so unlinking it freed nothing). The whole IQ3_XXS/IQ3_S
+file set is long gone (v3.1 era), and the script — whose gate was "refuse
+unless the engine is serving IQ3_S" — was deleted with them on 2026-11-05.
 
 Upstream pinned: **v0.1.42**, rev `61b3fb5dd3f1e8ec09cf7e4e05208bc6d3c46406`
 (`hosts/zen3-nixos/ai/strata-package.nix`), updated 2026-10-10 from v0.1.41
@@ -160,7 +202,13 @@ to us, read off the tree:
   57-token prompt decoded at 47.9 tok/s with 6/6 drafts accepted. No
   `verify: non-finite logits` fire on the first requests.
 
-## UD-IQ4_XS (live since 2026-10-09 19:23)
+## UD-IQ4_XS (live since 2026-10-09 19:23, superseded by v3.1 on 2026-11-05)
+
+> **Superseded 2026-11-05** by the Dynamic v3.1 re-cut (see the section above):
+> the three-shard GGUFs and `pack/ud-iq4-xs` are deleted, as are the GSQ-RCO
+> IQ3_S files, so "`iq3s` as the speed fallback" below is history — both need a
+> re-fetch first. The decode analysis carries over to v3.1 (same quant family,
+> same 3.999 bpw).
 
 Unsloth's ~4-bit **UD-IQ4_XS** is the one rung above IQ3_S this box can run, and
 `ai.strataModel = "ud-iq4-xs"` has served it since **2026-10-09 19:23:07**
@@ -732,10 +780,10 @@ never be imported at once.
 
 | Piece | Path |
 | --- | --- |
-| GGUFs (4 quants, IQ3_S in use) | `/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` |
-| pack (index + dense + tokenizer) | `/home/cjdell/Strata/pack/iq3s/` (~1.5 GB) |
-| MTP fetch source | `/home/cjdell/Strata/mtp/mtp-q2_0.gguf` + `tensors/` |
-| MTP draft runtime | `/home/cjdell/Strata/mtp/rt/` (`experts.bin`, `dense.bin`, `draft_vocab.bin`) |
+| GGUFs (UD-IQ4_XS **v3.1**, 4 shards, 93.7 GB) | `/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-v31-GGUF/` (SHA-pinned by `scripts/fetch-strata-udiq4xs-v31.sh`; the GSQ-RCO IQ3_S and October three-shard UD GGUFs are deleted) |
+| pack (index + dense + tokenizer) | `/home/cjdell/Strata/pack/ud-iq4-xs-v31/` (~1.4 GB, `scripts/repack-strata-udiq4xs-v31.sh`) |
+| DFlash2 drafter packs | `/home/cjdell/Strata/dflash2/` — `…q4_0-selq4.pack` live (the one `pack_path()` picks for HIP), `…q4_0-hnq4.pack` kept (measured slower) |
+| MTP fallback (drafter revert path) | `/home/cjdell/Strata/mtp/` — `rt/` (`draft_vocab.bin` is in the live ExecStart) + `mtp-q2_0.gguf`; the `tensors/` intermediate (4.9 G) is deleted, `mtp_fetch.py` regenerates it |
 | Nix package (engine + serve + encoder) | `hosts/zen3-nixos/ai/strata-package.nix`, flake attr `.#strata` |
 | NixOS module + nginx | `hosts/zen3-nixos/ai/strata.nix` |
 | Vision encoder weights (0.85 GiB) | `/home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, fetched + SHA-checked by `scripts/fetch-strata-mmproj.sh` |
@@ -750,6 +798,12 @@ aliases) because the serve layer has a DNS-rebinding Host check:
 **403** even though the same request on `192.168.49.50` works.
 
 ## Preparing the model data (one time, outside Nix)
+
+> As of 2026-11-05 the live recipe is just `scripts/fetch-strata-udiq4xs-v31.sh`
+> then `scripts/repack-strata-udiq4xs-v31.sh` (they wrap everything below for
+> the v3.1 pack, including the `--compat-bf16` step). What follows is the
+> original IQ3_S-era procedure, kept because the `models.iq3s` schema entry and
+> the MTP fallback tooling still reference it.
 
 `apps.strata` only ships the engine and the Python `serve`/`tools`/`data`
 layers. The model data is hand-prepared, because the pack tools are not

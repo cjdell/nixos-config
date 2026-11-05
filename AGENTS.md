@@ -680,8 +680,9 @@ its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
   **`client_max_body_size 32m;`** (nginx's 1 MiB default 413s a whole-session
   metadata prompt).
 - **Active model:** whatever the :8080 engine serves — Strata's
-  `qwen3.8-flash-next-unsloth-ud-iq4-xs` (renamed 2026-11-04 for the DFlash2
-  name gate, see the Strata section) via `config.ai.strataModel` again since
+  `qwen3.8-flash-next-unsloth-ud-iq4-xs-v31` (renamed 2026-11-04 for the DFlash2
+  name gate, `-v31` on 2026-11-05 with the Dynamic v3.1 pack; see the Strata
+  section) via `config.ai.strataModel` again since
   2026-11-04 (the brief Avalon interlude served `--alias qwen3.8-flash-next`).
   Recallium's DB row still says
   `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, provider
@@ -1096,19 +1097,22 @@ flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
 procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.10** (`db0500a53119a349fa44497099d6e28a83ded34a`, updated 2026-11-04 from
-0.2.7.1 `46c152a1` — the v0.2.10 tag is exactly main's HEAD, so this is bleeding
-edge). 0.2.0 split the repo into **app + Terminal + engine** — the
-engine source in this tag is version 0.1.56 (`CMakeLists.txt:11`), and `serve/server.py` imports the
+**0.2.11** (`c3b3f5035506f3e966f1b4b7b188aeaabae92f1d`, updated 2026-11-05 from
+0.2.10 `db0500a5` — the v0.2.11 tag is main minus 3 README/FUNDING/docker
+commits, all docs-only, so it stays bleeding edge). 0.2.0 split the repo into
+**app + Terminal + engine** — the engine source in this tag is version 0.1.57
+(`CMakeLists.txt:11`), and `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-11-04 (0.2.10)** — `ExecStart` names `/nix/store/49m09w5f94jlwr5dw01q9wnnzvplrz9q-strata-0.2.10`
-and `/v1/status` reports `"engine": "0.1.56"`):
+2026-11-05 (0.2.11)** — `ExecStart` names `/nix/store/85ag3v1hzpw8jha283fg7syyxgg9hhwr-strata-0.2.11`
+and `/v1/status` reports `"engine": "0.1.57"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
-`Qwen3.8-Flash-Next-UD-IQ4_XS` (Unsloth ~4-bit GGUF) since 2026-10-09 19:23 —
-switchable back to GSQ-RCO `IQ3_S`, which is faster (see the next bullet). Docs:
+`qwen3.8-flash-next-unsloth-ud-iq4-xs-v31` — Unsloth's **Dynamic v3.1** re-cut of
+UD-IQ4_XS, live since 2026-11-05 15:20 (see the pack bullet below; the old
+three-shard UD-IQ4_XS and the GSQ-RCO IQ3_S GGUFs have been deleted, so the
+`iq3s` / `ud-iq4-xs` entries in `models` are re-downloadable schema only). Docs:
 [`docs/strata.md`](docs/strata.md).
 
 **One request at a time** (`/v1/status` → `concurrency.serving: 1`): Strata's
@@ -1145,7 +1149,10 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `strata_control/drafting_fetch.ensure()`, pack sha checked against upstream's PINNED
   bytes), which serve's `drafting.apply()` starts **instead of** the MTP head (strips
   `--mtp`/`--spec-min-p`/our `--spec`, adds `--draft dflash2 --draft-model <pack>
-  --draft-fallback none --spec 8 --draft-conf 0.5`). The packs live in
+  --draft-fallback none --spec N --draft-conf 0.5`; N is `SPEC_WINDOW` = **6 on
+  both 0.2.10 and 0.2.11** (this file once said 8 — stale; the live `ExecStart`
+  carries `--spec 6`), re-check per bump).
+  The packs live in
   `/home/cjdell/Strata/dflash2/` (`data_dir` derives from our `--mtp` arg) — the
   **selq4** pack (339 MB, selector codebooks Q4_0, "about 174 MiB less") is the one
   `pack_path()` picks because our HIP engine reads it. A/B on identical 700-token prompts
@@ -1155,28 +1162,35 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   draft path it replaces; live agent traffic shows 95–98 % cache hits.
   ⚠️ **Name gate:** `drafting.py::_SUPPORTED_NAME` accepts only `qwen3.8-flash-next` +
   `-gyro-*`/`-unsloth-*`/a `(q|iq|tq)N` quant suffix, so the pack was renamed
-  **`qwen3.8-flash-next-unsloth-ud-iq4-xs`** (`modelName` in `strata.nix`) — the old
+  **`qwen3.8-flash-next-unsloth-ud-iq4-xs`** on 2026-11-04 (`modelName` in
+  `strata.nix`; `...-v31` since 2026-11-05, which stays inside the `-unsloth-`
+  class) — the old
   `...-ud-iq4-xs` shape silently answered `Drafting: MTP (DFlash2 is for
   Qwen3.8-Flash-Next only)`. The name is cosmetic at runtime (serve routes by engine) but
-  `/v1/models` and `/metrics` echo it and **it must keep matching that regex on any
+  `/v1/models` and `/metrics` echo it (and it is the id the `strata` provider in
+  `users/cjdell/opencode.nix` declares), so **it must keep matching that regex on any
   future rename or Strata bump**. `--draft-fallback none` means a drafter that cannot
   start FAILS the service start rather than silently running MTP — if strata ever
   crash-loops on boot after a bump, `"drafting": "mtp"` is the one-line revert.
-- **Two packs, one switch: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
-  sets `"ud-iq4-xs"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
-  carries `models.iq3s` / `models.ud-iq4-xs` (GGUF + pack paths, `--ple-gguf` only for
-  the 2-shard pack, and `--resident-budget-gib 55` for the UD one). The second pack is
-  Unsloth **UD-IQ4_XS** (93.7 GB / 3 shards, fetched by
-  `scripts/fetch-strata-udiq4xs.sh`, packed by `scripts/repack-strata-udiq4xs.sh`
-  with **`--compat-bf16` required** — its 195 `hc_*` projections are Q8_0, which the
-  AMD build cannot read natively in 0.1.41). **Live since 2026-10-09 19:23**, and it
-  is **~20 % slower at decode than IQ3_S** (48-57 tok/s at 90-93 % expert-cache hits
-  vs 62-68 at 92-97 %, same 66-70 K depth; on 0.2.7.1 (live 2026-10-29, then 0.2.10 on 2026-11-04) it measures
-  **60-64 tok/s at 92-94 % hits** - the 0.2.7 RX 9000 decode rework largely closed the gap):
-  10,679 cache slots instead of 13,104, so 1.7x the misses at 1.18x the bytes each. Prefill is unchanged (~1,250 tok/s) and
-  262144 ctx is unaffected; RAM is calmer (39 GiB, `MemorySwapPeak` 0). Flip the line
-  back to `"iq3s"` if decode speed matters more than the weights. Analysis, quant mix
-  and measurements: [`docs/strata.md`](docs/strata.md) "UD-IQ4_XS".
+- **One pack live, two kept as schema: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
+  sets `"ud-iq4-xs-v31"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
+  carries `models.iq3s` / `models.ud-iq4-xs` / `models.ud-iq4-xs-v31` (GGUF + pack
+  paths, `--ple-gguf` only for the 2-shard pack, `--resident-budget-gib 55` for the
+  old UD one and **`56` for v31** = setup.py's `int(arena_gb 60.4 / 1.0737)` cap).
+  The live pack is Unsloth **UD-IQ4_XS "Dynamic v3.1"** (93.7 GB / **4 shards**, rev
+  `d9620119…`, fetched by `scripts/fetch-strata-udiq4xs-v31.sh`, packed by
+  `scripts/repack-strata-udiq4xs-v31.sh` — same **`--compat-bf16` REQUIRED** recipe;
+  35 layers put gate/up/down in different shards, so `native_experts.txt` is the
+  **v4 per-role** form and engine ≥ 0.1.57 (0.2.11) is a hard requirement,
+  `UNSLOTH_V31_ENGINE`). It is a different file from the October three-shard
+  UD-IQ4_XS: 345 of 1224 tensors re-typed, 33 expert layers on the new Q5_0 down
+  format, experts_bpw unchanged at 3.999 — so the old decode analysis applies
+  (**60-64 tok/s at 92-94 % hits** on 0.2.7+; ~1,250 tok/s prefill; 393216 ctx).
+  **Live since 2026-11-05 15:20**; the old three-shard GGUFs + `pack/ud-iq4-xs`
+  and the GSQ-RCO IQ3_S GGUFs + `pack/iq3s` were deleted as it went live, so
+  `"iq3s"`/`"ud-iq4-xs"` now only compile if you re-fetch first (their scripts
+  stay). Analysis, quant mix and measurements: [`docs/strata.md`](docs/strata.md)
+  "UD-IQ4_XS" + "Dynamic v3.1".
 - **A long-context reply can collapse to one repeated token (or a thinking-only
   turn with no answer).** This is the **fp16-overflow #606 class**, not a model
   quality issue: a `q8_1` activation block stores its scale and 32-value sum as
@@ -1191,8 +1205,9 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
   the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
   `prefill/kernels.cu:2509` (was 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
-  live here because we run `--kv int8`. Still unclamped on 0.2.10: the intervening releases moved
-  the target lines but clamped neither, so both `postPatch` clamps are still needed and both
+  live here because we run `--kv int8`. Still unclamped on 0.2.11 — and 0.2.11 did
+  not even move the targets (`kv_q8.cu:55` and `prefill/kernels.cu:2509` are the
+  0.2.10 lines) — so both `postPatch` clamps are still needed and both
   `--replace-fail` targets are still unique.
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
@@ -1227,7 +1242,11 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   growing a tri-state `on < 0` — the trailing context line of the iq_kernels.cu hunk).
   The other 16 landed with offsets only. Regenerated from the patched tree: 19 hunks,
   280 additions, 0 deletions, byte-identical added lines, `--fuzz=0` with **no offsets**
-  (`patch -p1 --fuzz=0` and `git apply --check` both clean). (Earlier re-bases: onto
+  (`patch -p1 --fuzz=0` and `git apply --check` both clean). Re-based onto **0.2.11** on
+  2026-11-05 with **zero rejects**: the file regenerated from the patched tree is the
+  0.2.10 one with byte-identical added lines and only 4 hunk headers moved — a pure
+  **+3-line drift in `src/kernels/cuda/iq_kernels.cu`** (the `native_expert_grouped`
+  region) — so a 0.2.12 rebase is likewise just an offset check. (Earlier re-bases: onto
   0.2.7.1 on 2026-10-29, 6 hand-placed — `topk_scratch_` in verify.hpp, the `sh_fork`
   `note_prio_tail` body, the `grouped()` trailing `true` + `ar_on()` branch (never live
   at our 43 % cache), the `tap_on_` block after `stamp(l, 24`, `tap_write`/

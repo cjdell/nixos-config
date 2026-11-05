@@ -80,10 +80,10 @@ in
       # Self-hosted Strata (Qwen3.8-Flash-Next on the zen3-nixos R9700),
       # reached over the public HTTPS endpoint so it works from every host.
       provider.strata = {
-        models."qwen3.8-flash-next-ud-iq4-xs" = {
+        models."qwen3.8-flash-next-unsloth-ud-iq4-xs-v31" = {
           _launch = true;
           tools = true;
-          name = "qwen3.8-flash-next-ud-iq4-xs";
+          name = "qwen3.8-flash-next-unsloth-ud-iq4-xs-v31";
         };
         name = "strata";
         npm = "@ai-sdk/openai-compatible";
