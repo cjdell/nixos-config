@@ -37,6 +37,17 @@ let
   cfg = config.services.folding-at-home-native;
   fahPackages = import ./fah-packages.nix pkgs;
 
+  # "HH:MM" -> minutes since midnight, for the pause-window comparison in the
+  # schedule oneshot (the client itself has no schedule primitive).
+  toMinutes =
+    spec:
+    let
+      parts = lib.strings.splitString ":" spec;
+    in
+    lib.strings.toInt (builtins.elemAt parts 0) * 60 + lib.strings.toInt (builtins.elemAt parts 1);
+  pauseStartMinutes = toMinutes cfg.pauseStart;
+  pauseEndMinutes = toMinutes cfg.pauseEnd;
+
   # The provisioning script connects over loopback to the first configured
   # listen address (a wildcard bind is fine to reach that way).
   provisionAddress =
@@ -168,6 +179,41 @@ in
         Nix store or the process command line.
       '';
     };
+
+    pauseFolding = lib.mkOption {
+      type = lib.types.bool;
+      # On for the whole heater fleet: these boxes exist to make heat, so the
+      # fleet default is to idle them through the expensive midday window.
+      default = true;
+      description = ''
+        Pause Folding@home during a daily expensive-electricity window
+        ({option}`services.folding-at-home-native.pauseStart` to
+        {option}`services.folding-at-home-native.pauseEnd`). On by default for
+        every host that enables this module; set it false on a host that should
+        fold around the clock.
+      '';
+    };
+
+    pauseStart = lib.mkOption {
+      type = lib.types.str;
+      default = "10:00";
+      example = "10:00";
+      description = ''
+        Local (system timezone, so DST-aware) time folding pauses, in the form
+        systemd `OnCalendar` accepts. Inclusive: fah-client is stopped here.
+      '';
+    };
+
+    pauseEnd = lib.mkOption {
+      type = lib.types.str;
+      default = "14:00";
+      example = "14:00";
+      description = ''
+        Local time folding resumes (fah-client is started — unless a
+        `llama-server.service` GPU lease is active, in which case folding is
+        left down rather than stealing the card back). Exclusive.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -267,5 +313,45 @@ in
         }
       });
     '';
+
+    # Daily electricity-saving window: keep fah-client stopped between
+    # pauseStart and pauseEnd. A single idempotent oneshot reads the wall clock
+    # and issues stop or start, so it is safe to fire on every trigger. The
+    # timer fires at both edges of the window; Persistent makes a run that was
+    # missed while the box was down (e.g. a reboot inside the window) fire on
+    # the next activation, so the heater stays paused for the whole window
+    # instead of folding all afternoon after a midday reboot.
+    systemd.services."fah-pause-window" = lib.mkIf cfg.pauseFolding {
+      description = "Apply the Folding@home peak-hours pause window";
+      # After fah-client so that, on a boot inside the window, this stop wins
+      # over the unit's own wantedBy=multi-user.target start.
+      after = [ "fah-client.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "fah-pause-window" ''
+          set -eu
+          systemctl=${pkgs.systemd}/bin/systemctl
+          now=$((10#$(date +%H) * 60 + 10#$(date +%M)))
+          if [ "$now" -ge ${toString pauseStartMinutes} ] && [ "$now" -lt ${toString pauseEndMinutes} ]; then
+            systemctl stop fah-client.service
+          elif systemctl is-active --quiet llama-server.service; then
+            echo "fah-client left stopped: llama-server.service (gpu-mode llm) is active"
+          else
+            systemctl start fah-client.service
+          fi
+        '';
+      };
+    };
+    systemd.timers."fah-pause-window" = lib.mkIf cfg.pauseFolding {
+      description = "Trigger the Folding@home pause window at its edges (${cfg.pauseStart}-${cfg.pauseEnd})";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = [
+          cfg.pauseStart
+          cfg.pauseEnd
+        ];
+        Persistent = true;
+      };
+    };
   };
 }
