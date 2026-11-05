@@ -112,6 +112,9 @@
     # rebuild.  ud-iq4-xs since 2026-10-09 (docs/strata.md "UD-IQ4_XS"), and
     # its "Dynamic v3.1" re-cut since 2026-11-05 - packed same day, 35 layers
     # with gate/up/down split across shards (native_experts v4, engine 0.1.57).
+    # The old three-shard GGUFs and pack/ud-iq4-xs were deleted once v31 was
+    # verified live, so "ud-iq4-xs" below is a schema entry only - switching
+    # back to it means re-running scripts/fetch-strata-udiq4xs.sh + repack.
     ai.strataModel = "ud-iq4-xs-v31";
 
     environment.systemPackages = with pkgs; [
