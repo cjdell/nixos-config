@@ -116,6 +116,35 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   render straight from the original parts (per-segment kit runs + concat of
   the HEVC watch copies) if the pre-index cost is not worth paying twice —
   the index lives in the unit's private tmp and does not survive the run.
+
+## Tuning the deinterlace (fences, pans, camcorder OSD)
+
+Two artifact classes the default qtgmc chain produces on tape, and the
+flags that fix them (all default to the historical chain — existing
+renders are the default):
+
+* **Periodic detail under a pan** (fence/crib slats, book spines). The
+  two fields of a panning shot are shifted horizontally by the pan; MVTools
+  must find that vector per block, but on a periodic pattern the *wrong*
+  vector — shifted by one bar spacing — costs the same, and Hexes search
+  with 32px refine blocks (one block spanning several bars) picks it. The
+  wrong vectors are then temporally blended, smearing the slats. Recipe:
+  `--me-search 5 --me-searchparam 3 --me-range 32 --me-divide --me-rblk 16
+  --deint-degrain 0` — EPZS search (exhaustive-ish, survives periodicity),
+  wider range for fast pans (default ~16px/frame via super padding),
+  analyse-32-divide-16, single-bar refine blocks, and no temporal degrain
+  to smear the misses. Cost: roughly 0.8× realtime instead of ~1.15×.
+  `--me-blend 0` adds back field-crispness where vectors are right, but
+  combs where they are wrong — try it only if 1 is still too soft.
+* **The burned-in camcorder timestamp/date** is a per-field overlay, so
+  every temporal pass treats the scene moving behind it as the moving
+  subject: digits and background blend into each other. `--osd-rect
+  WxH+X+Y` merges the untouched znedi3 bob back over that rect as the very
+  last op (after denoise), feathered by `--osd-feather` (default 6px) so
+  the seam is invisible in still backgrounds. For these PCTV camcorders
+  the bottom-right stamp sits at `--osd-rect 200x52+430+450` (measured on
+  the 720×576 frame; check a frame of your own before a long render).
+  The protected region loses temporal denoise — that is the trade.
 * **Colour tags:** output is stamped bt709; `--source-color` keeps the
   source's (broken) tags instead. Mislabelled `bt2020c` sources get an
   automatic normalising pass — that's a fix, not a bug. Note that the restamp
