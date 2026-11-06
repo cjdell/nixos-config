@@ -6,10 +6,10 @@
 # A mode switch stops the previous owner first: a lease, not a hint. That is
 # deliberate — with strata.service merely idle its auto-load would take the
 # whole VRAM back on the next Pi/Recallium request mid-game, so sd/game mode
-# STOP it. (Ad-hoc co-existence still works: ./sd-gate.nix evicts Strata's
-# model over POST /v1/unload when SD needs the card, and Strata's before_load
-# hook stops sd-gate back before reloading — whoever needed the GPU last wins
-# it, nothing loops.)
+# STOP it. (If an LLM reload ever happens next to a running sd lease, Strata's
+# before_load hook stops sd-server first — see ./strata.nix — so the two
+# never fight over VRAM. The sd-gate era's cooperative /v1/unload eviction
+# died with the gate on 2026-11-06; the lease is unit state, full stop.)
 #
 # Mode changes run through sudo; wheel is passwordless on this box
 # (common/system.nix), so gpu-mode never prompts.
@@ -19,6 +19,7 @@ set -u
 SUDO=/run/wrappers/bin/sudo
 STATUS=http://127.0.0.1:8080/v1/status
 CHAT=http://127.0.0.1:8080/v1/chat/completions
+SD_HEALTH=http://127.0.0.1:8085/v1/models
 TOTAL_VRAM_MB=32624
 
 usage() {
@@ -28,8 +29,8 @@ gpu-mode — give the R9700 to exactly one thing at a time
   gpu-mode            who holds the card right now (default)
   gpu-mode llm        Strata / Qwen3.8-Flash-Next  (boot default: Pi sessions,
                       Recallium, strata.ai / llm.ai / 192.168.49.50 endpoints)
-  gpu-mode sd         Stable Diffusion — sd-gate + web UI
-                      http://192.168.49.50/sd/  (https://sd.ai.chrisdell.info)
+  gpu-mode sd         FLUX.1-schnell on stable-diffusion.cpp (./sd-server.nix)
+                      web UI http://192.168.49.50/sd/  (https://sd.ai.chrisdell.info)
   gpu-mode game       free the GPU for gaming  (aliases: free, off)
 
 Modes are a lease: switching STOPS the previous owner, interrupting anything
@@ -40,9 +41,11 @@ While sd/game mode is active the LLM endpoints are DOWN by design, so
 background traffic cannot silently reload the 90 GB model into VRAM mid-game.
 'gpu-mode llm' starts the engine again and waits until the model is loaded —
 that load is multi-minute (~60 GiB of RAM; the box is sluggish while it runs).
+'gpu-mode sd' likewise waits until sd-server answers /v1/models: loading the
+18 GB of flux weights takes a minute or two (fast once the page cache is warm).
 
 A reboot always restores llm mode (strata.service is the only unit with
-wantedBy; sd-gate is started by gpu-mode alone).
+wantedBy; sd-server is started by gpu-mode alone).
 EOF
 }
 
@@ -60,6 +63,8 @@ json_field() { # top-level key of /v1/status; prints nothing while Strata is dow
 }
 
 strata_loaded() { [ "$(json_field loaded)" = true ]; }
+
+sd_ready() { curl -sf -m 3 "$SD_HEALTH" -o /dev/null 2>/dev/null; }
 
 is_on() { systemctl is-active --quiet "$1"; }
 
@@ -99,10 +104,10 @@ warn_llm_inflight() {
 mode_status() {
   local sa se f lease
   sa=$(systemctl is-active strata 2>/dev/null) || true
-  se=$(systemctl is-active sd-gate 2>/dev/null) || true
+  se=$(systemctl is-active sd-server 2>/dev/null) || true
   f=$(free_mib)
   lease="game — nothing holds the card (take it back: gpu-mode llm)"
-  [ "$se" = active ] && [ "$sa" != active ] && lease="sd (Stable Diffusion)"
+  [ "$se" = active ] && [ "$sa" != active ] && lease="sd (Flux-schnell)"
   [ "$sa" = active ] && lease="llm (Strata)"
   echo "R9700 lease : $lease"
   if [ "$sa" = active ]; then
@@ -114,9 +119,13 @@ mode_status() {
     echo "  strata    : $sa"
   fi
   if [ "$se" = active ]; then
-    echo "  sd-gate   : active — SDXL loads on the first request, UI: http://192.168.49.50/sd/"
+    if sd_ready; then
+      echo "  sd-server : active — Flux-schnell ready, UI: http://192.168.49.50/sd/  (:8085)"
+    else
+      echo "  sd-server : active — loading flux weights (~18 GB), UI comes up after"
+    fi
   else
-    echo "  sd-gate   : $se"
+    echo "  sd-server : $se"
   fi
   echo "  VRAM      : ${f:-?} MiB free of ${TOTAL_VRAM_MB} MiB"
 }
@@ -124,8 +133,8 @@ mode_status() {
 mode_llm() {
   local was waited=0
   was=$(systemctl is-active strata 2>/dev/null) || true
-  echo "handing the R9700 to Strata (stopping sd-gate)..."
-  $SUDO systemctl stop sd-gate
+  echo "handing the R9700 to Strata (stopping sd-server)..."
+  $SUDO systemctl stop sd-server
   $SUDO systemctl start strata
   # A serve layer that is already active with an UNLOADED engine (SD evicted
   # it) starts the model only on the next request: send a 1-token warm-up so
@@ -156,24 +165,43 @@ mode_llm() {
 
 mode_sd() {
   warn_llm_inflight
-  echo "handing the R9700 to Stable Diffusion (stopping Strata — LLM endpoints go down)..."
+  echo "handing the R9700 to Flux-schnell (stopping Strata — LLM endpoints go down)..."
   $SUDO systemctl stop strata
-  $SUDO systemctl start sd-gate
-  wait_free 20000 60
+  wait_free 20000 60 || return 1
+  $SUDO systemctl start sd-server
+  echo "waiting for flux to load (~18 GB; minutes on a cold page cache)..."
+  local waited=0
+  while :; do
+    if sd_ready; then
+      break
+    fi
+    if ! is_on sd-server; then
+      echo "ERROR: sd-server.service is not active — journalctl -u sd-server" >&2
+      echo "(ConditionPathExists fails until scripts/fetch-flux-schnell.sh has run?)" >&2
+      return 1
+    fi
+    [ $((waited % 30)) -eq 0 ] && echo "  ${waited}s ..."
+    if [ "$waited" -ge 900 ]; then
+      echo "still loading after 15 min — watch: journalctl -fu sd-server"
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
   cat <<'EOF'
-SD lease active.
+SD lease active — FLUX.1-schnell (4-step, guidance 1).
   web UI : http://192.168.49.50/sd/   (https://sd.ai.chrisdell.info)
   API    : POST http://192.168.49.50/sd-api/sdapi/v1/txt2img
-  state  : http://192.168.49.50/sd-status/
-SDXL loads on the first request and unloads 120 s after the last one.
+The model stays loaded while the lease is held; 'gpu-mode llm|game' gives the
+card back. 4 steps / cfg 1 / euler is the schnell recipe (the UI defaults).
 Pi / Recallium / strata.ai stay down until 'gpu-mode llm'.
 EOF
 }
 
 mode_game() {
   warn_llm_inflight
-  echo "freeing the R9700 (stopping Strata + sd-gate — anything mid-run is interrupted)..."
-  $SUDO systemctl stop strata sd-gate
+  echo "freeing the R9700 (stopping Strata + sd-server — anything mid-run is interrupted)..."
+  $SUDO systemctl stop strata sd-server
   wait_free 20000 60
   echo "the card is yours: 32 GiB of VRAM, plus the ~60 GiB of RAM Strata held."
   echo "gpu-mode llm gives it back to the AI stack; a reboot restores llm mode too."

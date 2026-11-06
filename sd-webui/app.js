@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const API = "/sd-api/sdapi/v1/txt2img";
-const SETTINGS_KEY = "sd-studio-settings";
+const SETTINGS_KEY = "sd-studio-settings-v2"; // v2 = flux defaults, drop the SDXL-era localStorage
 
 const byId = (id) => $(id);
 
@@ -47,12 +47,12 @@ async function pingServer() {
   let down = false;
   try {
     const r = await fetch("/sd-api/v1/models", { signal: AbortSignal.timeout(3000) });
-    setStatus(r.ok ? "server up" : "server: HTTP " + r.status, r.ok ? "ok" : "bad");
+    setStatus(r.ok ? "server up" : "server down — gpu-mode sd", r.ok ? "ok" : "bad");
     down = !r.ok;
   } catch (_) {
-    // The gate wakes sd-server on this very request, but loading the model
-    // takes tens of seconds — poll fast until it comes up.
-    setStatus("loading model…", "warn");
+    // Connection trouble: either the server is not running (no lease) or it
+    // is still loading the flux weights — poll fast until it comes up.
+    setStatus("server unreachable…", "warn");
     down = true;
   }
   schedulePing(down ? 2000 : 30000);
@@ -67,8 +67,8 @@ async function generate() {
     return;
   }
 
-  const steps = Math.max(1, Math.min(100, parseInt(byId("steps").value, 10) || 30));
-  const cfg = Math.max(1, Math.min(20, parseFloat(byId("cfg").value) || 6));
+  const steps = Math.max(1, Math.min(100, parseInt(byId("steps").value, 10) || 4));
+  const cfg = Math.max(1, Math.min(20, parseFloat(byId("cfg").value) || 1));
   const width = Math.max(256, Math.min(2048, parseInt(byId("width").value, 10) || 1024));
   const height = Math.max(256, Math.min(2048, parseInt(byId("height").value, 10) || 1024));
   const seed = parseInt(byId("seed").value, 10);

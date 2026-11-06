@@ -45,7 +45,7 @@
     # superseded by ./avalon.nix that morning and rolled back the same day.
     # ai.strataModel is still "ud-iq4-xs" (below), so no pack flip-back was
     # needed. To flip engines: swap the two imports below - and revert
-    # ./gpu-mode.sh + ./sd-gate.nix to the matching era's version from git
+    # ./gpu-mode.sh + ./sd-server.nix to the matching era's version from git
     # history: the lease is engine-specific (Strata: /v1/status + POST
     # /v1/unload; Avalon: /health + /slots + unit-state eviction). Never
     # import both - they double-bind :8080.
@@ -54,9 +54,10 @@
     # ./ollama-bridge.nix
     ./recallium.nix
     # SD shares the card with Strata via the gpu-mode lease (./gpu-mode.nix):
-    # the service exists, starts only when asked (no wantedBy), and the two
-    # servers evict each other politely if they ever run at once.
-    ./sd-gate.nix
+    # the service exists, starts only when asked (no wantedBy), and Strata's
+    # before_load hook stops it if an LLM reload ever lands on the lease.
+    # (Replaces ./sd-gate.nix, retired 2026-11-06 with the move to Flux.)
+    ./sd-server.nix
   ];
 
   options.ai = {
@@ -121,7 +122,7 @@
       rocmPackages.rocminfo
       rocmPackages.amdsmi
       # Vulkan build of stable-diffusion-cpp for the R9700 (nixpkgs default is
-      # CPU-only). Same derivation sd-gate.nix spawns for sd-server.
+      # CPU-only). Same derivation ./sd-server.nix runs as a service.
       (stable-diffusion-cpp.override { vulkanSupport = true; })
     ];
 

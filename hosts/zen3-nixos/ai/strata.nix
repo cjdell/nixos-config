@@ -441,15 +441,15 @@ let
       env.HSA_USERPTR_FOR_PAGED_MEM = "0";
       # GPU leasing (./gpu-mode.nix). serve/server.py runs this shell command
       # before it (re)loads the engine and only proceeds once it exits. Its
-      # purpose is the SD -> LLM direction of the lease: sd-gate evicted our
-      # model via POST /v1/unload to run SDXL, and before the next LLM request
-      # pays the multi-minute reload we take the card back decisively —
-      # stopping sd-gate kills its sd-server (same cgroup, and ExecStop kills
-      # the pidfile child) so the two never fight over VRAM. On a box in the
-      # normal llm mode (or at boot) sd-gate is already stopped and the stop
-      # is a no-op. The LLM direction (strata -> sd) is the same idea in
-      # ./sd-gate.nix: --llm-unload-url points at /v1/unload.
-      before_load = "${pkgs.systemd}/bin/systemctl stop sd-gate";
+      # purpose: if an engine reload ever lands while the sd lease is held
+      # (someone started strata.service manually during `gpu-mode sd`), we
+      # take the card back decisively before paying the multi-minute reload,
+      # so strata and sd-server (./sd-server.nix) never fight over VRAM. On a
+      # box in the normal llm mode (or at boot) sd-server is already stopped
+      # and the stop is a no-op. (Until 2026-11-06 this stopped sd-gate, the
+      # on-demand spawner this replaces; the gate's reverse-direction
+      # eviction over POST /v1/unload is gone — gpu-mode owns the switch.)
+      before_load = "${pkgs.systemd}/bin/systemctl stop sd-server";
     }
   );
 

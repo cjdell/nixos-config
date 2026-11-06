@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SD Studio — SDXL on the R9700</title>
+<title>SD Studio — Flux-schnell on the R9700</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header id="topbar">
   <h1>🎨 SD Studio</h1>
-  <div class="muted" id="sub">stable-diffusion.cpp · SDXL base · Radeon R9700 (Vulkan)</div>
+  <div class="muted" id="sub">stable-diffusion.cpp · FLUX.1-schnell · Radeon R9700 (Vulkan)</div>
   <div class="controls">
     <span id="server-status" class="status"></span>
   </div>
@@ -28,18 +28,18 @@
     <div class="row">
       <label class="field">
         <span>Steps</span>
-        <input id="steps" type="number" min="1" max="100" value="30">
+        <input id="steps" type="number" min="1" max="100" value="4">
       </label>
       <label class="field">
         <span>CFG scale</span>
-        <input id="cfg" type="number" min="1" max="20" step="0.5" value="6">
+        <input id="cfg" type="number" min="1" max="20" step="0.5" value="1">
       </label>
     </div>
     <label class="field">
       <span>Sampler</span>
       <select id="sampler">
-        <option value="euler_a" selected>euler_a</option>
-        <option value="euler">euler</option>
+        <option value="euler_a">euler_a</option>
+        <option value="euler" selected>euler</option>
         <option value="dpm++2m">dpm++2m</option>
         <option value="dpm++2s_a">dpm++2s_a</option>
         <option value="heun">heun</option>

@@ -4,7 +4,7 @@
   #
   # This used to live in ./netboot.nix, which was wrong: nginx fronts EVERY
   # service on this host (llama-swap's llama./llm. vhosts, the log viewer,
-  # Recallium, sd-gate, the GPU panel, plus the ACME/TLS vhosts in
+  # Recallium, sd-server, the GPU panel, plus the ACME/TLS vhosts in
   # ./tls.nix), while netboot.nix is only about the Pi 5 images. Because
   # `services.nginx.enable` existed nowhere else, dropping ./netboot.nix from
   # ./default.nix silently took the whole HTTP surface down - no listener on
