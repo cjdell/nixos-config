@@ -145,9 +145,6 @@ if deint != "off":
             blksize=me_rblk, overlap=me_rblk // 2,
             search=me_search, searchparam=me_searchparam,
         )
-        if me_range:
-            an["range"] = me_range
-            rc["range"] = me_range
         if me_divide:
             an["divide"] = 1
         fw = core.mv.Analyse(sup_b, isb=False, **an)
