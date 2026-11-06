@@ -145,6 +145,12 @@ renders are the default):
   the bottom-right stamp sits at `--osd-rect 200x52+430+450` (measured on
   the 720×576 frame; check a frame of your own before a long render).
   The protected region loses temporal denoise — that is the trade.
+
+  **Status 2026-11-06:** the robust-ME + `--osd-rect` combination
+  (robust-osd) is user-confirmed as the improvement over the default
+  chain on the PCTV tapes; full-tape re-renders with it are on hold
+  until the tapes/minutes are named. Samples kept in
+  `/ds-public/pctv-deinterlaced/AB/` on the kabylakeitx NAS mount.
 * **Colour tags:** output is stamped bt709; `--source-color` keeps the
   source's (broken) tags instead. Mislabelled `bt2020c` sources get an
   automatic normalising pass — that's a fix, not a bug. Note that the restamp
