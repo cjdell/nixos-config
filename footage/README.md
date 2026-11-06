@@ -116,6 +116,15 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   render straight from the original parts (per-segment kit runs + concat of
   the HEVC watch copies) if the pre-index cost is not worth paying twice —
   the index lives in the unit's private tmp and does not survive the run.
+* **Stitch bookkeeping:** keep segment files on the **NFS share** whenever
+  total tape exceeds ~2¼ h — the rawvideo copies (~21 MB/s) fill a 219 GB
+  capture-box root otherwise, and an ENOSPC-truncated segment is eaten
+  silently by `-f concat` (exit 0, short file). Assert the stitched
+  duration against the **sum of probed segment durations**, never a
+  hand-added constant (the France run of 2026-11-06 lost a 2000 in the
+  sum and gated a perfect master), and make the render gate check both
+  duration and seam frames — point-probes alone cannot see a file that
+  simply never ends.
 
 ## Tuning the deinterlace (fences, pans, camcorder OSD)
 
