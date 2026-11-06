@@ -105,6 +105,17 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   RX 580; `nvenc-hevc` (e.g. the RTX 2060 on kabylakeitx) is the watch-copy
   default: `--crf 16 --preset slow` (→ cq16 p5/tune hq) after QTGMC, whole
   50p features at ~1× realtime — the encode is free, qtgmc is the cost.
+* **Stitched/concatenated masters pay a first-open pre-index.** `clean.vsh`
+  sources via BestSource (`bs.VideoSource`); capture-station originals carry
+  complete cue tables so frames start flowing in seconds, but a master built
+  by `ffmpeg -f concat -c copy` forces BestSource to build its lavf index
+  first — a full scan of the file (~58 MB/s measured; ~30 min on a 115 GB
+  90-minute master) **before the first `frame=` line**. The run is healthy
+  during this phase but silent in the log; the proof is `read_bytes` growth
+  in `/proc/<vspipe-pid>/io`. Budget the pre-roll when scheduling, or
+  render straight from the original parts (per-segment kit runs + concat of
+  the HEVC watch copies) if the pre-index cost is not worth paying twice —
+  the index lives in the unit's private tmp and does not survive the run.
 * **Colour tags:** output is stamped bt709; `--source-color` keeps the
   source's (broken) tags instead. Mislabelled `bt2020c` sources get an
   automatic normalising pass — that's a fix, not a bug. Note that the restamp
