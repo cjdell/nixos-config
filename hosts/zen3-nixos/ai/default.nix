@@ -9,8 +9,9 @@
 #   avalon.nix          - Avalon llama-server fork (HIP/gfx1201) on :8080 - the
 #                         Qwen3.8-Flash-Next server since 2026-11-04
 #   strata.nix          - Strata engine (HIP/gfx1201) + serve + strata. subdomain
-#                         (DISABLED since 2026-11-04, superseded by ./avalon.nix)
-#   sd-gate.nix         - on-demand stable-diffusion.cpp server + sd. subdomain
+#                         (the live engine since 2026-11-04; ./avalon.nix is the
+#                         disabled alternative)
+#   sd-server.nix       - Flux-schnell stable-diffusion.cpp server + sd. subdomain
 #                         (started by gpu-mode, NOT at boot)
 #   gpu-mode.nix        - the `gpu-mode` command: lease the R9700 to llm / sd /
 #                         game (see ./gpu-mode.sh)
