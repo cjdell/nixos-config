@@ -48,6 +48,24 @@ OPTIONS
   --field ORDER       tff|bff field order (default: detected, else tff)
   --denoise LEVEL     none|light|standard|strong|stronger       (default standard)
   --crop WxH+X+Y      crop first (overscan, head-switch noise, bars)
+  --me-search N       qtgmc motion search algo 0..5 (default 3 = Hexes).
+                      Periodic detail — fences, book spines, crib slats —
+                      makes Hexes lock a neighbour-period vector; 5 (EPZS)
+                      or 4 (UMH) resist it.
+  --me-searchparam N  search log-step (default 2; use 3 with EPZS)
+  --me-range N        search range px (default ~16 via super padding; use
+                      24-32 for fast camera pans)
+  --me-divide         analyse 32x32 then divide to 16x16 (QTGMC 'divide')
+  --me-rblk N         refine block size (default 32; 16 = at most one fence
+                      bar per block — matters with periodic detail)
+  --me-blend 0|1      FlowInter field blend (default 1; 0 = crisper on pans,
+                      combs where vectors fail)
+  --deint-degrain 0|1 temporal degrain after the mc deinterlace (default 1;
+                      0 = wrong vectors cannot smear over time)
+  --osd-rect WxH+X+Y  keep the PURE spatial bob inside this rect at the end
+                      of the chain: for a burned-in camcorder timestamp,
+                      which temporal passes otherwise smear into the digits
+  --osd-feather N     feather px on the --osd-rect edge (default 6)
   --upscale N         2|3|4  neural upscale on the GPU
   --processor P       realesrgan (default) | realcugan
   --model NAME        model for the processor:
@@ -128,6 +146,14 @@ EXAMPLES
   footage-clean --deint auto --denoise none --codec nvenc-hevc --crf 16 \
     --preset slow --single-pass --source-color \
     --to 7385.88 Disney.mkv Disney-watch.mkv
+
+  # ...same, but tuned for a tape with fast pans over periodic detail
+  # (fences/slats) and a burned-in bottom-right timestamp:
+  footage-clean --deint auto --denoise none --codec nvenc-hevc --crf 16 \
+    --preset slow --single-pass --source-color \
+    --me-search 5 --me-searchparam 3 --me-range 32 --me-divide --me-rblk 16 \
+    --deint-degrain 0 --osd-rect 200x52+430+450 \
+    tape.mkv tape-watch.mkv
 EOF
 }
 
@@ -161,6 +187,16 @@ THREADS=""
 SOURCE_COLOR=0
 KEEP_TEMP=0
 DRY=0
+# qtgmc ME tuning + OSD protection (defaults = the historical chain)
+ME_SEARCH=3
+ME_SEARCHPARAM=2
+ME_RANGE=0
+ME_DIVIDE=0
+ME_BLEND=1
+ME_RBLK=32
+DEINT_DEGRAIN=1
+OSD_RECT=""
+OSD_FEATHER=6
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -186,6 +222,15 @@ while [ $# -gt 0 ]; do
     --from) FROM=$2; shift 2 ;;
     --to) TO=$2; shift 2 ;;
     --single-pass) SINGLE_PASS=1; shift ;;
+    --me-search) ME_SEARCH=$2; shift 2 ;;
+    --me-searchparam) ME_SEARCHPARAM=$2; shift 2 ;;
+    --me-range) ME_RANGE=$2; shift 2 ;;
+    --me-divide) ME_DIVIDE=1; shift ;;
+    --me-blend) ME_BLEND=$2; shift 2 ;;
+    --me-rblk) ME_RBLK=$2; shift 2 ;;
+    --deint-degrain) DEINT_DEGRAIN=$2; shift 2 ;;
+    --osd-rect) OSD_RECT=$2; shift 2 ;;
+    --osd-feather) OSD_FEATHER=$2; shift 2 ;;
     --threads) THREADS=$2; shift 2 ;;
     -o|--output) OUT=$2; shift 2 ;;
     --source-color) SOURCE_COLOR=1; shift ;;
@@ -612,7 +657,11 @@ stage() { # stage label cmd...
 # ---------------------------------------------------------------- stage 1 --
 if [ "$NEED_VS" = 1 ]; then
   export FC_SRC=$CUR FC_DEINT=$DEINT_APPLIED FC_FIELD=$FIELD \
-         FC_DENOISE=$DENOISE FC_CROP=$CROP FC_CHROMA_BLUR=1 FC_ENDSEC=$FC_ENDSEC
+         FC_DENOISE=$DENOISE FC_CROP=$CROP FC_CHROMA_BLUR=1 FC_ENDSEC=$FC_ENDSEC \
+         FC_ME_SEARCH=$ME_SEARCH FC_ME_SEARCHPARAM=$ME_SEARCHPARAM \
+         FC_ME_RANGE=$ME_RANGE FC_ME_DIVIDE=$ME_DIVIDE FC_ME_BLEND=$ME_BLEND \
+         FC_ME_RBLK=$ME_RBLK FC_DEINT_DEGRAIN=$DEINT_DEGRAIN \
+         FC_OSD_RECT=$OSD_RECT FC_OSD_FEATHER=$OSD_FEATHER
   VSCMD="$VSPIPE -r $THREADS -c y4m -p '$CLEANVSH' - 2>'$TMP/vs.log'"
   if [ "$ONE_PASS" = 1 ]; then
     # No crf 12 intermediate: pipe the cleaned frames straight into the encode
