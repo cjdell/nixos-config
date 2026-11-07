@@ -125,6 +125,22 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   sum and gated a perfect master), and make the render gate check both
   duration and seam frames — point-probes alone cannot see a file that
   simply never ends.
+* **Dropout mapping at ingest:** the cheap 1-fps `signalstats` scan misses
+  dropouts outright (Dell 02 lost two runs and an entire "content" verdict).
+  Use a **full-census decode** — every 4th frame (~0.16 s), dark-blue test
+  `U-V>80 && Y<120` (the Y gate matters: over-bright blue SKY otherwise
+  false-positives by the hundred on airshow/ski footage). Census run edges
+  are ±1 sample wide, so bracket every excised run with a **0.2 s guard**.
+* **Do not trust single-frame `-ss` probes on these rawvideo MKVs** — the
+  input seek can land on a different frame than requested (a phantom blue
+  frame at P2 t=300 chased through two scripts before a sequential window
+  decode proved t=300.0 is clean). Verify every cut edge by decoding a
+  ~0.7 s window and filtering frames by reported `pts_time`.
+* **OSD stamps before rendering:** sample the bottom-right ROI every ~2 min
+  into one tiled contact sheet per part — Dell 02's stamp was *intermittent*
+  (visible ~20 % of samples, dates `17 10 1995`→`24 7 1996`: the tape is
+  sessions from months apart, one capture). Then measure the box once with
+  a 3× zoom + `drawgrid` ROI grab (40 px rule) and pass it as `--osd-rect`.
 
 ## Tuning the deinterlace (fences, pans, camcorder OSD)
 
