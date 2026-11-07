@@ -130,12 +130,23 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   Use a **full-census decode** — every 4th frame (~0.16 s), dark-blue test
   `U-V>80 && Y<120` (the Y gate matters: over-bright blue SKY otherwise
   false-positives by the hundred on airshow/ski footage). Census run edges
-  are ±1 sample wide, so bracket every excised run with a **0.2 s guard**.
+  are ±1 sample wide AND multi-run dropout *storms* have ragged pre-roll —
+  Dell 02 kept one saturated blue frame behind a 0.2 s guard (storm truth
+  began 0.24 s before its first solid census sample). Use a **0.4 s guard**
+  and gate every right edge with a per-frame (threshold-loosened, `d>45`)
+  window decode, not the census numbers. Also check *to the last frame*:
+  an edge sweep ending at `to-0.04` leaves a one-frame blind spot exactly
+  where these ragged edges live.
 * **Do not trust single-frame `-ss` probes on these rawvideo MKVs** — the
   input seek can land on a different frame than requested (a phantom blue
   frame at P2 t=300 chased through two scripts before a sequential window
   decode proved t=300.0 is clean). Verify every cut edge by decoding a
-  ~0.7 s window and filtering frames by reported `pts_time`.
+  ~0.7 s window and filtering frames by **relative** pts — an input `-ss`
+  zeroes the output timestamps, so absolute-pts filters silently match
+  nothing (the first Dell 02 gate SKIPped every check this way). And note
+  a post-render seam sweep on the *watch copy* is the only check that
+  catches kept-edge raggedness for free — run it before deleting the
+  segment scratch, or a fix means re-cutting every segment.
 * **OSD stamps before rendering:** sample the bottom-right ROI every ~2 min
   into one tiled contact sheet per part — Dell 02's stamp was *intermittent*
   (visible ~20 % of samples, dates `17 10 1995`→`24 7 1996`: the tape is
