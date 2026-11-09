@@ -205,6 +205,20 @@
                 sed -i 's/strncpy(/strscpy(/g' ddcci/ddcci.c
                 sed -i '\|#include <linux/slab.h>|a #include <linux/string.h>' ddcci/ddcci.c
               '';
+              # ddcci installs its modules with a plain `install`, not kbuild's
+              # `modules_install`, so the kernel's signing step (`cmd_sign`,
+              # which nixpkgs overrides to kmodigest) never runs and no
+              # single-module `$ko.cer` is produced. The kernel-module
+              # aggregator now concatenates every external module's `.ko.cer`
+              # into `modules.cer` and hard-fails when one is missing
+              # ("cat: extra/ddcci.ko.cer: No such file or directory"), which
+              # took down the whole linux-X-modules build. Reproduce the
+              # Makefile.modinst signing rule by hand.
+              postInstall = (old.postInstall or "") + ''
+                for ko in $out/lib/modules/*/extra/*.ko; do
+                  ${prev.buildPackages.kmodigest}/bin/kmodigest "$ko"
+                done
+              '';
             });
           patchSet = set: set // { ddcci-driver = patchDdcci set.ddcci-driver; };
         in
