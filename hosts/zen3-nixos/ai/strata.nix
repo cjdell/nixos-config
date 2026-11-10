@@ -460,18 +460,22 @@ let
       #     the K-quant MMQ prompt kernels turn on for UD-Q4/Q5/Q6_K_XL files (STRATA_MMQ_KQ=0 back) -
       #     our pack is IQ4_XS, an i-quant, whose MMQ prompt path was already built in.
       # What 0.2.12/0.2.13 change on THIS card (verified against 628f7495):
-      #   * STRATA_GDN_CHUNKED - NEW in 0.2.12, ON for us: prompt chunks of 30,000+ tokens run the
-      #     chunked GDN (gated-delta) scan instead of the recurrent one. Upstream on an R9700: 32K
-      #     +6.1 %, 64K +6.7 %; 0.2.12's 32K-prompt +8.6-11.6 % headline for the R9700 is largely this.
-      #     0.2.13 made it the engine's own Linux-gfx12 default (arch_defaults.cpp:255
-      #     gdn_chunked_default_env, applied at :318 with the line "RDNA4 (gfx12): prompt chunks of
-      #     30,000+ tokens use the chunked GDN scan"), so a plain engine start matches the app's.
-      #     It is a different kernel: answers CAN differ in the last digits above 30K, which is where
-      #     most of our agent traffic lives - the first suspect for "the model answered differently
-      #     after 2026-11-10". Revert: env.STRATA_GDN_CHUNKED = "0"; (or STRATA_GFX12_DEFAULTS="0" for
-      #     every gfx12 switch at once). Already on before this bump, so it is NOT the answer-change
-      #     suspect: STRATA_SELECT_WMMA (the matrix-core QSA block scorer past 28,672 tokens) and
-      #     STRATA_MMQ_KQ (never read for an i-quant pack).
+      #   * STRATA_GDN_CHUNKED - NEW in 0.2.12, ON for us: the CHUNKED GDN (gated-delta) SCAN replaces the recurrent
+      #     one on the prompt path. 0.2.12 gated it at prompt chunks of 30,000+ tokens (upstream R9700: 32K +6.1 %,
+      #     64K +6.7 % - its "R9700 32K prompts +8.6-11.6 %" headline is largely this); 0.2.13 made it the engine's own
+      #     default and dropped the gate: generate.cpp:3821-3830 runs apply_gdn_chunked_default(true, all_gfx12) -
+      #     "Linux, every visible card gfx12: the chunked GDN scan from the first chunk (was the launcher's
+      #     GDN_STACK_GFX12)" - so with our one gfx1201 card EVERY prompt chunk takes it. ⚠️ Do not go looking for
+      #     proof in the log or the environment: the engine sets it with setenv(..., 0) in-process, before
+      #     apply_arch_defaults, so the "prompt chunks of 30,000+ tokens use the chunked GDN scan" line is
+      #     deliberately suppressed (upstream's own comment says so) and /proc/<engine>/environ never shows a
+      #     post-exec setenv anyway. A/B is the only check: env.STRATA_GDN_CHUNKED = "0" (or STRATA_GFX12_DEFAULTS="0"
+      #     for every gfx12 switch at once). It IS a different kernel, so this is the first suspect for "the model
+      #     answered differently after 2026-11-10", at ANY depth - which is itself new: 0.2.11 only differed above
+      #     28,672 tokens, via STRATA_SELECT_WMMA, whose banner does print ("the matrix-core QSA block scorer is on
+      #     once a prompt is past 28,672 tokens"). STRATA_MMQ_KQ is never read for an i-quant pack.
+      #     Measured on this deploy (0.2.13.1, engine 0.1.59.1): 60-78 tok/s decode at ~200K context, expert cache
+      #     95-98 % hits, DFlash2 acceptance 74-76 % - against 67.9 tok/s on 0.2.11.
       #   * the 0.2.13 hipBLASLt line ("Windows RX 9070 / R9700: the hipBLASLt table is no longer used
       #     by default", gemm.cu:319) does not touch us - it reads like it does. The table only ever
       #     applies if a tuning/<arch>-hipblaslt-<ver>.txt sits BESIDE the engine binary, and our Nix

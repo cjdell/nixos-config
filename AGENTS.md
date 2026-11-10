@@ -1147,17 +1147,26 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
 +12–14 %; 0.1.44 adds +2.5–4 % from HC_Q8. Details: `docs/strata.md` "0.1.43".
 
 ⚠️ **0.2.12 changes answers on our card too** — `STRATA_GDN_CHUNKED`, on by default for
-gfx12: prompt chunks of **30,000+ tokens** run the chunked GDN (gated-delta) scan instead of
-the recurrent one (upstream R9700: 32K +6.1 %, 64K +6.7 %; its "R9700 32K prompts +8.6–11.6 %"
-headline is largely this). 0.2.13 promoted it from launcher-written to an engine default
-(`arch_defaults.cpp:255`), so a bare `strata` start now matches the app's. It is a different
-kernel, so this is the first suspect for "the model answered differently after 2026-11-10" at
-the depths our agent traffic lives at — revert `STRATA_GDN_CHUNKED=0`. The other 0.2.13 line
-that reads like it moves us does not: the hipBLASLt tuning table stopped being applied on
-gfx1201 by default (`gemm.cu:319`), but our build has never installed a `tuning/` folder next
-to the binary, so we have always been on plain hipBLAS. Also from 0.2.12: **Auto no longer
-picks DFlash2 on gfx1201** (see the DFlash2 bullet), and 0.2.13 vendored the ggml (see the
-pin paragraph above).
+gfx12: the **chunked GDN (gated-delta) scan** replaces the recurrent one on the prompt path
+(upstream R9700: 32K +6.1 %, 64K +6.7 %; its "R9700 32K prompts +8.6–11.6 %" headline is
+largely this). 0.2.12 gated it at chunks of 30,000+ tokens; **0.2.13 made it the engine's own
+default and dropped the gate** — `generate.cpp:3821-3830` calls
+`apply_gdn_chunked_default(true, all_gfx12)` ("Linux, every visible card gfx12: the chunked
+GDN scan from the first chunk (was the launcher's GDN_STACK_GFX12)"), so here every prompt
+chunk takes it. ⚠️ It leaves **no evidence in the log or the environment**: the engine
+`setenv`s it in-process before `apply_arch_defaults`, which deliberately suppresses the
+"prompt chunks of 30,000+ tokens use the chunked GDN scan" banner (upstream says so in that
+block's comment), and a post-exec `setenv` is invisible in `/proc/<pid>/environ` anyway — the
+only check is the A/B (`STRATA_GDN_CHUNKED=0`). Different kernel, so it is the first suspect
+for "the model answered differently after 2026-11-10", at any depth (before this bump the
+only answer-changing gfx12 default was `STRATA_SELECT_WMMA` above 28,672 tokens, and that
+banner *does* print). The other 0.2.13 line that reads like it moves us does not: the
+hipBLASLt tuning table stopped being applied on gfx1201 by default (`gemm.cu:319`), but our
+build has never installed a `tuning/` folder next to the binary, so we have always been on
+plain hipBLAS. Also from 0.2.12: **Auto no longer picks DFlash2 on gfx1201** (see the DFlash2
+bullet), and 0.2.13 vendored the ggml (see the pin paragraph above). Measured on this box
+after the 2026-11-10 deploy: **60–78 tok/s decode at ~200K context**, expert cache 95–98 %
+hits, DFlash2 acceptance 74–76 % (0.2.11 measured 67.9 tok/s on the same traffic).
 
 - **DFlash2 is LIVE as the drafter since 2026-11-04** (`"drafting": "dflash2"` in
   `strata.nix`'s `configFile`): 0.2.10 made it the `auto` pick for Qwen3.8-Flash-Next on

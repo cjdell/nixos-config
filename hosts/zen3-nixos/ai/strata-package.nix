@@ -122,12 +122,19 @@ stdenv.mkDerivation (finalAttrs: {
   #     tuned_applies() returns arch == "gfx1151" - our gfx1201 keeps the stock selq4 pack pack_path() picks today.
   #   * Python surface: see the serverPython comment above - no changes needed.
   #   * gfx12/R9700 BEHAVIOUR CHANGES to EXPECT (fuller comments in ./strata.nix's env section): NEW in 0.2.12, on by
-  #     default, and it reaches our traffic - prompt chunks of 30,000+ tokens use the chunked GDN scan (upstream on an
-  #     R9700: 32K +6.1 %, 64K +6.7 %); 0.2.13 made it the engine's own Linux-gfx12 default (arch_defaults.cpp:255
-  #     gdn_chunked_default_env) rather than a launcher-written one, so a plain `strata` start now matches the app's;
-  #     revert STRATA_GDN_CHUNKED=0. It is a different kernel, so answers CAN differ in the last digits at the depths
+  #     default, and it reaches our traffic - the CHUNKED GDN SCAN. In 0.2.12 it was the launcher's rule and fired for
+  #     prompt chunks of 30,000+ tokens (upstream on an R9700: 32K +6.1 %, 64K +6.7 %); 0.2.13 made it the engine's own
+  #     default and stronger - generate.cpp:3821-3830 calls apply_gdn_chunked_default(true, all_gfx12) "Linux, every
+  #     visible card gfx12: the chunked GDN scan FROM THE FIRST CHUNK (was the launcher's GDN_STACK_GFX12)", so here
+  #     (one gfx12 card) every prompt chunk takes it, not only the 30K+ ones. Two consequences for anyone verifying
+  #     this: the engine sets it with setenv(..., replace=0) IN-PROCESS before apply_arch_defaults runs, so (a) the
+  #     "prompt chunks of 30,000+ tokens use the chunked GDN scan" line is deliberately NOT printed (upstream says so
+  #     in that block's own comment), and (b) /proc/<engine>/environ does NOT show it either - setenv after exec is
+  #     invisible there. Confirm by A/B (env.STRATA_GDN_CHUNKED = "0") or by the speed, not by the log line.
+  #     It is a different kernel, so answers CAN differ in the last digits at the depths
   #     our agent traffic lives at - and STRATA_SELECT_WMMA (the matrix-core QSA scorer past 28,672 tokens, KL 0.002)
-  #     was already on for us in 0.2.11. 0.2.12's other R9700 headline is 32K prompts +8.6..11.6 %.
+  #     was already on for us in 0.2.11 (its banner DOES print: "the matrix-core QSA block scorer is on once a prompt
+  #     is past 28,672 tokens"). 0.2.12's other R9700 headline is 32K prompts +8.6..11.6 %.
   #     The 0.2.13 hipBLASLt change (the packaged tuning table is no longer used by default on gfx1201/gfx1100, which
   #     "restores the 10-19 rule of gfx1151 only" - gemm.cu:319 `if (!table_forced && arch != "gfx1151") return
   #     nullptr`) is a NO-OP here: it reads like it moves our card, but our build has never shipped a `tuning/` folder

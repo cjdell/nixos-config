@@ -2,7 +2,9 @@
 
 Status: **live on UD-IQ4_XS "Dynamic v3.1"** since 2026-11-05 15:20 (the October
 three-shard UD-IQ4_XS from 2026-10-09, IQ3_S from 2026-10-06, IQ3_XXS before
-that; both older packs deleted). `ai.strataModel` switches pack in one line, but
+that; both older packs deleted), on **Strata 0.2.13.1 / engine 0.1.59.1** since
+2026-11-10 (before that: 0.2.11 / engine 0.1.57 from 2026-11-05). `ai.strataModel`
+switches pack in one line, but
 with the GGUFs gone the other `models` entries are re-downloadable schema only.
 Strata
 (`github.com/Niko1221/Strata`) is the engine that runs the ~84-94 GB Qwen3.8-Flash-Next
@@ -45,18 +47,36 @@ documented upstream as "kept for two releases, then removed", so nothing here wi
 when it goes.
 
 **What moves answers or speed on this card:** `STRATA_GDN_CHUNKED` (new in 0.2.12, on for
-gfx12) — prompt chunks of 30,000+ tokens use the chunked GDN scan, upstream R9700 32K
-+6.1 % / 64K +6.7 %, and 0.2.13 promoted it from a launcher-written setting to an engine
-default (`arch_defaults.cpp:255`); different kernel, so answers can differ in the last
-digits at exactly the depths our agent traffic runs at (revert `STRATA_GDN_CHUNKED=0`).
-0.2.12's other R9700 headline is 32K prompts +8.6–11.6 %. The hipBLASLt line in 0.2.13
+gfx12) — the **chunked GDN scan** replaces the recurrent one on the prompt path; upstream R9700
+32K +6.1 % / 64K +6.7 %, and 0.2.12's R9700 "32K prompts +8.6–11.6 %" headline is largely that.
+0.2.12 gated it at chunks of 30,000+ tokens; 0.2.13 made it the engine's own default and
+**dropped the gate** — `generate.cpp:3821-3830` calls `apply_gdn_chunked_default(true,
+all_gfx12)` ("Linux, every visible card gfx12: the chunked GDN scan **from the first chunk**
+(was the launcher's GDN_STACK_GFX12)"), so with our single gfx1201 card every prompt chunk
+takes it. ⚠️ It is deliberately **invisible**: the engine `setenv`s it in-process before
+`apply_arch_defaults`, which is why the "prompt chunks of 30,000+ tokens use the chunked GDN
+scan" banner never prints (upstream's comment in that block says exactly that), and a
+post-exec `setenv` does not show up in `/proc/<pid>/environ` either — verified on the live
+engine 2026-11-10: no such env entry, no such log line, and yet the switch is on. The only
+check is the A/B (`STRATA_GDN_CHUNKED=0`, revert) or the speed. Different kernel ⇒ answers can
+differ in the last digits, now at **any** depth: before this bump the only answer-changing
+gfx12 default was `STRATA_SELECT_WMMA` past 28,672 tokens, and that banner *does* print (it
+appeared on this start, along with `STRATA_HC_Q8`, the 12 exact switches, `HEAD_MIX_MULTI` and
+the AMD-Q CPU share up to 1,536-token chunks). The hipBLASLt line in 0.2.13
 ("the table is no longer used by default on gfx1201", `gemm.cu:319`) is a **no-op here**:
 the table only applies if a `tuning/<arch>-hipblaslt-<ver>.txt` sits beside the engine
-binary and our Nix build has never installed one. `STRATA_SELECT_WMMA` (QSA block scorer
-past 28,672 tokens) and `STRATA_MMQ_KQ` (never read for an i-quant pack) were already at
-their 0.2.11 state. Available but NOT set: `STRATA_PF_FUSED_Q50=1` — `moe_fused_iq.cu:1940`
-names our pack ("Q5_0 down (UD-IQ4_XS-v31: 33 of 48 layers)"), upstream R9700 prompts 2K
-+44 % / 8K +40 %, and it "changes the arithmetic of those layers", so it needs a local A/B.
+binary and our Nix build has never installed one. Available but NOT set: `STRATA_PF_FUSED_Q50=1`
+— `moe_fused_iq.cu:1940` names our pack ("Q5_0 down (UD-IQ4_XS-v31: 33 of 48 layers)"),
+upstream R9700 prompts 2K +44 % / 8K +40 %, and it "changes the arithmetic of those layers",
+so it needs a local A/B.
+
+**Measured after this deploy** (same ~200K-token agent traffic as the 0.2.11 numbers): decode
+**60–78 tok/s**, expert cache **95–98 %** hits, DFlash2 acceptance 74–76 %; 0.2.11 measured
+67.9 tok/s on this session immediately before the switch. `strata.log`'s
+"expert arena read through the file cache (buffered (not Windows))" line is the **normal** load
+path (it is in every engine start since the log's first lines) — do not read it as 0.2.12's
+#5327 shortfall warning, which is worded "expert reads now go through the file cache (X GiB of
+RAM free for them, Y GiB limit)".
 
 **The audit patch re-based with zero rejects again** (2026-11-10): 19 hunks, 280 additions,
 0 deletions, added lines byte-identical to the 0.2.11 file, `patch -p1 --fuzz=0` clean with
