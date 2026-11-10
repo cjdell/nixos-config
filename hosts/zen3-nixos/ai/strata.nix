@@ -436,6 +436,10 @@ let
       # the poisoned window emits nothing, the caches are dropped and the prompt is read
       # again from token 0, so this only observes - it never changes an answer.
       env.STRATA_KERNEL_AUDIT = "1";
+      # NOT set, measured here 2026-11-10 (see the STRATA_PF_FUSED_Q50 bullet in the
+      # 0.2.12/13 block below for the A/B): enabling the fused Q5_0 prompt kernel is
+      # a ~12 % prefill saving on paper and 0.08 s per request in practice on this
+      # box, against changing the arithmetic of 33 of our 48 expert layers.
       # 0.1.44 turned on TWO more RDNA4 defaults that apply to us and we deliberately take
       # them (upstream's numbers, not our measurements - so these are the first suspects if an
       # answer changes or a prompt behaves differently after that deploy, and the A/B is one
@@ -482,11 +486,32 @@ let
       #     build has never installed one (own_tuning_dir() finds nothing), so we have run plain
       #     hipBLAS on every version. Nothing to set; STRATA_HIPBLASLT_TABLE=on would be the first
       #     time this box used a table, and it changes answers' last digits.
-      #   * OFF, but written for our pack, if long-prompt speed ever matters more than bit-fidelity:
-      #     STRATA_PF_FUSED_Q50=1 (moe_fused_iq.cu:1940 - "Q5_0 down (UD-IQ4_XS-v31: 33 of 48
-      #     layers...)"; gfx12 keeps its int8 fused kernel only with the switch; upstream R9700
-      #     prompts 2K +44 %, 8K +40 %). It "changes the arithmetic of those layers", so it needs an
-      #     A/B here first, not a merge.
+      #   * OFF - tried, measured, and deliberately left off (it is written for our exact pack,
+      #     so it will keep looking attractive; the numbers below are why it is not worth it):
+      #     STRATA_PF_FUSED_Q50 - MEASURED HERE 2026-11-10 and NOT WORTH IT, so it stays unset.
+      #     It is written for exactly our pack (moe_fused_iq.cu:1940 "Q5_0 down (UD-IQ4_XS-v31:
+      #     33 of 48 layers...)"): with =1 those layers' down projection takes the fused int8
+      #     prompt kernel (native_w11_kernel) instead of gather + FP16 dequantize + hipBLASLt
+      #     (`d_covered_on(T_Q5_0)`, moe_fused_iq.cu:1967 - on gfx12 the switch alone gates it, no
+      #     STRATA_PF_F16 needed). Prompt path only: native_expert_grouped, where the #879 audit
+      #     probes sit, is called from verify.cpp:2375 (decode), so this cannot blind the audit.
+      #     A/B on this box (cold prompts - a unique nonce line defeats the exact-prefix reuse;
+      #     identical prompts per arm; median prompt tok/s): 8.7K 2161 -> 2672 (+24 %), 36K 2671
+      #     -> 2804 (+5 %), 109K 3113 -> 3293 (+5.8 %); decode unchanged (55-76 tok/s both arms,
+      #     as expected for a prefill-only switch); a deep-needle retrieval probe was correct in
+      #     all 9 runs, so no visible quality loss. Upstream's headline (R9700 2K +44 %, 8K +40 %)
+      #     is real at 2K-ish depths but not at ours. WHY NOT: this box barely prefills - across
+      #     58,154 logged requests the cold-read size is p50 223 / p90 1.9K / p99 34K tokens
+      #     (91 % under 4K: the 16 GiB conversation cache and KV reuse eat the rest), so applying
+      #     the measured curve to that distribution saves 4,561 s of a 38,402 s prefill lifetime
+      #     (11.9 %) = **0.08 s per request on average**, with only 670 requests (1.2 %) saving
+      #     more than a second. Two to three minutes of prefill a week is not worth changing the
+      #     arithmetic of 33 of 48 layers on every prompt while #879 (a non-finite poison IN the
+      #     MoE path) is open and un-reproduced: the kernel mix on the prompt path is exactly what
+      #     we want unchanged when comparing a future capture. Upstream keeps it opt-in on RDNA4
+      #     for the same class of reason. If it is ever revisited, the A/B is one env line and the
+      #     prompts are in `scripts/strata-pf-ab.sh` (it also caught a one-off 246 tok/s cold read
+      #     that did NOT reproduce in 3 further runs - ignore single outliers at this depth).
       # Carried over from 0.1.43 and unchanged: STRATA_ROUTE_TAIL_SKIP=7 and the measured PCIe
       # share are still on for gfx12 (we hold ~43% of the experts in the GPU cache, so the skip
       # is active; KL ~0.003-0.006). 0.2.11 additionally stopped having setup write

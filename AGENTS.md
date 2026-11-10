@@ -1168,6 +1168,27 @@ bullet), and 0.2.13 vendored the ggml (see the pin paragraph above). Measured on
 after the 2026-11-10 deploy: **60–78 tok/s decode at ~200K context**, expert cache 95–98 %
 hits, DFlash2 acceptance 74–76 % (0.2.11 measured 67.9 tok/s on the same traffic).
 
+❌ **`STRATA_PF_FUSED_Q50` — measured on 2026-11-10 and left OFF** (it looks attractive because
+`moe_fused_iq.cu:1940` names our pack: "Q5_0 down (UD-IQ4_XS-v31: 33 of 48 layers)", and
+upstream's R9700 headline is prompts 2K +44 % / 8K +40 %; `=1` routes those layers' down
+projection through the fused int8 prompt kernel instead of gather + FP16 dequantize +
+hipBLASLt, prompt path only — it cannot blind the #879 audit, whose `native_expert_grouped`
+probes are on the decode side, `verify.cpp:2375`). Local A/B, cold prompts, median tok/s:
+**8.7K 2161 → 2672 (+24 %), 36K 2671 → 2804 (+5 %), 109K 3113 → 3293 (+5.8 %)**, decode
+unchanged, a deep-needle retrieval probe correct in all 9 runs. It is not worth it because
+**this box barely prefills**: across 58,154 logged requests the cold-read size is p50 223 /
+p90 1.9K / p99 34K tokens (91 % under 4K — the 16 GiB conversation cache and KV reuse eat the
+rest), so that curve is **0.08 s saved per request on average** (4,561 s off a 38,402 s
+prefill lifetime, 670 requests saving >1 s). A permanent arithmetic change on 33 of 48 expert
+layers per prompt is a bad trade for ~2–3 minutes a week, especially while #879 is open — we
+want the prompt-path kernel mix unchanged when comparing a future capture. The A/B is one env
+line, and `scripts/strata-pf-ab.sh` is the bench that made this call (cold prompts by a unique
+first line, byte-identical per arm because the needle value derives from depth+rep, deep-needle
+retrieval as the quality gate; it also works for `STRATA_SELECT_WMMA`, `STRATA_MMQ_KQ`,
+`STRATA_PREFILL_CPU_SHARE`). One more reason it cannot pay here: reads at that size are
+overhead-dominated — a 1.2K-token cold read runs at only ~670 tok/s, so at p50 the prefill is
+almost entirely fixed cost.
+
 - **DFlash2 is LIVE as the drafter since 2026-11-04** (`"drafting": "dflash2"` in
   `strata.nix`'s `configFile`): 0.2.10 made it the `auto` pick for Qwen3.8-Flash-Next on
   CUDA/HIP/Metal/SYCL — incoai's block drafter (packed from their pinned safetensors by

@@ -65,10 +65,40 @@ appeared on this start, along with `STRATA_HC_Q8`, the 12 exact switches, `HEAD_
 the AMD-Q CPU share up to 1,536-token chunks). The hipBLASLt line in 0.2.13
 ("the table is no longer used by default on gfx1201", `gemm.cu:319`) is a **no-op here**:
 the table only applies if a `tuning/<arch>-hipblaslt-<ver>.txt` sits beside the engine
-binary and our Nix build has never installed one. Available but NOT set: `STRATA_PF_FUSED_Q50=1`
-— `moe_fused_iq.cu:1940` names our pack ("Q5_0 down (UD-IQ4_XS-v31: 33 of 48 layers)"),
-upstream R9700 prompts 2K +44 % / 8K +40 %, and it "changes the arithmetic of those layers",
-so it needs a local A/B.
+binary and our Nix build has never installed one.
+
+**`STRATA_PF_FUSED_Q50` — tried, measured, left off (2026-11-10).** It is the one opt-in
+switch written for this exact pack: `moe_fused_iq.cu:1940` says "Q5_0 down (UD-IQ4_XS-v31: 33
+of 48 layers, with IQ3_XXS or IQ4_XS gate/up)", and `=1` sends those layers' `down` through the
+fused int8 prompt kernel (`native_w11_kernel`) instead of gather + FP16 dequantize + hipBLASLt
+(`d_covered_on(T_Q5_0)` at `:1967`; on gfx12 the switch alone gates it — no `STRATA_PF_F16`
+requirement, unlike gfx1151). It is **prompt-path only**: the #879 audit probes live in
+`native_expert_grouped`, which is called from `verify.cpp:2375` on the decode side, so enabling
+it cannot blind the audit. Upstream's R9700 headline is prompts 2K +44 %, 8K +40 %.
+
+Measured here (cold prompts — a unique nonce line defeats the exact-prefix reuse the
+conversation cache needs; byte-identical prompts per arm; median `prompt_per_second`):
+
+| cold prompt | off | on | Δ |
+|---|---|---|---|
+| 8.7 K tok | 2161 | 2672 | **+24 %** |
+| 36.1 K tok | 2671 | 2804 | +5 % |
+| 108.7 K tok | 3113 | 3293 | +5.8 % |
+
+Decode was unchanged in the same runs (55–76 tok/s both arms — correct for a prefill-only
+switch) and a deep-needle retrieval probe answered correctly in all 9 runs, so no *visible*
+quality loss. The reason it stays off is arithmetic, not measurement noise: this box barely
+prefills. Across the 58,154 logged requests the cold-read size is **p50 223 / p90 1,891 /
+p99 33,841** tokens — 91 % of reads are under 4K, because the 16 GiB conversation cache and KV
+reuse absorb the rest. Applying the measured curve to that distribution: **4,561 s saved off a
+38,402 s prefill lifetime (11.9 %), i.e. 0.08 s per request on average**, with only 670
+requests (1.2 %) saving more than a second. Two to three minutes of prefill a week is not worth
+changing the arithmetic of 33 of 48 expert layers on *every* prompt while #879 — a non-finite
+poison in the MoE data path — is still open and un-reproduced: the prompt-path kernel mix is
+exactly what we want unchanged when a future capture has to be compared with past ones.
+Upstream keeps it opt-in on RDNA4 for the same class of reason. The bench (and the one-off
+246 tok/s cold read that did **not** reproduce in three further runs — treat single outliers at
+8K as noise) is `scripts/strata-pf-ab.sh`; re-running the A/B is one env line.
 
 **Measured after this deploy** (same ~200K-token agent traffic as the 0.2.11 numbers): decode
 **60–78 tok/s**, expert cache **95–98 %** hits, DFlash2 acceptance 74–76 %; 0.2.11 measured
