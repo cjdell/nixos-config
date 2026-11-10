@@ -65,7 +65,7 @@ status_json() { curl -s -m 5 "$S/v1/status" 2>/dev/null | tr -d ' \n' || true; }
 field() { # field <compact-json> <key> — last occurrence wins ("serving" is nested once)
   printf '%s' "$1" | sed -n "s/.*\"$2\":\([A-Za-z0-9._-]*\)[,}].*/\1/p"
 }
-mode_now() { tr -d '[:space:]' < "$MODE" 2>/dev/null || true; }
+mode_now() { cat "$MODE" 2>/dev/null | tr -d '[:space:]' || true; }
 nrestarts() { systemctl show strata -p NRestarts --value 2>/dev/null || echo 0; }
 
 report() { # report — the shared status tail
@@ -74,10 +74,16 @@ report() { # report — the shared status tail
   loaded=$(field "$j" loaded); serving=$(field "$j" serving)
   echo "engine    : $(systemctl is-active strata 2>/dev/null)  loaded=${loaded:-no-answer}  concurrency.serving=${serving:-?}"
   if [ -s "$LOG" ]; then
-    grep -a "batch-mode\|slot sessions take\|STRATA_BATCH_DF2\|batch_slots\|expert cache [0-9]* slots\|batch: 1 slot" "$LOG" 2>/dev/null | tail -4
+    grep -a "batch-mode\|slot sessions take\|STRATA_BATCH_DF2\|batch_slots" "$LOG" 2>/dev/null | tail -3
+    grep -a "expert cache [0-9]* slots" "$LOG" | tail -1
     grep -a "decode expert cache hit rate" "$LOG" | tail -1
   fi
-  echo "ram       : $(free -g | awk 'NR==2{print "used="$3"G  available="$7"G"} NR==3{print "swap : used="$3"G  free="$4"G"}' | tr '\n' ' ')"
+  # no awk/free parsing: /proc/meminfo with sed, both guaranteed by the wrapper PATH
+  local avail sfree stot
+  avail=$(($(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo) / 1048576))
+  stot=$(($(sed -n 's/^SwapTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo) / 1048576))
+  sfree=$(($(sed -n 's/^SwapFree:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo) / 1048576))
+  echo "ram       : available ${avail}G  swap $((stot - sfree))G/${stot}G  (pinned RAM is the batch-mode risk: watch available)"
 }
 
 wait_load() { # wait_load <nrestarts-baseline> — 0 = loaded, 1 = dead/crash-loop/timeout

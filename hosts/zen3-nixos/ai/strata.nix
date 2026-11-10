@@ -626,7 +626,6 @@ in
           pkgs.gnugrep
           pkgs.gnused
           pkgs.systemd
-          pkgs.procps
         ]
       }:/run/setuid-programs
       exec ${pkgs.bash}/bin/bash ${./strata-batch.sh} "$@"
