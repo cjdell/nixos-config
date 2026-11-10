@@ -560,9 +560,10 @@ let
   # auto leaves them room" (generate.cpp:6822), and there is no runtime
   # re-allocation — BADM admits a conversation into an already-allocated slot,
   # nothing ever hands VRAM back to the cache when the second stream goes away.
-  # So --batch 2 pays ~1.3 GiB of the expert cache (~2 x 0.56 GiB resident-KV
-  # sessions at our --kv-resident 32768 + 2 x ~100 MiB private DFlash2 drafter
-  # clones, dflash2.hpp:67) EVEN AT IDLE. What a start in batch mode still does
+  # So --batch 2 pays 2.34 GiB of the expert cache (measured: 1.17 GiB per
+  # slot session at our --kv-resident 32768 + 2 x 85 MiB private DFlash2
+  # drafter clones, dflash2.hpp:67) EVEN AT IDLE - cache 24.54 -> 21.99 GiB,
+  # 10,742 -> 9,632 slots. What a start in batch mode still does
   # NOT cost a solo request: an alone request never enters a batch window
   # ("Alone ... the solo path (GEN, with drafts: the fastest stream)",
   # server.py:2230), and since 0.2.13.1 slots that DO run carry their own

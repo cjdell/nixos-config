@@ -65,7 +65,7 @@ workstation, etc.). Key layout:
 | `docs/zen3-random-crashes.md` | **OPEN** investigation into zen3-nixos' random hard resets (watchdog-reaped hangs, not panics; memory/IMC hypothesis; `[S]`=CPU_OUT_OF_SPEC) + the `scripts/stress-monitor.sh` soak harness — sequel to `docs/kernel-rcu-wedge.md` |
 | `docs/billion-context.md` | The `billion-context` context-compression proxy (ACP `compress` tools + fold nudges): config location/merge order, why folds fired at ~50 % of a 256K window (`nudgeGrowthTokens` + `outputHeadroomMaxPct`), the 2026-09-30 tuning, the exact nudge-gate formulas, and how to health-check it (`bili doctor`, `/__bili/*` on the **pi lane port 18789**, not 18787) |
 | `docs/strata-hang.md` | Strata's `no progress for 60 s` watchdog aborts (upstream #29) → 32 GB core dumps → amdgpu MES teardown failure + MODE1 GPU reset: why the cores are useless, the journal line that names the stall, and the `HSA_USERPTR_FOR_PAGED_MEM=0` candidate fix (#750 = two R9700s on ROCm 7.2) |
-| `docs/strata-batching.md` | Strata **batching / concurrent sessions** (`"parallel"` → `--batch N`, `--batch-mtp`, `--batch-groups`): why zen3-nixos stays at `concurrency.serving: 1` — slots cost 0.56 GiB of expert-cache VRAM each (232 MiB free) and carry **no MTP drafts** by default, the RTX 5070 table (2 concurrent = −15 % aggregate, TTFT 4.1 s → 0.9 s) vs the `--batch-mtp` +31–39 % single-card claim and the 2× R9700 −21.9 % counter-example, the #1603 risk the single-slot setup avoids, and how to enable + verify it |
+| `docs/strata-batching.md` | Strata **batching / concurrent sessions** (`"parallel"` → `--batch N`, `--batch-mtp`, `--batch-groups`) + the 2026-11-10 **`strata-batch` toggle**: why zen3-nixos stays at `concurrency.serving: 1` — measured on 0.2.13.1, slots take **2.34 GiB** VRAM + 85 MiB×2 DFlash2 slot-drafters (**STRATA_BATCH_DF2** drafts are the 0.2.13.1 default — the October "no MTP drafts" analysis is obsolete) and ~10 GiB pinned RAM, so the expert cache drops −10.3 % and a *lone* stream decodes **39.2 vs 56.9 tok/s**, two streams reaching only 14.7–26.6 each — less aggregate than one solo; lazy allocation inside the engine is impossible (startup carve, never handed back), the RTX 5070 table (2 concurrent = −15 % aggregate) vs the `--batch-mtp` +31–39 % claim and the 2× R9700 −21.9 % counter-example, the #1603 risk the single-slot setup avoids, and how to enable + verify it |
 | `docs/strata-expert-helper.md` | Options for a **second GPU as a Strata expert helper** on zen3-nixos (from #879): the three walls (mixed-vendor unsupported, ROCm arch coverage, and the board's second slot training at **Gen1 x2 = 0.5 GB/s**), candidate cards (RX 580 unusable / RTX 2060 needs a cross-vendor patch / RX 5600 gfx1010 clean but link-bound), the #1184 +10–18 % reference numbers, and why the PCIe link is the dealbreaker |
 | `docs/leighhack-tailscale.md` | The **second** tailscale net on grafton-router (the hackspace's, `10.3.0.0/16`, via the `grafton-hackspace-client` microVM): why `tailscale status` being healthy proves nothing about it, the diskless-VM + single-use-pre-auth-key root cause of the 2026-10 outage, `scripts/check-hackspace-tailscale.sh`, and the QMP trick for a console in a VM with no password |
 | `docs/jellyfin-tvdb-rematch.md` | Re-matching Jellyfin TV episodes after a **TheTVDB renumber** (the 2026-10-27 DS9 fix): why filenames can be right while titles are shifted, the three conditions re-matching needs (plugin installed, TheTVDB re-added to the library's `TypeOptions` fetchers — pruning is the trap — stale `Imdb` ids wiped via `"Imdb":""`), the Apply→wait→FullRefresh flow, title-card frame verification, and the `scripts/jellyfin-tvdb-fix/` toolset |
@@ -1117,11 +1117,19 @@ three-shard UD-IQ4_XS and the GSQ-RCO IQ3_S GGUFs have been deleted, so the
 `iq3s` / `ud-iq4-xs` entries in `models` are re-downloadable schema only). Docs:
 [`docs/strata.md`](docs/strata.md).
 
-**One request at a time** (`/v1/status` → `concurrency.serving: 1`): Strata's
-batching (`"parallel"` / `--batch N` / `--batch-mtp`) is available and **not
-enabled** — slots cost 0.56 GiB of expert-cache VRAM each against **232 MiB free**
-and drop the MTP draft path, which is what the 54.8 tok/s is made of. Analysis and
-the numbers to watch if concurrency ever reaches 3+: [`docs/strata-batching.md`](docs/strata-batching.md).
+**One request at a time** (`/v1/status` → `concurrency.serving: 1`): Strata's batching
+(`"parallel"` / `--batch N`) is available but off by default — since 2026-11-10 toggled by
+**`strata-batch on|off|status`** (PATH command; `/var/lib/strata/batch-mode` picks the run
+config at every service start, absent/garbage = solo, survives reboot/`gpu-mode`/rebuilds).
+Measured on 0.2.13.1 with it ON, then switched back off: slots cost **2.34 GiB** VRAM +
+85 MiB×2 DFlash2 slot-drafters (`STRATA_BATCH_DF2` is the 0.2.13.1 default with our
+explicit `--draft dflash2` — the October "slots lose the drafts" analysis is obsolete),
+shrinking the expert cache 24.54→21.99 GiB (−10.3 %) plus ~10 GiB **pinned RAM**; a *lone*
+stream in batch mode decodes **39.2 vs 56.9 tok/s (−31 %)**, and two concurrent streams
+manage only 14.7–26.6 each — less aggregate than one solo stream. Lazy batching inside the
+engine is impossible (slots are carved at startup, before the cache is sized, never handed
+back); the toggle is the lazy version, outside it. Analysis + 2026-11-10 addendum:
+[`docs/strata-batching.md`](docs/strata-batching.md).
 
 ⚠️ **The whole card is a lease, not an allocation:** `gpu-mode sd|game`
 (see the GPU-modes section) **stops `strata.service` outright** — do not

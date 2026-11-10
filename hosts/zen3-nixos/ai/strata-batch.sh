@@ -21,27 +21,34 @@
 # --expert-cache auto leaves them room" (generate.cpp:6822), and there is no
 # runtime re-allocation — BADM admits a conversation into an already-allocated
 # slot; nothing ever hands VRAM back to the cache when the second stream goes
-# away. So --batch 2 pays ~1.3 GiB of the ~24.5 GiB expert cache PERMANENTLY,
+# away. So --batch 2 pays 2.34 GiB of the ~24.5 GiB expert cache PERMANENTLY,
 # even at idle. What IS already dynamic is the serving speed: even with batch
 # mode on, a request running alone never enters a batch window — it runs the
 # solo path at full draft speed (server.py:2230). This toggle is only about
 # the reservation: pay it when you know you are about to run two sessions,
 # not while nobody would.
 #
-# What a batch start gives on this box (Strata 0.2.13.1, verified against the
-# pinned tree; full analysis + the numbers that changed since October:
-# docs/strata-batching.md):
+# What a batch start gives on this box (Strata 0.2.13.1, measured 2026-11-10;
+# full analysis + numbers: docs/strata-batching.md):
 #   * two conversations decoding in one batch window, each with its OWN
 #     DFlash2 drafter (the explicit --draft dflash2 + --batch pair turns
-#     STRATA_BATCH_DF2 on; ~100 MiB of private ring+buffers per slot, the
-#     pack is shared with the solo drafter);
-#   * ~0.56 GiB of VRAM per slot session (--kv-resident 32768, int8 KV) plus
-#     ~4.9 GiB of PINNED RAM per slot for the streamed whole-393K-ctx KV —
-#     that last one is the number to watch here (94 GiB box, -cram OOM
-#     history); `status` prints free RAM after every switch.
-#   * the expert cache is ~5 % smaller, so a solo stream loses maybe a few
-#     tenths of a hit-rate point and a few percent of tok/s for as long as
-#     batch mode stays on. That is the trade.
+#     STRATA_BATCH_DF2 on; 85 MiB of private ring+buffers each, the pack is
+#     shared with the solo drafter) — they ran: 4.23 rows/window, drafts
+#     accepted, two 160-token streams both finished in 9 s;
+#   * the REAL bill, printed by the engine at every batch start:
+#     "--batch 2: the slot sessions take 2.34 GiB of VRAM on CUDA0 that the
+#     expert cache would otherwise hold" (1.17 GiB/slot at our --kv-resident
+#     32768 — not 0.56), so the tier drops 24.54 -> 21.99 GiB (10,742 ->
+#     9,632 slots), PLUS ~10 GiB of pinned RAM (available 29G -> 19G) for
+#     the streamed whole-393K-ctx KV — this box has a -cram OOM history, so
+#     `status` prints available RAM after every switch;
+#   * and the measured cost while ON: a LONE stream decodes 39.2 vs 56.9
+#     tok/s (-31 %!), and two concurrent streams get only 14.7-26.6 each —
+#     less aggregate than one solo stream does alone. The batch window reads
+#     more distinct experts than the shrunken cache holds (11 % of routed
+#     entries served from CPU). So ON is for planned two-session sittings
+#     where "nobody waits for the other's whole answer" beats speed; keep it
+#     off otherwise. That asymmetry is the whole reason this toggle exists.
 #
 # Failure handling — the box's LLM always comes back:
 #   * the engine "recommends, never forces": if two slots do not fit it says

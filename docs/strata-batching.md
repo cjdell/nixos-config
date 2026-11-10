@@ -1,6 +1,9 @@
 # Strata batching (`--batch` / `"parallel"`) on zen3-nixos: would two concurrent sessions be faster?
 
 **Date:** 2026-10-15 · **Status:** analysis — **batching left OFF, no config change**
+**Update 2026-11-10:** measured on 0.2.13.1 and shipped as a toggle — see the
+**addendum at the end** first; it supersedes the modelled numbers below (the draft-path
+objection in §TL;DR/§3/§6 no longer holds, and the costs are now local measurements).
 **Applies to:** `zen3-nixos` — Strata 0.1.44.1 (`hosts/zen3-nixos/ai/strata*.nix`),
 Qwen3.8-Flash-Next UD-IQ4_XS on the R9700 (gfx1201, HIP), 94 GiB RAM.
 **Related:** `docs/strata.md`, `docs/strata-hang.md`, `docs/strata-expert-helper.md`,
@@ -297,3 +300,64 @@ software.
   `curl -s http://127.0.0.1:8080/v1/status` (2026-10-15).
 - Repo: `docs/strata.md` (pack/cache slot and tok/s tables), `docs/strata-hang.md`
   (#1603, single-slot setup), `docs/strata-expert-helper.md` (second-GPU walls).
+
+---
+
+## 2026-11-10 addendum — measured on 0.2.13.1: what changed, the real bill, and the `strata-batch` toggle
+
+Engine 0.2.13.1 (0.1.59.1), pack UD-IQ4_XS **v31**, live box. Everything below is measured
+here, not transplanted from the 5070 table.
+
+**Two things changed since October:**
+
+1. **The draft-path objection is gone.** 0.2.13.1 gives batch slots their **own DFlash2
+   drafters by default**: the explicit `--draft dflash2` + `--batch N` pair turns
+   `STRATA_BATCH_DF2` on per card (`generate.cpp:6850`; `STRATA_BATCH_DF2=0` opts out —
+   the October text's "batch windows carry no MTP drafts" is now MTP-era-specific). Live
+   start logs `STRATA_BATCH_DF2: 2 slot drafters on CUDA0 (85 MiB of private K/V ring and
+   buffers each, sharing the solo drafter's pack); 23.84 GiB free there` and serve logs
+   "batch windows carry each slot's token and its spare-row drafts". They ran: a
+   two-stream probe shows `strata batch: 75 windows, avg 4.23 rows` (tokens + draft rows)
+   and `MTP proposals accepted 170 of 147` inside the batch window.
+2. **The VRAM bill is bigger than modelled, and the engine self-funds it** — exactly the
+   "sacrifice expert cache" question, answered by the engine's own line:
+   `--batch 2: the slot sessions take 2.34 GiB of VRAM on CUDA0 that the expert cache
+   would otherwise hold` (1.17 GiB/slot, not 0.56 — we pay for the 32K *resident* window
+   plus the session's other state), so the tier went **24.54 → 21.99 GiB (10,742 → 9,632
+   slots, −10.3 %)**. Plus ~9–10 GiB of **pinned RAM** (available 29G → 19G). It never
+   OOMs — "the engine still starts and serves one request at a time"; it just decodes
+   slower.
+
+**Lazy allocation confirmed impossible inside the engine** (the actual question): the
+carve happens at startup, "before the expert cache is sized, so `--expert-cache auto`
+leaves them room" (`generate.cpp:6822`); `BADM` admits a conversation into an
+*already-allocated* session and nothing ever hands VRAM back to the cache when the second
+stream goes away. The dynamic half was already there: a lone request never enters a batch
+window (`server.py:2230` — "the solo path (GEN, with drafts: the fastest stream)"), so an
+*idle* `--batch 2` costs only the reservation. The toggle makes paying it a choice.
+
+**Shipped as `strata-batch on|off|status`** (`hosts/zen3-nixos/ai/strata.nix` +
+`strata-batch.sh`, installed on PATH). `/var/lib/strata/batch-mode` is read by the unit's
+`strataExec` at **every** start — survives reboot, `gpu-mode` and rebuilds; absent/garbage
+= solo. `on` writes `"parallel": 2` config (serve appends `--batch 2`), restarts, waits
+for `loaded:true`, verifies `serving=2`, and **auto-reverts to solo** if a batch start
+won't load. Default and steady state: **off**.
+
+**The measured costs** (200-token greedy decode, same prompt shape each):
+
+| | batch OFF | batch ON |
+| --- | --- | --- |
+| solo stream | **56.9 tok/s** | **39.2 tok/s** (−31 %) |
+| two concurrent | ~57 each but fully serialised — second request's first token ≈ whole first answer | 14.7–26.6 tok/s each, both start promptly |
+
+**The verdict got stronger, not weaker.** With batch ON the two streams together
+(~41 tok/s) do **less** total work than one solo stream alone (57): the window reads more
+distinct experts than the shrunken cache holds — `routed entries per window: VRAM 2312.9
+(87.9 %), PCIe 17.8 (0.7 %), CPU 299.7 (11.4 %)`, with 48.6 of 81.3 ms of each window
+inside CPU-expert fetches — and even a *lone* stream in batch mode runs 31 % slower for
+as long as the mode is on (the −10 % cache bites hardest exactly at our 95-98 %-hit
+operating point). So batching on this box buys **only** the removal of the
+wait-for-the-whole-answer dead time, and charges 31 % for the privilege. Perfectly
+occasional for a planned two-session sitting — which is what the toggle is for; never
+otherwise. `status` prints the live bill (slot lines, cache slots, available RAM) after
+every switch.
