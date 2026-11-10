@@ -1,8 +1,8 @@
 diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
-index 258ba76..3e0a7c9 100644
+index a0dbeda..c6761ea 100644
 --- a/include/strata/core/verify.hpp
 +++ b/include/strata/core/verify.hpp
-@@ -732,6 +732,8 @@ private:
+@@ -751,6 +751,8 @@ private:
      int32_t* sel_ = nullptr;
      int32_t* topk_scratch_ = nullptr;   // qsa_block_topk_long's multi-CTA exchange (STRATA_SELECT_LONG=1 only)
      float *logits_ = nullptr, *w_ = nullptr, *shared_ = nullptr, *parts_ = nullptr, *hit_out_ = nullptr;
@@ -52,10 +52,10 @@ index 2eb43ad..d39934e 100644
                     const SamplerParams& p, int* out, void* stream);
  
 diff --git a/src/core/verify.cpp b/src/core/verify.cpp
-index 47977c1..497b9bf 100644
+index 61b32de..7ef6676 100644
 --- a/src/core/verify.cpp
 +++ b/src/core/verify.cpp
-@@ -1103,6 +1103,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+@@ -1106,6 +1106,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
          arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
          one_ = b.take<int32_t>(4);
          hist_snap_ = b.take<float>(T * HS);
@@ -69,7 +69,7 @@ index 47977c1..497b9bf 100644
          ple_key_ = b.take<float>(T * (uint64_t) strata::kernels::NG_HC_DIM); ple_val_ = b.take<float>(T * N);
      };
      Bump count;
-@@ -1112,6 +1119,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+@@ -1115,6 +1122,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
          return false;
      }
      cudaMemset(arena_, 0, count.used);
@@ -77,7 +77,7 @@ index 47977c1..497b9bf 100644
      if (hflag_out_d_ != nullptr && hcount_d_ == nullptr) {   // the overlapped split's hand-off counter
          if (cudaMalloc((void**) &hcount_d_, 64) != cudaSuccess) { err = "verify: hand-off counter allocation failed"; return false; }
          cudaMemset(hcount_d_, 0, 64);
-@@ -1411,6 +1419,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1414,6 +1422,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
      // a batch window: row t is slot t, whose state lives in its own session
      auto slot_ss = [&](int t) -> SessionState& { return batch_rec_ ? *slots_[(size_t) brow_[t]] : ss; };
      const int hrow0 = batch_rec_ ? row_base_ : 0;   // a slot group's own hand-off rows
@@ -87,7 +87,7 @@ index 47977c1..497b9bf 100644
      // STRATA_BATCH_SELF_COMMIT: the window keeps its rows (no commit graph, nothing to snapshot for one)
      const bool keep_rows = batch_rec_ && batch_self_commits(brow_, T);
  
-@@ -1613,6 +1624,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1616,6 +1627,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
              static const int dummy = [] { const char* e = std::getenv("STRATA_DUMMY_NODES"); return e != nullptr ? std::atoi(e) : 0; }();
              for (int d = 0; d < dummy; ++d) gpu_noop(cs);
          }
@@ -97,7 +97,7 @@ index 47977c1..497b9bf 100644
          if (inputs_pending) {   // the window's steps and positions, before the first mixer reads them
              join(1);
              inputs_pending = false;
-@@ -2172,6 +2186,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -2175,6 +2189,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
              err = "verify layer " + std::to_string(l) + ": " + e.what();
              return false;
          }
@@ -107,7 +107,7 @@ index 47977c1..497b9bf 100644
          stamp(l, 16, grp);
          const bool q8_ffn = gr_read_group(1, true, inj_, inj2_);   // true: nat_xq_ holds the MoE input's q8_1 (STRATA_QFUSE)
          stamp(l, 32, grp);   // the profile only: the FFN-side read ends here, the router starts
-@@ -2305,6 +2322,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -2308,6 +2325,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                  err = std::string("verify shared expert: ") + e.what();
                  return false;
              }
@@ -117,7 +117,7 @@ index 47977c1..497b9bf 100644
              if (sh_fork) {
                  note_prio_tail(sh_cs_, -1);
                  cudaEventRecord(ev_join_, sh_cs_);
-@@ -2336,6 +2356,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -2339,6 +2359,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
      const bool fuse_head_gr = fuse_head_gr_env && (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
                                !cvec().covers(g.n_layers - 1);
      auto post = [&](int64_t l, int grp) -> bool {
@@ -125,7 +125,7 @@ index 47977c1..497b9bf 100644
          const int tb = tb_[grp], te = te_[grp], n = te - tb;
          const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
          const int64_t cap = (int64_t) n * K, capx = (int64_t) max_t_ * K;
-@@ -2400,6 +2421,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -2403,6 +2424,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
              }
              stamp(l, 19, grp);
              grouped(p_ptr, p_start, p_counts, 0, hit_out, true);
@@ -135,7 +135,7 @@ index 47977c1..497b9bf 100644
              stamp(l, 20, grp);
              if (device_plan_) wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
              else if (m_bal_ != nullptr)   // set_pcie_balance: the PCIe part starts
-@@ -2441,11 +2465,28 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -2445,11 +2469,28 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                      copy_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
              }
              // 143-amdk: the add of the GPU's hit rows is done by the combine that follows (one launch fewer)
@@ -164,7 +164,7 @@ index 47977c1..497b9bf 100644
          }
          // Same condition as `sh_fork` above, which is per group and out of scope here: wait only when the fork
          // actually ran (a wait on an event never recorded is a no-op, but saying it outright reads better).
-@@ -2476,6 +2517,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -2480,6 +2521,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
          }
          if (remote_opt_) remote_opt_->combine(bo_ + tb * N, y_dummy_ + tb * N, tb, n,
                                device_plan_ ? skip_ + grp : nullptr, ring, cs);
@@ -174,7 +174,7 @@ index 47977c1..497b9bf 100644
          stamp(l, 24, grp);
          if (tap_on_ && (!batch_rec_ || tap_batch_) && l < (int64_t) tap_slot_.size() && tap_slot_[(size_t) l] >= 0) {
              // the layer's completed output: R with this FFN half's write applied (the next layer's read would fold it), the mean of
-@@ -3640,6 +3684,82 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+@@ -3650,6 +3694,82 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
      for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
      if (tap_file_ != nullptr && !batch_rec_) tap_write(T, tokens, pos0);
      note_nonfinite(T, nullptr);
@@ -258,7 +258,7 @@ index 47977c1..497b9bf 100644
      // AFTER the window (the stream is synchronised above and the graph capture is over, so a plain copy is legal -
      // the same place STRATA_DBG_NAN copies from).  One record is
 diff --git a/src/kernels/cuda/iq_kernels.cu b/src/kernels/cuda/iq_kernels.cu
-index 3053183..49fc1c5 100644
+index c70ca9e..aa6e09a 100644
 --- a/src/kernels/cuda/iq_kernels.cu
 +++ b/src/kernels/cuda/iq_kernels.cu
 @@ -6238,6 +6238,59 @@ bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
@@ -321,7 +321,7 @@ index 3053183..49fc1c5 100644
  void native_expert_set_expdec(int on) { g_expdec = on < 0 ? -1 : (on ? 1 : 0); }
  int native_expert_expdec() { return expdec_mode(); }
  void native_expert_set_expdec_params(const NativeExpertExpdecParams& p) {
-@@ -6452,6 +6505,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+@@ -6459,6 +6512,8 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
      }
  #endif
      check("native_expert_grouped/gu");
@@ -330,7 +330,7 @@ index 3053183..49fc1c5 100644
      if (g_exp_phase == 3) return;   // the bench: gate/up only
      const long long nh = (long long) cap_entries * L.n_ff;
  #if defined(STRATA_HIP_GFX906)
-@@ -6468,6 +6523,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+@@ -6475,6 +6530,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
          if (L.had_block > 0)   // APR: the down weights are Hadamard-folded, so is their input (in place, every entry row)
              hadamard_rows(h, h, cap_entries, L.n_ff, L.had_block, L.d_signs, s);
          quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
@@ -338,7 +338,7 @@ index 3053183..49fc1c5 100644
      } else {
          swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, grp_start, n_groups,
                                                                                  (int) L.n_ff, hq);
-@@ -6523,6 +6579,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
+@@ -6530,6 +6586,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
          default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
      }
      check("native_expert_grouped/down");

@@ -128,11 +128,16 @@ let
     # d9620119), FOUR shards (1 = metadata only, 2/3 = tensors, 4 = the 26.8
     # GiB PLE table). Another file than the three-shard set above: 345 of 1224
     # tensors changed type and 33 expert layers moved to Q5_0, which is what
-    # engine 0.1.57 (Strata 0.2.11, UNSLOTH_V31_ENGINE in setup.py) is needed
-    # for. experts_bpw is unchanged at 3.999; the arena is 60.4 GB (55's cap
+    # engine 0.1.57 is the floor for (setup.py:434 UNSLOTH_V31_ENGINE = (0, 1, 57), still that value
+    # on 0.2.13.1, which builds 0.1.59.1). experts_bpw is unchanged at 3.999; the arena is 60.4 GB (55's cap
     # was arena 59.5 -> int(59.5/1.0737) = 55, here int(60.4/1.0737) = 56).
     # --native is shard 1 again and --ple-gguf stays null: with >2 shards the
-    # engine scans the shard set itself for the PLE table.
+    # engine scans the shard set itself for the PLE table. Since 0.2.12 a
+    # shortfall of this budget that the file cache can cover no longer fails the
+    # start - it loads through the file cache and logs "expert reads now go
+    # through the file cache (X GiB of RAM free for them, Y GiB limit)" (#5327,
+    # PR #5531); read that line as "RAM is short on this box", not "the pack is
+    # broken", and check before raising the budget further.
     ud-iq4-xs-v31 = {
       ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-v31-GGUF";
       packDir = "${modelDir}/pack/ud-iq4-xs-v31";
@@ -286,7 +291,7 @@ let
       # Drafting. 0.2.10 made DFlash2 (incoai's block drafter, packed under
       # /home/cjdell/Strata/dflash2/ by drafting_fetch.ensure() from pinned
       # safetensors - pack sha checked against upstream's PINNED bytes) the Auto
-      # pick for Qwen3.8 on HIP too; "mtp" was the 0.2.7.1-era behaviour and the
+      # pick for Qwen3.8 on HIP; "mtp" was the 0.2.7.1-era behaviour and the
       # A/B baseline (MTP: 48-66 tok/s decode on real 250 K traffic, 68.7 % draft
       # acceptance, spec 6). serve's strata_control/drafting.apply() shapes the
       # args below for whichever drafter is chosen: dflash2 strips
@@ -295,16 +300,49 @@ let
       # <by free VRAM>, picking the SELQ4 pack (0.72 GB VRAM vs 0.89) because our
       # HIP engine reads it. With --draft-fallback none, a DFlash2 that cannot
       # start FAILS the start rather than silently running MTP: revert = "mtp".
-      # 0.2.11 adds two things to know: a start that DIES of short VRAM is
-      # retried once with NO drafter (new reason SHORT_OF_VRAM, never silently
-      # MTP) - worth watching at 232 MiB free, "short of memory" in
-      # strata.log; and its #5153 known-problem applies to our DFlash2-only
-      # run: a parked-conversation snapshot can fail "conversation snapshot:
-      # invalid K/V extent", costing the next request a full prompt re-read
-      # (predates 0.2.11; grep strata.log if reuse drops, fix in a later
-      # engine). The name regex, SPEC_WINDOW 6, DRAFT_CONF and the
-      # drafting_fetch pack pins are all byte-identical on 0.2.11 - the
-      # existing selq4 pack is reused, no re-download.
+      # 0.2.11 added: a start that DIES of short VRAM is retried once with NO
+      # drafter (reason SHORT_OF_VRAM, never silently MTP) - watch "short of
+      # memory" in strata.log at our 232 MiB free.
+      # 0.2.12 -> 0.2.13.1, this card, verified against the tree (not the changelog):
+      #   * AUTO NO LONGER MEANS DFlash2 HERE. drafting.py gained
+      #     AUTO_MTP = {("hip","gfx1201"): "the DFlash2 prompt stall (11 of 50
+      #     engines on 0.2.11); PE-RDNA4's fix is pending"} - on an R9700 Auto
+      #     now starts the MTP drafter. Only Auto: the comment is explicit that
+      #     "DFlash2 chosen by name (the Drafting step, the app's dropdown,
+      #     `--drafting dflash2`, a saved \"drafting\": \"dflash2\") still starts
+      #     DFlash2", which is us, so this line is what keeps the drafter we
+      #     measured (+2-2.5 % decode over MTP, 71-78 % acceptance vs MTP's 68.7,
+      #     expert slots UP 10608->10717, 95-98 % cache hits on live agent
+      #     traffic, no stall in 6 days since 2026-11-04).
+      #   * THE STALL ITSELF IS STILL OPEN and it is our configuration: upstream's
+      #     "Radeon gfx1201: DFlash2 chosen by hand can stall on the prompt (11 of
+      #     50 engines on 0.2.11); the engine stops itself and the next request
+      #     restarts it", listed in 0.2.12 AND 0.2.13 as "not looked at again".
+      #     Symptom here would be a prefill that never finishes and a following
+      #     request that starts clean - which looks exactly like the #29 watchdog
+      #     class in docs/strata-hang.md, so check for it before blaming the KV
+      #     streaming again. If it ever bites: "drafting": "mtp" is the one-line
+      #     revert, and that is also what Auto would pick for us now.
+      #   * NOTHING ELSE MOVES: _SUPPORTED_NAME is byte-identical (our
+      #     -unsloth-ud-iq4-xs-v31 name still passes the gate), SPEC_WINDOW is
+      #     still 6 with WIDE_WINDOW 8 reserved for gfx1151 and the big-Blackwell
+      #     class (drafting.py:778 window_for - gfx1201 keeps 6), the pack pins
+      #     are unchanged (REPO/REVISION a22a1744, selq4 CONVERTED_BYTES
+      #     339,694,592 / sha 4a42b982...), so the existing pack is reused and
+      #     nothing downloads.
+      #   * Strata's NEW tuned drafter (0.34 GB, "qwen3.8-flash-next-dflash2.
+      #     strata1.q4_0-selq4.pack", +2.4..5.0 % where measured) deliberately
+      #     does NOT apply to this card: SET_DEFAULTS has
+      #     ("hip","unsloth-ud-iq4_xs-v31") -> tuned=True but where="gfx1151",
+      #     tuned_applies() returns `arch == "gfx1151"`, and the table's own
+      #     comment says "NOT enabled: ... gfx1201 / R9700 (the DFlash2 prompt
+      #     stall is open)". So pack_path() keeps handing us the stock selq4 pack
+      #     - and do NOT "upgrade" to the tuned one by hand while the stall is open.
+      #   * #5153 is still in the open list and it is our run shape (DFlash2-only):
+      #     restoring a parked conversation can fail "conversation snapshot:
+      #     invalid K/V extent" - the turn survives, the next request re-reads the
+      #     prompt. grep /var/lib/strata/strata.log for it if conversation-cache
+      #     reuse drops.
       drafting = "dflash2";
       cwd = "/var/lib/strata";
       tokenizer = "${m.packDir}/tokenizer";
@@ -350,7 +388,11 @@ let
       # R9700: 57 ms vs 3.13 s per picture) but it keeps ~1.4 GiB of VRAM, and
       # the expert cache runs at 232 MiB free - so we ship the plain CPU
       # `strata-vision` (STRATA_VISION_CUDA/HIP off, docs/AMD_HIP.md's CPU path)
-      # and keep gpu = false. What that buys us is VRAM: `--vision`
+      # and keep gpu = false. Unchanged on 0.2.13.1, where setup.py:5295
+      # build_vision_hip still builds the CPU reader ALWAYS (its docstring: "the
+      # CPU reader always (the fallback)") and the HIP one only for a "gpu"
+      # vision choice - our package runs the build_vision_cpu recipe, so the
+      # GPU encoder is not even in the store. What that buys us is VRAM: `--vision`
       # alone allocates only the (max_context+64)x3 int32 M-RoPE table
       # (generate.cpp:3201) = 4.5 MiB, and the 700 MiB `--vram-reserve-mib` the
       # serve layer adds is gated on gpu = true. The expert cache (232 MiB
@@ -417,6 +459,30 @@ let
       #     (STRATA_GFX12_RING=0 back; upstream: first-token logits and greedy hashes identical), and
       #     the K-quant MMQ prompt kernels turn on for UD-Q4/Q5/Q6_K_XL files (STRATA_MMQ_KQ=0 back) -
       #     our pack is IQ4_XS, an i-quant, whose MMQ prompt path was already built in.
+      # What 0.2.12/0.2.13 change on THIS card (verified against 628f7495):
+      #   * STRATA_GDN_CHUNKED - NEW in 0.2.12, ON for us: prompt chunks of 30,000+ tokens run the
+      #     chunked GDN (gated-delta) scan instead of the recurrent one. Upstream on an R9700: 32K
+      #     +6.1 %, 64K +6.7 %; 0.2.12's 32K-prompt +8.6-11.6 % headline for the R9700 is largely this.
+      #     0.2.13 made it the engine's own Linux-gfx12 default (arch_defaults.cpp:255
+      #     gdn_chunked_default_env, applied at :318 with the line "RDNA4 (gfx12): prompt chunks of
+      #     30,000+ tokens use the chunked GDN scan"), so a plain engine start matches the app's.
+      #     It is a different kernel: answers CAN differ in the last digits above 30K, which is where
+      #     most of our agent traffic lives - the first suspect for "the model answered differently
+      #     after 2026-11-10". Revert: env.STRATA_GDN_CHUNKED = "0"; (or STRATA_GFX12_DEFAULTS="0" for
+      #     every gfx12 switch at once). Already on before this bump, so it is NOT the answer-change
+      #     suspect: STRATA_SELECT_WMMA (the matrix-core QSA block scorer past 28,672 tokens) and
+      #     STRATA_MMQ_KQ (never read for an i-quant pack).
+      #   * the 0.2.13 hipBLASLt line ("Windows RX 9070 / R9700: the hipBLASLt table is no longer used
+      #     by default", gemm.cu:319) does not touch us - it reads like it does. The table only ever
+      #     applies if a tuning/<arch>-hipblaslt-<ver>.txt sits BESIDE the engine binary, and our Nix
+      #     build has never installed one (own_tuning_dir() finds nothing), so we have run plain
+      #     hipBLAS on every version. Nothing to set; STRATA_HIPBLASLT_TABLE=on would be the first
+      #     time this box used a table, and it changes answers' last digits.
+      #   * OFF, but written for our pack, if long-prompt speed ever matters more than bit-fidelity:
+      #     STRATA_PF_FUSED_Q50=1 (moe_fused_iq.cu:1940 - "Q5_0 down (UD-IQ4_XS-v31: 33 of 48
+      #     layers...)"; gfx12 keeps its int8 fused kernel only with the switch; upstream R9700
+      #     prompts 2K +44 %, 8K +40 %). It "changes the arithmetic of those layers", so it needs an
+      #     A/B here first, not a merge.
       # Carried over from 0.1.43 and unchanged: STRATA_ROUTE_TAIL_SKIP=7 and the measured PCIe
       # share are still on for gfx12 (we hold ~43% of the experts in the GPU cache, so the skip
       # is active; KL ~0.003-0.006). 0.2.11 additionally stopped having setup write

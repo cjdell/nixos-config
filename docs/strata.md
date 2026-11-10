@@ -21,6 +21,75 @@ is available and deliberately **not enabled** — on this card it buys second-se
 waiting time and costs expert-cache slots and the MTP draft path. Analysis, the
 upstream measurement tables and the numbers to watch if that changes: [`strata-batching.md`](./strata-batching.md).
 
+## Strata 0.2.12 + 0.2.13.1 (2026-11-10)
+
+**Strata 0.2.13.1** (`628f7495`, engine **0.1.59.1**, live 2026-11-10) — two engine
+versions at once (0.1.57 → 0.1.58 in 0.2.12 `146df3c4`, → 0.1.59(.1) in 0.2.13
+`d2f09647`), and the `.1` tag is a Control-only Intel-Arc hotfix: `v0.2.13..v0.2.13.1`
+is 7 commits whose only build-relevant line is `project(strata VERSION 0.1.59.1)`.
+Everything below was read off the trees, not the changelog; the full version-by-version
+verification lives in `hosts/zen3-nixos/ai/strata-package.nix`'s pin comment.
+
+**The build surface changed** — 0.2.13's "cleanup 5.4" split `CMakeLists.txt` by backend
+(`cmake/backends/{cpu,cuda,hip}.cmake`; `add_executable(strata)` is now
+`cmake/strata_gpu_engine.cmake:477`) and vendored the ggml into `third_party/strata-ggml`
+("an engine build needs no llama.cpp download"). `strata-package.nix` therefore drops
+`-DSTRATA_GGML_DIR`: `diff -r` of llama.cpp `3cf03257`'s `ggml/` against that folder shows
+**every common source/header byte-identical** — only `ggml/CMakeLists.txt` +
+`ggml/src/CMakeLists.txt` differ (backends/tests/install rules trimmed) plus Strata's own
+`ggml/src/ggml-cuda-tq/` trellis folder, and `third_party/ggml/VERSION.txt` names exactly
+`3cf03257`. Same compiled ggml, and it is the tree upstream's own release engines build
+from. The `llama` fetch stays: `tools/vision` does `add_subdirectory(${LLAMA_DIR} llama)`
+and needs the full checkout (`setup.py:240` still pins the same rev). The override is
+documented upstream as "kept for two releases, then removed", so nothing here will break
+when it goes.
+
+**What moves answers or speed on this card:** `STRATA_GDN_CHUNKED` (new in 0.2.12, on for
+gfx12) — prompt chunks of 30,000+ tokens use the chunked GDN scan, upstream R9700 32K
++6.1 % / 64K +6.7 %, and 0.2.13 promoted it from a launcher-written setting to an engine
+default (`arch_defaults.cpp:255`); different kernel, so answers can differ in the last
+digits at exactly the depths our agent traffic runs at (revert `STRATA_GDN_CHUNKED=0`).
+0.2.12's other R9700 headline is 32K prompts +8.6–11.6 %. The hipBLASLt line in 0.2.13
+("the table is no longer used by default on gfx1201", `gemm.cu:319`) is a **no-op here**:
+the table only applies if a `tuning/<arch>-hipblaslt-<ver>.txt` sits beside the engine
+binary and our Nix build has never installed one. `STRATA_SELECT_WMMA` (QSA block scorer
+past 28,672 tokens) and `STRATA_MMQ_KQ` (never read for an i-quant pack) were already at
+their 0.2.11 state. Available but NOT set: `STRATA_PF_FUSED_Q50=1` — `moe_fused_iq.cu:1940`
+names our pack ("Q5_0 down (UD-IQ4_XS-v31: 33 of 48 layers)"), upstream R9700 prompts 2K
++44 % / 8K +40 %, and it "changes the arithmetic of those layers", so it needs a local A/B.
+
+**The audit patch re-based with zero rejects again** (2026-11-10): 19 hunks, 280 additions,
+0 deletions, added lines byte-identical to the 0.2.11 file, `patch -p1 --fuzz=0` clean with
+**no offsets** and `git apply --check` clean on `628f7495`. Pure context drift: `verify.cpp`
++3/+4/+10, `verify.hpp` +19, three of `iq_kernels.cu`'s four hunks +7 — and that +7 *is* the
+file's entire 0.2.11→0.2.13.1 diff (the `STRATA_EXPERT_V2K` block at `:6306-6326` gaining
+Windows gfx1151), which is why hunk #1 stayed put. Anchors re-confirmed: `nf_mask_` /
+`note_nonfinite` (`verify.cpp:5232`) and `hits_in_combine` (`:2403`/`:2483`), and the audit's
+own gate is still read at `verify.cpp:1112` / `iq_kernels.cu:6265`. Both `postPatch` clamps
+still needed and still unique: `kv_q8.cu:55` unmoved (file still contains no `65504`),
+`prefill/kernels.cu`'s target now `:2558` with `hf_sat` at `:69`. The installPhase rewrite
+targets are still there exactly once each (`died_note` def `:436`, rewritten `:8633`, the
+ValueError `:8645`); `import serve.server` against the installed layer was re-verified on
+this build, and no new third-party module-scope import appeared (the 0.2.12/13 additions —
+`serve/{ready,owner_guard,launch_identity,logit_bias,lifeline,responses,images}.py`,
+`strata_control/{drafting,vram_fit,gpu_roles}.py` — are all stdlib-only).
+
+**DFlash2: our choice is now off upstream's default path.** 0.2.12 added
+`AUTO_MTP = {("hip","gfx1201"): "the DFlash2 prompt stall (11 of 50 engines on 0.2.11);
+PE-RDNA4's fix is pending"}` — **Auto on an R9700 now starts the MTP**, and the stall is
+still in 0.2.13's Known problems ("not looked at again": the engine stops itself and the
+next request restarts it). A saved `"drafting": "dflash2"` — us — still starts DFlash2, and
+nothing else moved: `_SUPPORTED_NAME` identical, `SPEC_WINDOW` still 6 (`WIDE_WINDOW` 8 is
+gfx1151 + big-Blackwell only), pack pins identical (`CONVERTED_BYTES` 339,694,592 / sha
+`4a42b982…` since 0.2.10, so no re-download), and the new **tuned** drafter (0.34 GB) is
+gated `where="gfx1151"` in `SET_DEFAULTS` with the comment "NOT enabled: … gfx1201 / R9700
+(the DFlash2 prompt stall is open)" — `pack_path()` keeps handing us the stock selq4 pack.
+#5153 (a DFlash2-only run failing to restore a parked conversation, "conversation snapshot:
+invalid K/V extent") is still open. And from 0.2.12 on Linux, an expert-store shortfall the
+file cache can cover loads through the file cache instead of failing the start (#5327 /
+PR #5531) — with `--resident-budget-gib 56` on 94 GB, read "expert reads now go through the
+file cache" in `strata.log` as "RAM is short", not "the pack is broken".
+
 ## Dynamic v3.1 + Strata 0.2.10/0.2.11 (2026-11-04 / 11-05)
 
 **Strata 0.2.11** (`c3b3f503`, engine 0.1.57, live 2026-11-05) — bump from

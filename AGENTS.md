@@ -1089,15 +1089,25 @@ flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
 procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.11** (`c3b3f5035506f3e966f1b4b7b188aeaabae92f1d`, updated 2026-11-05 from
-0.2.10 `db0500a5` — the v0.2.11 tag is main minus 3 README/FUNDING/docker
-commits, all docs-only, so it stays bleeding edge). 0.2.0 split the repo into
-**app + Terminal + engine** — the engine source in this tag is version 0.1.57
-(`CMakeLists.txt:11`), and `serve/server.py` imports the
+**0.2.13.1** (`628f74955a56fcba092495b800dd02af75373a0f`, updated 2026-11-10 from
+0.2.11 `c3b3f503` via 0.2.12 `146df3c4` — the engine went 0.1.57 → 0.1.58 →
+**0.1.59.1** across those two, so this was a real engine bump, not a docs tag; the
+`.1` tag itself is a Control-only Intel-Arc hotfix whose sole build-relevant line
+is `project(strata VERSION …)`). 0.2.0 split the repo into
+**app + Terminal + engine** — and 0.2.13 re-cut the engine build by backend
+(`cmake/backends/{cpu,cuda,hip}.cmake`, `add_executable(strata)` now lives in
+`cmake/strata_gpu_engine.cmake:477`) and **vendored the ggml it compiles into
+`third_party/strata-ggml`**, so `strata-package.nix` no longer passes
+`-DSTRATA_GGML_DIR` (verified with `diff -r`: every common source of llama.cpp
+`3cf03257`'s `ggml/` is byte-identical there — only the two CMakeLists are trimmed,
+plus Strata's own `ggml-cuda-tq/` folder; the `VERSION.txt` pin is the same commit).
+The `llama` fetch stays in `strata-package.nix` for **`tools/vision` only** — that
+project does `add_subdirectory(${LLAMA_DIR} llama)` and needs the real checkout.
+0.2.0's split also means `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-11-05 (0.2.11)** — `ExecStart` names `/nix/store/85ag3v1hzpw8jha283fg7syyxgg9hhwr-strata-0.2.11`
-and `/v1/status` reports `"engine": "0.1.57"`):
+2026-11-10 (0.2.13.1)** — `ExecStart` names `/nix/store/<hash>-strata-0.2.13.1`
+and `/v1/status` reports `"engine": "0.1.59.1"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
@@ -1136,6 +1146,19 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
 `hosts/zen3-nixos/ai/strata.nix`. Upstream's R9700 rows: 0.1.43 decode +2–10 % / prompt
 +12–14 %; 0.1.44 adds +2.5–4 % from HC_Q8. Details: `docs/strata.md` "0.1.43".
 
+⚠️ **0.2.12 changes answers on our card too** — `STRATA_GDN_CHUNKED`, on by default for
+gfx12: prompt chunks of **30,000+ tokens** run the chunked GDN (gated-delta) scan instead of
+the recurrent one (upstream R9700: 32K +6.1 %, 64K +6.7 %; its "R9700 32K prompts +8.6–11.6 %"
+headline is largely this). 0.2.13 promoted it from launcher-written to an engine default
+(`arch_defaults.cpp:255`), so a bare `strata` start now matches the app's. It is a different
+kernel, so this is the first suspect for "the model answered differently after 2026-11-10" at
+the depths our agent traffic lives at — revert `STRATA_GDN_CHUNKED=0`. The other 0.2.13 line
+that reads like it moves us does not: the hipBLASLt tuning table stopped being applied on
+gfx1201 by default (`gemm.cu:319`), but our build has never installed a `tuning/` folder next
+to the binary, so we have always been on plain hipBLAS. Also from 0.2.12: **Auto no longer
+picks DFlash2 on gfx1201** (see the DFlash2 bullet), and 0.2.13 vendored the ggml (see the
+pin paragraph above).
+
 - **DFlash2 is LIVE as the drafter since 2026-11-04** (`"drafting": "dflash2"` in
   `strata.nix`'s `configFile`): 0.2.10 made it the `auto` pick for Qwen3.8-Flash-Next on
   CUDA/HIP/Metal/SYCL — incoai's block drafter (packed from their pinned safetensors by
@@ -1143,12 +1166,32 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   bytes), which serve's `drafting.apply()` starts **instead of** the MTP head (strips
   `--mtp`/`--spec-min-p`/our `--spec`, adds `--draft dflash2 --draft-model <pack>
   --draft-fallback none --spec N --draft-conf 0.5`; N is `SPEC_WINDOW` = **6 on
-  both 0.2.10 and 0.2.11** (this file once said 8 — stale; the live `ExecStart`
-  carries `--spec 6`), re-check per bump).
+  0.2.10 through 0.2.13.1** (this file once said 8 — stale; the live `ExecStart`
+  carries `--spec 6`), re-check per bump — `WIDE_WINDOW` 8 is reserved for
+  `gfx1151`/big-Blackwell, so our gfx1201 keeps 6).
+  ⚠️ **Since 0.2.12 that is an explicit choice, not the default:** upstream added
+  `AUTO_MTP = {("hip","gfx1201"): "the DFlash2 prompt stall (11 of 50 engines on
+  0.2.11); PE-RDNA4's fix is pending"}` — on an R9700, `auto` now starts the **MTP**,
+  because "DFlash2 chosen by hand can stall on the prompt (11 of 50 engines on 0.2.11).
+  The engine stops itself and the next request restarts it", still listed as **not
+  looked at again in 0.2.13**. A saved `"drafting": "dflash2"` still starts DFlash2
+  (upstream says so in that comment's own words), which is what we run: +2–2.5 % decode
+  over MTP here, and no stall in the 6 days since 2026-11-04. So the failure mode to
+  recognise is a prefill that never finishes and then the *next* request starts clean —
+  it looks exactly like the #29 watchdog class in `docs/strata-hang.md`; check for it
+  there before blaming KV streaming again. `"drafting": "mtp"` remains the one-line
+  revert (and is what `auto` would now choose for us).
   The packs live in
   `/home/cjdell/Strata/dflash2/` (`data_dir` derives from our `--mtp` arg) — the
   **selq4** pack (339 MB, selector codebooks Q4_0, "about 174 MiB less") is the one
-  `pack_path()` picks because our HIP engine reads it. A/B on identical 700-token prompts
+  `pack_path()` picks because our HIP engine reads it. Its pins are byte-identical
+  from 0.2.10 through 0.2.13.1 (`CONVERTED_BYTES` 339,694,592 / sha `4a42b982…`,
+  REPO/REVISION `a22a1744`), so a bump costs no re-download. Strata's **tuned**
+  drafter (0.34 GB, `…strata1.q4_0-selq4.pack`, +2.4–5 % where measured) is new in
+  0.2.12 and deliberately **not** ours: `SET_DEFAULTS ("hip","unsloth-ud-iq4_xs-v31")`
+  is `tuned=True` but gated `where="gfx1151"`, `tuned_applies()` returns
+  `arch == "gfx1151"`, and the table's comment says "NOT enabled: … gfx1201 / R9700
+  (the DFlash2 prompt stall is open)" — so leave it alone until that stall is fixed. A/B on identical 700-token prompts
   (6+6 samples): **decode 60.6 vs 59.1 mean (+2–2.5 %, upstream claims +6.6/+4.2 on
   IQ3_S), draft acceptance 71–78 % vs MTP's 68.7 %, and expert slots UP 10608→10717** —
   the VRAM-contention worry never materialised, the selq4 drafter costs less than the MTP
@@ -1174,8 +1217,9 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `d9620119…`, fetched by `scripts/fetch-strata-udiq4xs-v31.sh`, packed by
   `scripts/repack-strata-udiq4xs-v31.sh` — same **`--compat-bf16` REQUIRED** recipe;
   35 layers put gate/up/down in different shards, so `native_experts.txt` is the
-  **v4 per-role** form and engine ≥ 0.1.57 (0.2.11) is a hard requirement,
-  `UNSLOTH_V31_ENGINE`). It is a different file from the October three-shard
+  **v4 per-role** form and engine ≥ 0.1.57 is a hard requirement
+  (`UNSLOTH_V31_ENGINE = (0, 1, 57)`, `setup.py:434` — still that value on 0.2.13.1,
+  which builds 0.1.59.1). It is a different file from the October three-shard
   UD-IQ4_XS: 345 of 1224 tensors re-typed, 33 expert layers on the new Q5_0 down
   format, experts_bpw unchanged at 3.999 — so the old decode analysis applies
   (**60-64 tok/s at 92-94 % hits** on 0.2.7+; ~1,250 tok/s prefill; 393216 ctx).
@@ -1197,10 +1241,11 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
   `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
   the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
-  `prefill/kernels.cu:2509` (was 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
-  live here because we run `--kv int8`. Still unclamped on 0.2.11 — and 0.2.11 did
-  not even move the targets (`kv_q8.cu:55` and `prefill/kernels.cu:2509` are the
-  0.2.10 lines) — so both `postPatch` clamps are still needed and both
+  `prefill/kernels.cu:2558` (was 2509 in 0.2.11, 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
+  live here because we run `--kv int8`. Still unclamped on 0.2.13.1 (re-checked on
+  `628f7495`: `kv_q8.cu:55` has not moved and that file still contains no `65504` at all,
+  and the prefill target is still exactly once — `hf_sat` now sits at `:69` above it), so
+  both `postPatch` clamps are still needed and both
   `--replace-fail` targets are still unique.
   Full incident history, the exact sites, and verification
   commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
@@ -1212,8 +1257,11 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   and were **32 GB each on `/`** — `LimitCORE = 0` is now set in
   `hosts/zen3-nixos/ai/strata.nix`. ⚠️ `NRestarts=0` does **not** mean healthy: `bin/strata-server`
   restarts the engine child in-process, so systemd never sees the failure. Top fix candidate:
-  `HSA_USERPTR_FOR_PAGED_MEM=0` (upstream #750 = two R9700s on ROCm 7.2; this box runs clr/hipblaslt
-  **7.2.3**) is applied in `configFile`'s `env` since 2026-10-08 — verify with
+  `HSA_USERPTR_FOR_PAGED_MEM=0` (upstream #750 = two R9700s on ROCm 7.2; the build-time
+  nixpkgs ROCm moved 7.2.3 → 7.2.4 with the 0.2.13.1 deploy, but that scope is headers and
+  link libs only — the engine maps its whole HIP runtime from `rocm10-runtime.nix`, proof:
+  `sudo cat /proc/$(pgrep -f '[b]in/strata --serve')/maps | grep -c rocm10-runtime`) is
+  applied in `configFile`'s `env` since 2026-10-08 — verify with
   `sudo tr '\0' '\n' < /proc/$(pgrep -f '[b]in/strata --serve')/environ | grep -i userptr`.
   Full write-up: [`docs/strata-hang.md`](docs/strata-hang.md).
 - **`hosts/zen3-nixos/ai/strata-kernel-audit.diff`** (`patches = [...]`, applied before
@@ -1239,7 +1287,15 @@ RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a com
   2026-11-05 with **zero rejects**: the file regenerated from the patched tree is the
   0.2.10 one with byte-identical added lines and only 4 hunk headers moved — a pure
   **+3-line drift in `src/kernels/cuda/iq_kernels.cu`** (the `native_expert_grouped`
-  region) — so a 0.2.12 rebase is likewise just an offset check. (Earlier re-bases: onto
+  region). Re-based onto **0.2.13.1** on 2026-11-10, again with **zero rejects and no
+  hand-placed hunks**: 19 hunks, 280 additions, byte-identical added lines, `patch -p1
+  --fuzz=0` with no offsets and `git apply --check` clean on `628f7495`; the drift is
+  `verify.cpp` +3 (two hunks +4, the `run()`-tail dump +10), `verify.hpp` +19 and three
+  of `iq_kernels.cu`'s four hunks +7 — and that +7 is the whole file's diff between
+  0.2.11 and 0.2.13.1 (the `STRATA_EXPERT_V2K` block at `:6306-6326` gaining Windows
+  gfx1151), which is why hunk #1 did not move. Two clean re-bases in a row: the next
+  bump is again an offset check first, a hand-place only if `iq_kernels.cu` or
+  `verify.cpp` actually changes under the anchors. (Earlier re-bases: onto
   0.2.7.1 on 2026-10-29, 6 hand-placed — `topk_scratch_` in verify.hpp, the `sh_fork`
   `note_prio_tail` body, the `grouped()` trailing `true` + `ar_on()` branch (never live
   at our 43 % cache), the `tap_on_` block after `stamp(l, 24`, `tap_write`/
