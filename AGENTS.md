@@ -678,8 +678,12 @@ on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
   send result back; the Web UI does this loop itself. Because tools + public
   endpoint = an agent runtime for the anonymous internet, the
   `lfm3.ai.chrisdell.info` vhost is allow-listed to LAN/VLAN10/WG/tailnet +
-  the LAN /64 (`deny all`, hass-rs pattern); the IP vhost `/lfm3/` needs no
-  list (RFC1918 = LAN-only).
+  the LAN /64 + leighhack's `2001:8b0:1d14::/48` (`deny all`, hass-rs
+  pattern); the IP vhost `/lfm3/` needs no list (RFC1918 = LAN-only). ⚠️ The
+  llama.cpp Web UI shows a misleading "API key required" for ANY non-2xx
+  `/props` response — if a legit client hits the deny rule, check
+  `journalctl -u nginx | grep 'access forbidden'` before blaming auth
+  (2026-11-11: user browsing from leighhack hit exactly this).
 - **MCP: not wired.** llama.cpp's MCP client (#26062, `--mcp-servers-config`,
   Cursor JSON) is **stdio-only** — MCP servers spawn as child processes with
   the server's (root) privileges. Recallium/diamcp speak Streamable HTTP, so
