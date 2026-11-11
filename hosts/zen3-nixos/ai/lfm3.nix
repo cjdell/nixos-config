@@ -41,12 +41,50 @@
 # ConditionPathExists keeps the unit down until it is there, same guard as
 # ./sd-server.nix.
 #
+# Server-side tools (--tools all): llama.cpp's built-in agent tools
+# (read_file, file_glob_search, grep_search, exec_shell_command, write_file,
+# edit_file, get_info) execute INSIDE llama-server's own sandbox —
+# --tools-runtime spins `podman run --rm -i docker.io/library/python:3.11-slim sh`
+# at startup and routes every tool call through `podman exec` on it, so the
+# model cannot read /home/cjdell or /run/secrets or exec anything on the host
+# (verified: exec_shell_command sees the container's fs, /home/cjdell absent).
+# Without that flag the tools run as the service user (root here) — that is
+# remote code execution once the service is reachable, which is exactly why
+# the sandbox is mandatory, not optional. The image is already in root's
+# podman storage (recallium deps); llama.cpp would otherwise pull it.
+# Usage contract (verified against pinned rev, tools/server/tests/unit/
+# test_tools_builtin.py): GET /tools lists the schemas (feed them straight
+# into a chat request's "tools" array); the chat turn returns finish_reason
+# tool_calls and the CALLER executes them by POST /tools {"tool": ...,
+# "params": ...} -> {"plain_text_response": ...}, then sends the result back
+# as a tool message. The Web UI runs this loop automatically — built-in tool
+# toggles appear there; API clients run the loop by hand. Enabling --tools
+# also pins --cors-origins to localhost (browser origins only — irrelevant
+# for API clients).
+#
+# MCP: llama.cpp's MCP client (#26062) speaks ONLY the stdio transport
+# (child-process JSON-RPC), so Recallium/diamcp's Streamable-HTTP MCP cannot
+# be wired in directly — only declare --mcp-servers-config commands you
+# trust, they run with the server's (root) privileges. Not configured.
+#
 # URL layout follows the other services: web UI + OpenAI API at the root of
 # lfm3.ai.chrisdell.info (wildcard cert, ../tls.nix), and /lfm3/ on the IP
 # vhost prefix-stripped for scripts (http://192.168.49.50/lfm3/v1/...).
+# The subdomain — the only public entry — is allow-listed to the private
+# networks (hass-rs pattern on the router): with server-side tools enabled,
+# "do not enable in untrusted environments" applies to the anonymous
+# internet, sandbox or not (the sandbox bounds damage, not cost/DoS).
+# The IP vhost needs no list: 192.168.49.50 is RFC1918, LAN-only by
+# construction.
 
 let
   models = "/home/cjdell/Models";
+
+  # Image for llama.cpp's --tools-runtime sandbox (`podman run --rm -i <image> sh`).
+  # Only needs sh/cat/wc/find — python:3.11-slim is already pulled in root's
+  # podman store, so the sandbox starts without a network pull. FQ image ref:
+  # podman's unqualified short names can fail on multi-registry search.
+  toolsImage = "docker.io/library/python:3.11-slim";
 
   # llamaCppPkgs.vulkan = the flake's llama-cpp input with
   # -DLLAMA_BUILD_TESTS=OFF (flake.nix); its pin must stay >= upstream
@@ -71,6 +109,11 @@ in
     description = "llama.cpp Vulkan server (LFM3-1.7B) on the RX 580 (console GPU)";
     documentation = [ "https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF" ];
     after = [ "network.target" ];
+    # llama.cpp spawns the tools sandbox via execvp("podman") on the SERVICE
+    # PATH — which NixOS keeps minimal (coreutils/findutils/grep/sed/systemd) —
+    # so podman must be added explicitly or the unit crash-loops with
+    # "failed to spawn podman container for tools runtime".
+    path = [ pkgs.podman ];
     # Always on: a separate card from the leased R9700, ~1.8 GiB of the
     # 4 GiB it owns, so it never competes with Strata or the gpu-mode lease.
     wantedBy = [ "multi-user.target" ];
@@ -87,12 +130,15 @@ in
     serviceConfig = {
       # Sampling follows the asus-i7-6700 lane (temp 0.1, top_k 50,
       # repeat penalty 1.1). --device is belt-and-braces over the pin above.
+      # --tools all + the podman sandbox: see the header — never drop the
+      # runtime flag while this endpoint is reachable beyond localhost.
       ExecStart = ''
         ${llama-server-vulkan}/bin/llama-server \
           --model ${models}/LFM3-1.7B-Q4_K_M.gguf \
           --device Vulkan0 \
           --n-gpu-layers 99 --ctx-size 32768 \
           --host 127.0.0.1 --port 8086 --alias LFM3-1.7B \
+          --tools all --tools-runtime podman:${toolsImage} \
           --temp 0.1 --top-k 50 --repeat-penalty 1.1
       '';
       ConditionPathExists = "${models}/LFM3-1.7B-Q4_K_M.gguf";
@@ -125,11 +171,24 @@ in
     };
 
     # ---- Public subdomain: UI at the root, OpenAI API under /v1/. ----
+    # Allow-listed (hass-rs pattern): with --tools enabled this endpoint is an
+    # agent runtime, and even sandboxed that is not something to hand to the
+    # anonymous internet. LAN/VLAN/WG/tailnet + LAN's /64 only.
 
     "lfm3.ai.chrisdell.info" = {
       useACMEHost = "ai.chrisdell.info";
       forceSSL = true;
       locations."/" = lfm3Location;
+      extraConfig = ''
+        allow 127.0.0.1;
+        allow ::1;
+        allow 192.168.49.0/24;    # LAN
+        allow 192.168.10.0/24;    # VLAN10
+        allow 10.47.0.0/16;       # WireGuard
+        allow 100.64.0.0/10;      # tailnet (headscale CGNAT range)
+        allow 2a02:8010:6680:49::/64; # LAN's /64
+        deny all;
+      '';
     };
   };
 }

@@ -663,6 +663,28 @@ on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
   one-slot engine, concurrent small requests are fine here). gfx803 has no
   ROCm/HIP path; Vulkan/RADV it is (`WARNING: radv is not a conformant
   Vulkan implementation` in the log is normal).
+- **Server-side tools are ON** (`--tools all`, since 2026-11-11): llama.cpp's
+  built-ins (`read_file, file_glob_search, grep_search, exec_shell_command,
+  write_file, edit_file, get_info`) run in llama.cpp's own sandbox —
+  `--tools-runtime podman:docker.io/library/python:3.11-slim` keeps a
+  `podman run --rm -i … sh` alive for the server's lifetime and routes every
+  call through `podman exec`; verified the model cannot see `/home/cjdell`
+  from inside. **Never drop the runtime flag on a reachable endpoint** —
+  without it the tools execute as the service user (root). The unit needs
+  `path = [ pkgs.podman ]` (NixOS gives units a minimal PATH and llama.cpp
+  execs podman from it — missing podman = crash-loop `failed to spawn podman
+  container`). Chat contract: `GET /tools` for schemas → chat returns
+  `tool_calls` → caller executes via `POST /tools {"tool":…,"params":…}` →
+  send result back; the Web UI does this loop itself. Because tools + public
+  endpoint = an agent runtime for the anonymous internet, the
+  `lfm3.ai.chrisdell.info` vhost is allow-listed to LAN/VLAN10/WG/tailnet +
+  the LAN /64 (`deny all`, hass-rs pattern); the IP vhost `/lfm3/` needs no
+  list (RFC1918 = LAN-only).
+- **MCP: not wired.** llama.cpp's MCP client (#26062, `--mcp-servers-config`,
+  Cursor JSON) is **stdio-only** — MCP servers spawn as child processes with
+  the server's (root) privileges. Recallium/diamcp speak Streamable HTTP, so
+  nothing connects without a stdio↔HTTP bridge; `--ui-mcp-proxy` is unrelated
+  (it lets the *browser* UI reach remote MCPs).
 - ⚠️ `nix flake update llama-cpp` does **not** rebuild Strata: strata-package.nix
   `fetchFromGitHub`s its own pinned llama.cpp `3cf03257` for `tools/vision`
   only, independent of this input. Bumping `llama-cpp` only moves llama-swap's
