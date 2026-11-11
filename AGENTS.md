@@ -654,13 +654,20 @@ on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
   only strata + sd-server. Always on (`wantedBy`); a `nixos-rebuild switch`
   that touches nothing else does not restart `strata.service`.
 - **The RX 580 is a 4 GiB card** (not 8 — llama.cpp reports 4096 MiB, ~3.6 GiB
-  free under Plasma). Hence `--ctx-size 32768`, NOT the asus lane's full
-  262144: that commits ~3.4 GiB of KV alone (13.3 KiB/token at 24 layers /
-  11 KV layers) and would GTT-spill the console GPU. 32K puts the whole server
-  at ~1.5 GiB (free drops to ~2 GiB) — measured 2026-11-11.
+  free under Plasma). `--ctx-size 131072` (raised from 32768 the same day):
+  cost model from two measured points = ~1126 MiB fixed (weights+graphs, LFM3
+  keeps KV on 11 of 24 layers) + ~12.99 KiB/token → 131072 sits at ~2.8 GiB,
+  ~800 MiB slack. Hard ceiling ~185-190K — don't chase it (that slack is the
+  GTT-spill insurance for the console GPU) and the full 262144 native window
+  cannot fit. With `kv_unified` the pool commits once and the 4 llama-server
+  slots share it — n_slots doesn't multiply KV memory. Real limit is prefill:
+  ~90-220 tok/s, so a cold 131K prompt is a 10-25 min first token.
 - Measured on Polaris (no coopmat): **76.9 tok/s decode, 87–223 tok/s
   prefill**, `n_slots 4` (llama-server default parallelism — unlike Strata's
-  one-slot engine, concurrent small requests are fine here). gfx803 has no
+  one-slot engine, concurrent small requests are fine here). ⚠️ LFM3 is a
+  reasoning hybrid: it fills `reasoning_content` BEFORE `content`, so a small
+  `max_tokens` yields a correct-looking `finish_reason: length` with EMPTY
+  `content` (budget 240+ for one-line answers). gfx803 has no
   ROCm/HIP path; Vulkan/RADV it is (`WARNING: radv is not a conformant
   Vulkan implementation` in the log is normal).
 - **Server-side tools are ON** (`--tools all`, since 2026-11-11): llama.cpp's

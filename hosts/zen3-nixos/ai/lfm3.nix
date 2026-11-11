@@ -28,14 +28,22 @@
 # this is the quick-lane model (subagents, summarisation, Recallium-style JSON
 # chores) while Qwen3.8-Flash-Next owns the heavy lane on the R9700.
 #
-# ctx 32768, NOT the full 262144 the asus-i7-6700 lane pins: this card is
-# 4096 MiB with ~3.6 GiB free under the running desktop, and the 256K KV
-# commit measured there was ~3.4 GiB on top of the weights (asus: 4457 MiB
-# idle incl. 1049 MiB weights). 32768 ctx adds only ~426 MiB of KV
-# (13.3 KiB/token at this depth), so the whole server sits at ~1.8 GiB of the
-# 4 GiB — headroom for desktop spikes, no GTT spill, no amdgpu lockup on the
-# console GPU. One --ctx-size line up later if the card proves it can spare
-# more.
+# ctx 131072 — raised from 32768 on 2026-11-11 on request, at the more
+# deliberate end of this card's range. The RX 580 is 4096 MiB with ~3.6 GiB
+# free under Plasma. Two measured points fit one line (asus-i7-6700 lane:
+# 262144 ctx -> 4457 MiB idle incl. the 1049 MiB weights; here: 32768 ->
+# ~1542 MiB): fixed ~1126 MiB (weights + graphs; LFM3 keeps KV on only 11 of
+# 24 layers, 5 more sliding-window) + ~12.99 KiB/token. So 131072 commits
+# ~2.8 GiB total and leaves ~800 MiB of slack — snug but sound. Hard ceiling
+# is ~185-190K; do NOT chase it: that slack is what keeps a Plasma memory
+# grab off the GTT (a console-GPU spill wedges the desktop, and
+# amdgpu.lockup_timeout=10s reaps it visibly). The full 262144 native window
+# CANNOT fit 4 GiB anyway — and chasing big ctx makes little sense either,
+# since cold prefill here is ~90-220 tok/s, so a 131K prompt is already a
+# 10-25 minute first token.
+# NB: with kv_unified the --ctx-size pool is committed ONCE and llama-server's
+# 4 slots share it — n_slots does NOT multiply KV memory (verified: 32K ctx
+# committed ~426 MiB, matching 32768 x 12.99 KiB once, at n_slots = 4).
 #
 # Model file from scripts/fetch-lfm3-1.7b.sh (rev + size + sha256 pinned);
 # ConditionPathExists keeps the unit down until it is there, same guard as
@@ -136,7 +144,7 @@ in
         ${llama-server-vulkan}/bin/llama-server \
           --model ${models}/LFM3-1.7B-Q4_K_M.gguf \
           --device Vulkan0 \
-          --n-gpu-layers 99 --ctx-size 32768 \
+          --n-gpu-layers 99 --ctx-size 131072 \
           --host 127.0.0.1 --port 8086 --alias LFM3-1.7B \
           --tools all --tools-runtime podman:${toolsImage} \
           --temp 0.1 --top-k 50 --repeat-penalty 1.1
