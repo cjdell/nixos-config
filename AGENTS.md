@@ -723,6 +723,11 @@ long-horizon agent runs so they finish unattended. Live since 2026-11-11.
   `session.context` (deterministic when unambiguous: silent tool work / big
   think then empty / `rawFinish=length`; LFM3 judge when ambiguous) → queued
   nudge demanding a results report. Budgets: 4 loop + 3 stop nudges/h/session.
+- **Judge lanes = fleet-wide, like Strata itself:** `http://127.0.0.1:8086`
+  first (zen3), then `http://192.168.49.50/lfm3/v1` via nginx — so every LAN
+  host running the plugin gets the identical full behaviour (off-LAN degrades
+  to the deterministic gates; rotates lanes on failure, `LFM3_ENDPOINT` pins
+  one).
 - **Judge reliability: LFM3 JSON prompts need `max_tokens 1200`** — at
   ≤900 it dies `finish=length` with empty `content` (thinking eats it; the
   GGUF template has NO `thinking` kwarg so `thinking:false` is a no-op, and
