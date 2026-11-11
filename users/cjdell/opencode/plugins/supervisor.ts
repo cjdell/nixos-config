@@ -39,12 +39,25 @@ import { Plugin } from "@opencode/plugin"
 // budgeted, either-channel parse.
 //
 // Env overrides:
-//   LFM3_ENDPOINT         judge base URL (default http://127.0.0.1:8086/v1)
+//   LFM3_ENDPOINT         pin a single judge URL (default: loopback, then the zen3 LAN URL)
 //   SUPERVISOR_DISABLED=1 load and log, but never act
 
-const JUDGE_URL =
-  (typeof process !== "undefined" && process.env?.LFM3_ENDPOINT) ||
-  "http://127.0.0.1:8086/v1/chat/completions"
+// LFM3 judge lanes: loopback on zen3 (where the RX 580 service runs), then
+// zen3's LAN URL via nginx. zen3 serves Strata for the whole fleet, so it
+// serves the supervisor's judge the same way: every LAN host gets the FULL
+// behaviour, identical to zen3's. Off-LAN machines fail both lanes and
+// degrade as before (deterministic gates keep working). We rotate on
+// transport/HTTP failure and stay rotated; a parse failure means the lane
+// answered, so it does not rotate.
+const JUDGE_URLS =
+  typeof process !== "undefined" && process.env?.LFM3_ENDPOINT
+    ? [process.env.LFM3_ENDPOINT]
+    : [
+        "http://127.0.0.1:8086/v1/chat/completions",
+        "http://192.168.49.50/lfm3/v1/chat/completions",
+      ]
+let judgeIdx = 0
+let lastLane = ""
 const DISABLED = typeof process !== "undefined" && process.env?.SUPERVISOR_DISABLED === "1"
 
 // --- thresholds (measured 2026-11-11 against synthetic signatures) ---
@@ -142,36 +155,41 @@ const parseVerdict = (text: string): Verdict => {
 }
 
 const judge = async (user: string, timeoutMs: number): Promise<Verdict> => {
-  try {
-    const response = await fetch(JUDGE_URL, {
-      method: "POST",
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "LFM3-1.7B",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You watch an autonomous coding agent. Reply with one JSON object and nothing else.",
-          },
-          { role: "user", content: user },
-        ],
-        max_tokens: JUDGE_MAX_TOKENS,
-        temperature: 0,
-        stream: false,
-      }),
-    })
-    if (!response.ok) return null
-    const body: any = await response.json()
-    const msg = body?.choices?.[0]?.message ?? {}
-    // LFM3 fills reasoning_content BEFORE content; accept either, content first.
-    return (
-      parseVerdict(String(msg.content ?? "")) ?? parseVerdict(String(msg.reasoning_content ?? ""))
-    )
-  } catch {
-    return null
+  for (let attempt = 0; attempt < JUDGE_URLS.length; attempt++) {
+    const url = JUDGE_URLS[judgeIdx]
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "LFM3-1.7B",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You watch an autonomous coding agent. Reply with one JSON object and nothing else.",
+            },
+            { role: "user", content: user },
+          ],
+          max_tokens: JUDGE_MAX_TOKENS,
+          temperature: 0,
+          stream: false,
+        }),
+      })
+      if (!response.ok) throw new Error(`status ${response.status}`)
+      const body: any = await response.json()
+      const msg = body?.choices?.[0]?.message ?? {}
+      lastLane = url
+      // LFM3 fills reasoning_content BEFORE content; accept either, content first.
+      return (
+        parseVerdict(String(msg.content ?? "")) ?? parseVerdict(String(msg.reasoning_content ?? ""))
+      )
+    } catch {
+      judgeIdx = (judgeIdx + 1) % JUDGE_URLS.length
+    }
   }
+  return null
 }
 
 // ---------------- plugin state ----------------
@@ -469,8 +487,8 @@ export default Plugin.define({
       const v = await judge(`Reply exactly: {"loop":false,"unfinished":false,"nudge":"ping"}`, 30_000)
       log(
         v
-          ? `judge online at ${JUDGE_URL} (${Date.now() - t0} ms)`
-          : `judge UNREACHABLE at ${JUDGE_URL} — loop detection unaffected (deterministic), ambiguous stop checks skipped`,
+          ? `judge online via ${lastLane} (${Date.now() - t0} ms)`
+          : `judge UNREACHABLE on ${JUDGE_URLS.join(" | ")} — loop detection unaffected (deterministic), ambiguous stop checks skipped`,
       )
       if (DISABLED) log("SUPERVISOR_DISABLED=1 — observing only")
     })()
