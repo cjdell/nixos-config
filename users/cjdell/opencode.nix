@@ -77,18 +77,15 @@ in
         };
       };
 
-      # Self-hosted Strata (Qwen3.8-Flash-Next on the zen3-nixos R9700),
-      # reached over the public HTTPS endpoint so it works from every host.
-      provider.strata = {
-        models."qwen3.8-flash-next-unsloth-ud-iq4-xs-v31" = {
-          _launch = true;
-          tools = true;
-          name = "qwen3.8-flash-next-unsloth-ud-iq4-xs-v31";
-        };
-        name = "strata";
-        npm = "@ai-sdk/openai-compatible";
-        options.baseURL = "https://strata.ai.chrisdell.info/v1";
-      };
+      # NB: no provider.strata block here on purpose. The auto-context plugin
+      # (xdg.configFile below) registers the whole strata provider itself and
+      # adds one model per entry the server's /v1/models reports — ID, real
+      # context window from meta.n_ctx, modalities — plus a stable alias
+      # (qwen3.8-flash-next-ud-iq4-xs) that always tracks the loaded model and
+      # becomes the default. Server-side model swaps need no config edits and
+      # no rebuild, so the hand-written provider/model entry (which pinned the
+      # ever-changing llama.cpp alias ID) is gone. Matches the Mac setup,
+      # whose opencode.json likewise has no provider block.
     };
 
     skills = ./opencode/skills;
@@ -111,8 +108,11 @@ in
       force = true;
     };
 
-    # The auto-context plugin (probes self-hosted providers' /models for
-    # meta.n_ctx and overrides limit.context — see the file's header comment).
+    # The auto-context plugin (registers the self-hosted strata provider and
+    # one model per entry its /v1/models reports, with the advertised context
+    # window and modalities, plus a stable alias as the default — see the
+    # file's header comment). opencode auto-loads *.ts from plugins/, so no
+    # `plugins` entry in settings is needed; defaults suffice.
     "opencode/plugins" = {
       source = ./opencode/plugins;
       recursive = true;
