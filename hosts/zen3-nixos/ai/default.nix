@@ -15,6 +15,9 @@
 #                         (started by gpu-mode, NOT at boot)
 #   gpu-mode.nix        - the `gpu-mode` command: lease the R9700 to llm / sd /
 #                         game (see ./gpu-mode.sh)
+#   lfm3.nix            - llama.cpp Vulkan LFM3-1.7B on the RX 580 (console
+#                         GPU) + lfm3. subdomain — a second card, OUTSIDE the
+#                         R9700 lease, so it coexists with ./strata.nix
 #   llama-log-viewer.nix- log viewer web app + logs. subdomain
 #   ollama-bridge.nix   - legacy Ollama-compatible bridge (no proxy)
 #   recallium.nix       - Recallium container + recallium./recallium-mcp.
@@ -33,6 +36,7 @@
     # ./diamcp.nix
     ./gpu-panel.nix
     ./gpu-mode.nix
+    ./lfm3.nix
     # Re-enabled 2026-11-04 while Avalon was live (it passes
     # --log-prompts-dir). Under Strata nothing new is written to llama-logs/,
     # so the viewer keeps serving the historical index; harmless either way.

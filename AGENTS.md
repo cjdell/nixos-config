@@ -639,6 +639,35 @@ stops `sd-server` before the engine reloads. The script calls
 `/run/wrappers/bin/sudo` (passwordless wheel on this host), so no polkit
 rule is needed.
 
+## LFM3-1.7B on the RX 580 (`lfm3.service` — the second-card lane)
+
+`hosts/zen3-nixos/ai/lfm3.nix`: stock llama.cpp **Vulkan** (`llamaCppPkgs.vulkan`,
+the flake's `llama-cpp` input — bleeding-edge `956591f4` (2026-11-11 HEAD) since
+this service landed; must stay ≥ upstream b11960 for lfm3) serving
+`LFM3-1.7B-Q4_K_M.gguf` (from `scripts/fetch-lfm3-1.7b.sh`, rev+size+sha256 pinned)
+on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
+`127.0.0.1:8086`; `lfm3.ai.chrisdell.info` (UI + API) and `/lfm3/` on the IP vhost.
+
+- **Not part of the `gpu-mode` lease and cannot disturb Strata:** the unit pins
+  `MESA_VK_DEVICE_SELECT=1002:67df!`, so the R9700 is *invisible* to it —
+  verified: the process holds only renderD128, and `gpu-mode` still manages
+  only strata + sd-server. Always on (`wantedBy`); a `nixos-rebuild switch`
+  that touches nothing else does not restart `strata.service`.
+- **The RX 580 is a 4 GiB card** (not 8 — llama.cpp reports 4096 MiB, ~3.6 GiB
+  free under Plasma). Hence `--ctx-size 32768`, NOT the asus lane's full
+  262144: that commits ~3.4 GiB of KV alone (13.3 KiB/token at 24 layers /
+  11 KV layers) and would GTT-spill the console GPU. 32K puts the whole server
+  at ~1.5 GiB (free drops to ~2 GiB) — measured 2026-11-11.
+- Measured on Polaris (no coopmat): **76.9 tok/s decode, 87–223 tok/s
+  prefill**, `n_slots 4` (llama-server default parallelism — unlike Strata's
+  one-slot engine, concurrent small requests are fine here). gfx803 has no
+  ROCm/HIP path; Vulkan/RADV it is (`WARNING: radv is not a conformant
+  Vulkan implementation` in the log is normal).
+- ⚠️ `nix flake update llama-cpp` does **not** rebuild Strata: strata-package.nix
+  `fetchFromGitHub`s its own pinned llama.cpp `3cf03257` for `tools/vision`
+  only, independent of this input. Bumping `llama-cpp` only moves llama-swap's
+  (disabled) build, alderlake's, asus' and this service's next switch.
+
 ## Recallium (memory server, live on zen3-nixos)
 
 Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a
