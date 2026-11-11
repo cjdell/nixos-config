@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs"
+import { appendFileSync, statSync, writeFileSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 
 // Supervisor — a copilot for the primary (Strata) agent, judged by LFM3.
@@ -195,6 +195,7 @@ export default Plugin.define({
   id: "supervisor",
   async setup(ctx: any) {
     const sessions = new Map<string, SessionState>()
+    const sessionLocks = new Map<string, number>() // lock-file path -> last act ts (in-process cache)
     const blank = (): SessionState => ({
       steps: [],
       simRun: 0,
@@ -224,8 +225,20 @@ export default Plugin.define({
       s.consumed = false
     }
 
-    const spend = (s: SessionState, kind: "loop" | "stop") => {
+    const spend = (s: SessionState, kind: "loop" | "stop", sessionID: string) => {
       const now = Date.now()
+      // Cross-instance guard: the service runs one plugin instance per
+      // location (workspace) and every instance receives every event, so a
+      // lock file - not just this instance's window - enforces the cooldown.
+      try {
+        const lock = `${LOG_FILE.slice(0, LOG_FILE.lastIndexOf("/"))}/supervisor-${kind}.lock`
+        const recent = (sessionLocks.get(lock) ?? 0) || statSync(lock).mtimeMs
+        if (now - recent < ACT_COOLDOWN_MS) return false
+        writeFileSync(lock, `${new Date().toISOString()} ${sessionID}`)
+        sessionLocks.set(lock, now)
+      } catch {
+        // lock file unavailable (first act / FS hiccup) -> proceed
+      }
       const limit = kind === "loop" ? BUDGET_LOOP : BUDGET_STOP
       s.acts[kind] = s.acts[kind].filter((t) => now - t < HOUR)
       if (s.acts[kind].length >= limit) return false
@@ -246,7 +259,7 @@ export default Plugin.define({
       if (DISABLED || s.acting) return
       s.acting = true
       try {
-        if (!spend(s, kind)) {
+        if (!spend(s, kind, sessionID)) {
           log(`budget/cooldown — no nudge (${kind})`, sessionID, `(${why})`)
           return
         }
