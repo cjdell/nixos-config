@@ -507,9 +507,10 @@ static void usage(const char *p, FILE *to)
         "  picture stopped (0 = keep watching, the default);\n"
         "  PCTV_HOLD_SECS=0 turns that off.  A deck with nothing to play shows\n"
         "  a BLUE screen instead, which changes every frame and so is caught by\n"
-        "  colour, not repetition: PCTV_BLUE_SECS (default 60) of it ends the\n"
-        "  run and releases the card (0 = never).  A deck that answers end of\n"
-        "  tape with static is neither - use --capture-seconds for that.\n"
+        "  colour, not repetition: PCTV_BLUE_SECS (default 60) of it closes the\n"
+        "  file and keeps watching - a picture again opens the next one (0 =\n"
+        "  never).  A deck that answers end of tape with static is neither -\n"
+        "  use --capture-seconds for that.\n"
         "\n"
         "  keys: 1/2 or Tab video input | a audio input | A automatic gain |\n"
         "        -/+ gain | b boost | m mute | o monitor input | c capture (master |\n"
@@ -793,14 +794,20 @@ static void hold_rearm(void)
  * pool - out: those are bright (Y 150-200) and ordinary programme; the deck's
  * blue is dark, which is why it is separable at all.
  *
- * This one ENDS the run, unlike the stillness detector's "close the file and
- * keep watching": a blank stretch between two recordings is something tapes
- * genuinely do, but a blue screen is the deck answering "there is nothing to
- * play", so after BLUE_SECS of it the tape is over and the card belongs back
- * to the system.  It only counts while capturing, and only after a real picture
- * has been seen since the file opened - otherwise a monitor started in front of
- * a stopped deck would quit before the tape was rolled. */
-#define BLUE_SECS_DEFAULT 60  /* PCTV_BLUE_SECS: how long blue ends the run; 0 off */
+ * This one closes the FILE and keeps watching, like the stillness detector.
+ * It used to end the run: the deck answering "there is nothing to play" was
+ * taken to mean the session was over, and the monitor quit.  That cost more
+ * than it saved - the next tape met a dead window (and, since crashes leave
+ * their mark, an orphaned probe holding the card), and on an unattended
+ * batch the difference between "closed, waiting" and "quit" is the whole
+ * night's remaining tapes.  So: after BLUE_SECS of the deck's blue, the file
+ * is finalised, and a real picture opening again reopens recording by itself
+ * - the same contract the hold detector already keeps for blank stretches
+ * between recordings; `c' overrides in both directions.  Blue only counts
+ * after a real picture has been seen since the file opened - otherwise a
+ * monitor started in front of a stopped deck would close before the tape was
+ * rolled. */
+#define BLUE_SECS_DEFAULT 60  /* PCTV_BLUE_SECS: how long blue closes the file; 0 off */
 #define BLUE_U_MIN 170.0      /* mean Cb at or above this is the blue screen ... */
 #define BLUE_Y_MAX 110.0      /* ... and at or below this it is the deck's dark
                                * one, not a bright blue that is real footage */
@@ -814,7 +821,8 @@ static double blue_y0, blue_u0, blue_v0;  /* means of the run's first frame */
 static double frame_y, frame_u, frame_v;  /* the frame just measured: printed by
                                            * PCTV_VERBOSE so the predicate can be
                                            * checked against a real deck */
-static int blue_hit;          /* the main loop acts: end the run */
+static int blue_hit;          /* the main loop acts: close the file */
+static int blue_wait;         /* blue closed it; a real picture opens the next */
 static int blue_is;           /* this frame passes the colour test (verbose) */
 
 /* Mean of each plane over the frame.  One extra pass over 829 kB per frame
@@ -845,6 +853,15 @@ static void blue_update(void)
     if (!blue_is) {
         blue_run = 0;               /* a picture: the deck has something to play */
         blue_seen = 1;
+        if (blue_wait) {
+            /* what stopped is playing again: ask for the next tape through
+             * the hold detector's own reopening - a flag, never cap_start()
+             * from here.  It is gated on hold_auto, which `c' clears when a
+             * person beats the detector to it, so whoever starts the second
+             * tape, exactly one file opens. */
+            blue_wait = 0;
+            hold_want_start = 1;
+        }
         return;
     }
     if (!blue_seen) return;         /* blue before any picture: not an end */
@@ -875,6 +892,7 @@ static void blue_rearm(void)
     blue_run = 0;
     blue_seen = 0;
     blue_hit = 0;
+    blue_wait = 0;
 }
 
 static void field_commit(void)
@@ -4964,7 +4982,8 @@ int main(int argc, char **argv)
                             " deck is doing\n", hold_stress, hold_stress);
         if (blue_secs)
             fprintf(stderr, "pctv-monitor: no-content blue on: %d s of the deck's"
-                            " blue screen ends the run and releases the card"
+                            " blue screen closes the file and waits - a real"
+                            " picture opens the next one"
                             " (PCTV_BLUE_SECS=0 turns it off)\n", blue_secs);
         else
             fprintf(stderr, "pctv-monitor: no-content blue off - a blue screen is"
@@ -5207,26 +5226,33 @@ int main(int argc, char **argv)
             running = 0;
         }
 
-        /* A blue screen is the deck saying there is nothing to play: end the
-         * run, not just the file.  Only while capturing - a person watching the
-         * live view of a stopped deck should not have the window disappear -
-         * and blue_update() only gets here after a real picture was seen, so a
-         * capture started in front of a stopped deck is not cut short. */
+        /* A blue screen is the deck saying there is nothing to play: the tape
+         * is over, so the FILE is - everything in it is complete.  The run is
+         * not: quitting here used to strand the next tape behind a dead
+         * window, and on an unattended batch it ended the night early.  The
+         * reopen is the hold detector's own (blue_update() asks for it the
+         * moment a real picture arrives; `c' beats it either way), so this
+         * closes exactly like a blank stretch between recordings would.
+         * Only while capturing - a person watching the live view of a
+         * stopped deck has nothing to be closed - and blue_update() only
+         * counts after a real picture was seen, so a capture started in
+         * front of a stopped deck is not cut short. */
         if (blue_hit) {
             blue_hit = 0;
             blue_run = 0;
             if (cap_on) {
                 char was[512];
                 snprintf(was, sizeof was, "%s", cap_path);
-                hold_auto = 0;
                 hold_rearm();
+                cap_stop();
+                hold_auto = 1;
+                blue_wait = 1;
                 fprintf(stderr, "pctv-monitor: no picture - the deck has shown its"
-                                " blue screen for %d s, so the tape is finished;"
-                                " closed %s and releasing the card"
+                                " blue screen for %d s, so this tape is finished:"
+                                " closed %s, watching for the next one"
                                 " (PCTV_BLUE_SECS=0 turns this off)\n",
                         blue_secs, was);
-                cap_stop();
-                running = 0;
+                show_overlay(30000);
             }
         }
 
@@ -5391,10 +5417,14 @@ int main(int argc, char **argv)
             const char *lines[1];
             char l0[200];
             unsigned s = (SDL_GetTicks() - blue_since) / 1000;
-            if (blue_secs > 0)
-                snprintf(l0, sizeof l0, "NO SIGNAL %02u:%02u - blue, ends the run"
+            if (cap_on && blue_secs > 0)
+                snprintf(l0, sizeof l0, "NO SIGNAL %02u:%02u - blue, closes the file"
                                         " at %02d:%02d",
                          s / 60, s % 60, blue_secs / 60, blue_secs % 60);
+            else if (blue_wait)
+                snprintf(l0, sizeof l0, "NO SIGNAL %02u:%02u - blue, file closed,"
+                                        " watching for the next tape",
+                         s / 60, s % 60);
             else
                 snprintf(l0, sizeof l0, "NO SIGNAL %02u:%02u - blue screen",
                          s / 60, s % 60);

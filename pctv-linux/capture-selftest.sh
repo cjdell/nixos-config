@@ -7,7 +7,7 @@
 # `fakeprobe.c` is a stand-in for `pctv_probe stream`: it emits real-time
 # BT.656 in the exact line layout this card produces (SAV(4) + 1440 active +
 # 284 tail = 1728 B, 288 active lines + 24 blanking per field, 50 fields/s), and
-# can inject the two things that actually go wrong:
+# can inject the things that actually go wrong:
 #
 #   FAKE_GAP=<s>        remove 32768 bytes from the byte stream at t=<s>, mid
 #                       line - one lost 32 KiB URB, the case that used to cost
@@ -165,6 +165,33 @@ elif ! grep -q "capture stopped" "$TMP/asan.log"; then
 else
     pass "no heap overrun across 12 s of damaged rotation (ASan)"
 fi
+
+# End of tape: the deck shows its blue screen.  The file must close with
+# everything in it complete - and the RUN must not: it used to quit ("ends
+# the run and releases the card"), which on an unattended batch meant the
+# next tape met a dead window.  So: a tape plays, ends, and is replaced, and
+# the test is two files from one process with no human in between.
+say ""
+say "== blue closes the file, the monitor waits for the next tape"
+rm -f "$OUT"/pctv-cap-*
+env SDL_VIDEODRIVER=dummy PCTV_LOG=0 PCTV_PROBE="$TMP/fakeprobe" PCTV_NO_SUDO=1 \
+    FAKE_BLUE=4:5 PCTV_BLUE_SECS=3 \
+    timeout 60 "$TMP/pctv-monitor" -i composite --capture --capture-seconds 14 \
+    --no-audio --master uyvy --out-dir "$OUT" >"$TMP/blue.out" 2>"$TMP/blue.log"
+rc=$?
+grep -E "tape is finished|picture again ->" "$TMP/blue.log" \
+    | sed 's/^pctv-monitor: //' | cut -c1-150
+nblue=$(ls "$OUT"/pctv-cap-*.mkv 2>/dev/null | wc -l)
+[ $rc -eq 0 ] && pass "survived the blue timeout (exit 0, ran on)" \
+    || bad "monitor exit $rc - blue must close the file, not end the run"
+grep -q "blue screen for 3 s, so this tape is finished" "$TMP/blue.log" \
+    && pass "blue closed the file after the timeout" \
+    || bad "no blue close (PCTV_BLUE_SECS=3, FAKE_BLUE=4:5)"
+grep -q "picture again ->" "$TMP/blue.log" \
+    && pass "a replaced tape reopens recording by itself" \
+    || bad "no reopen when the picture came back"
+[ "$nblue" -eq 2 ] && pass "two tapes, two files, one process" \
+    || bad "$nblue files, want 2"
 
 # The host is away for a second (SIGSTOP): data waits in the pipe, nothing is
 # lost, and - crucially - the writer must NOT repeat pictures to "fill" it.

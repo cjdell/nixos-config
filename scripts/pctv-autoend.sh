@@ -4,11 +4,12 @@
 # SINCE 2026-11-02 THE MONITOR DOES THIS ITSELF, better: it sees the frames, and a
 # frozen one is bit-identical, so it closes the file after PCTV_HOLD_SECS (600 s now,
 # raised from 120 because a damaged patch of tape is bit-identical too) and opens
-# another when the picture moves.  Since 2026-11-03 it also ends the run on the deck's
+# another when the picture moves.  Since 2026-11-03 it also catches the deck's
 # no-signal BLUE screen (PCTV_BLUE_SECS, 60 s), which is not bit-identical and which
-# this script cannot see at all.  This script is the fallback for an older monitor and
-# for anyone who wants the *process* gone rather than idle; PCTV_HOLD_MAX is the knob
-# for the usual case.
+# this script cannot see at all; since 2026-11-12 that closes the file and keeps
+# watching (the next tape reopens recording by itself) instead of quitting.  This
+# script is the fallback for an older monitor and for anyone who wants the *process*
+# gone rather than idle; PCTV_HOLD_MAX is the knob for the usual case.
 #
 # Why it works by watching the file: the DVD master is rate-CAPPED (-b:v/-maxrate
 # 6000k), so live programme sits at the ceiling - ~776 kB/s measured on

@@ -17,6 +17,11 @@
  *                      a damaged tape's rotation, and the shape that pushed
  *                      the row counter into the VBI and off the end of the
  *                      good-frame buffer (the 2026-11-12 SIGSEGV class)
+ *   FAKE_BLUE=<s>[:d]  emit the deck's dark blue (U ~204, Y ~47) from time s
+ *                      for d seconds (default: to the end) - the end-of-tape
+ *                      colour the no-content detector catches, so the blue
+ *                      timeout (PCTV_BLUE_SECS) can be tested with a tape
+ *                      that plays, ends, and is replaced
  *   FAKE_STALL=<s>     write nothing for FAKE_STALL_LEN s (data delayed, not
  *                      lost)
  *   FAKE_FIELD_MS=<ms> field period, default 20 (= exactly 25 fps)
@@ -72,6 +77,14 @@ int main(int argc, char **argv)
     double gapl_at = getenv("FAKE_GAPLINES") ? atof(getenv("FAKE_GAPLINES")) : -1;
     double holes2_at = getenv("FAKE_MULTIGAP") ? atof(getenv("FAKE_MULTIGAP")) : -1;
     int holes2_armed = 0;
+    /* The deck's blue: the colour the monitor's no-content detector looks
+     * for (U ~204, dark ~47 - codes a real deck's screen reads, see the
+     * BLUE_U_MIN/BLUE_Y_MAX note), from <start> s for <dur> s (default:
+     * forever).  The tail of a tape, in a test tube. */
+    const char *benv = getenv("FAKE_BLUE");
+    double blue_at = benv ? atof(benv) : -1;
+    double blue_len = benv && strchr(benv, ':') ? atof(strchr(benv, ':') + 1) : 1e9;
+    int blue_on = -1;
     double stall_at = getenv("FAKE_STALL") ? atof(getenv("FAKE_STALL")) : -1;
     double stall_len = getenv("FAKE_STALL_LEN") ? atof(getenv("FAKE_STALL_LEN")) : 0.8;
     double field_ms = getenv("FAKE_FIELD_MS") ? atof(getenv("FAKE_FIELD_MS")) : 20.0;
@@ -135,6 +148,12 @@ int main(int argc, char **argv)
                             "(first at byte %lld)\n", field,
                     base + 288 * 1728 + 900);
         }
+        int blueing = blue_at > 0 && t >= blue_at && t < blue_at + blue_len;
+        if (blueing != blue_on) {
+            blue_on = blueing;
+            fprintf(stderr, "fakeprobe: %s (t=%.1f s)\n",
+                    blueing ? "deck blue screen" : "blue over, picture back", t);
+        }
         int F = (int)(field & 1);
         double due = (double)field * (field_ms / 1000.0);
         if (due > t) { struct timespec ts; ts.tv_sec = 0;
@@ -145,8 +164,10 @@ int main(int argc, char **argv)
             p[0] = 0xFF; p[1] = 0; p[2] = 0;
             p[3] = (unsigned char)(0x80 | (F << 6) | (V << 5));
             for (int x = 0; x < 720; x++) {
-                p[4 + x * 2 + 1] = (unsigned char)(((l + field * 3) & 0x3F) * 4);
-                p[4 + x * 2] = 0x80;
+                p[4 + x * 2 + 1] = (unsigned char)(blueing ? 0x2F
+                                       : (((l + field * 3) & 0x3F) * 4));
+                p[4 + x * 2] = (unsigned char)(blueing ? ((x & 1) ? 0x30 : 0xCC)
+                                                        : 0x80);
             }
             emit(line, 1728);
         }

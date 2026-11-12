@@ -607,15 +607,29 @@ overwhelming once the chroma scale is right:
 **The fix (2026-11-03), and it is a monitor option:** after `PCTV_BLUE_SECS` (default
 60) of a frame whose mean is blue and dark (U >= 170, Y <= 110) *and whose three plane
 means have not moved by more than 3 codes since the run began*, the monitor closes the
-file, ends the run and releases the card — the tape is over. The stability clause is
-what keeps a genuinely blue shot out: a sky is Y 150-200 (luma alone excludes it), and
-anything that *moves* restarts the window instead of accumulating it. Two live checks
-(2026-11-03): a 15 s programme clip followed by the deck's blue ended the run exactly
-`PCTV_BLUE_SECS` after the transition, and a 5 s blue insert between two programme
-passages did not (the window restarted when the picture came back). It counts only
-after a real picture has been seen since the file opened, so a monitor started in
-front of a stopped deck does not quit; `PCTV_VERBOSE` prints the means every second so
-the predicate can be re-checked against any deck.
+file — the tape is over. The stability clause is what keeps a genuinely blue shot
+out: a sky is Y 150-200 (luma alone excludes it), and anything that *moves* restarts
+the window instead of accumulating it. Two live checks (2026-11-03): a 15 s programme
+clip followed by the deck's blue ended the run exactly `PCTV_BLUE_SECS` after the
+transition, and a 5 s blue insert between two programme passages did not (the window
+restarted when the picture came back). It counts only after a real picture has been
+seen since the file opened, so a monitor started in front of a stopped deck does not
+close anything; `PCTV_VERBOSE` prints the means every second so the predicate can be
+re-checked against any deck.
+
+**It closes the file and keeps watching (2026-11-12).** The rule above originally
+ended the *run* — quit, card back to the system. On an unattended batch that was the
+most expensive kind of clever: the tape after the one that ended met a dead window
+(and, when a crash had come first, an orphaned probe holding the card — the
+2026-11-12 segfault's cleanup found exactly that). So blue now behaves exactly like
+the stillness detector's close: the file is finalised where it is complete, the
+monitor holds the card and watches, and a real picture opening again — the next tape,
+or a mid-tape blank long enough to trip the blue rule — reopens recording through
+`hold_auto`'s own path; `c` beats the detector either way, starting now or cancelling
+the reopen. `capture-selftest.sh` proves the whole tape change with `FAKE_BLUE` (a
+tape that plays, ends, and is replaced: two files, one process, no human). For anyone
+who *does* want the process gone after the tape, that is what `PCTV_HOLD_MAX` and
+`scripts/pctv-autoend.sh` are for.
 
 What that leaves is still worth knowing:
 

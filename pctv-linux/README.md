@@ -460,7 +460,7 @@ Knobs for the capture path (all environment, all optional):
 | `PCTV_SPILL_DIR` | `/var/tmp` | where that scratch file lives: it **must be local disk** — spilling onto the same slow mount is circular. The file is created with `mkstemp` and unlinked at once, so a crash leaves nothing behind; the space returns when the take ends |
 | `PCTV_HOLD_SECS` | 600 | end-of-tape: how long a **bit-identical** picture may run inside a file before the file is closed; the card stays claimed and a new file opens when the picture moves again. `0` never closes (a frozen frame is then recorded for as long as it lasts). 600 rather than 120 because a **damaged** stretch of tape reads as a frozen picture (the frame gate holds the last clean frame) and is not the end of anything — at 120 the file was cut in the middle of one |
 | `PCTV_HOLD_MAX` | 0 (watch for ever) | also end the *run* this many seconds after the picture stopped, releasing the card - the one to set for an unattended overnight tape (`900` = quit 15 min after it ends); clamped up to `PCTV_HOLD_SECS` |
-| `PCTV_BLUE_SECS` | 60 | no content: the deck's **blue screen** is *not* a frozen frame (the no-signal subcarrier beats, so every frame differs) but it is unmistakably blue and dark — mean Y≈48/U≈206/V≈116 against Y 94-113/U≈123 for programme. After this many seconds of it the run ends and the card is released, because that blue is the deck saying there is nothing to play. Only counts once a real picture has been seen in the file, so a monitor started in front of a stopped deck does not quit; `0` never ends |
+| `PCTV_BLUE_SECS` | 60 | no content: the deck's **blue screen** is *not* a frozen frame (the no-signal subcarrier beats, so every frame differs) but it is unmistakably blue and dark — mean Y≈48/U≈206/V≈116 against Y 94-113/U≈123 for programme. After this many seconds of it the **file** closes — the tape is over — and the monitor keeps watching, so a real picture opening again (the next tape) starts the next file by itself; `c` overrides either way. It used to end the *run*, which on an unattended batch meant the next tape met a dead window (changed 2026-11-12). Only counts once a real picture has been seen in the file, so a monitor started in front of a stopped deck does not close anything; `0` never closes |
 | `PCTV_HOLD_RESUME` | 25 | changed frames (1 s) needed before the picture counts as back, so one tracking glitch cannot open a file |
 | `PCTV_HOLD_STRESS` | - | self-test: report a frozen picture for the first N seconds whatever the deck is doing, so both transitions (close, reopen) can be exercised without waiting for a tape to end |
 | `PCTV_STREAM_BUF` | 64 | the probe's stdout ring in MiB (2.4 s per 64); `0` = old drop-on-EAGAIN |
@@ -597,11 +597,17 @@ neutral chroma at 128.  U alone separates them by ~77 codes.
 So after `PCTV_BLUE_SECS` (default 60) of a frame whose mean is blue-and-dark (U >= 170,
 Y <= 110) **and whose means are not moving** (within 3 codes of the first frame of the
 run, so a real blue thing in a shot cannot accumulate the window), the monitor closes
-the file **and ends the run**, releasing the card - the tape is over.  The overlay says
-`NO SIGNAL mm:ss - blue, ends the run at mm:ss` and the title gains `[NO SIGNAL]`.
+the file - the tape is over - **and keeps watching**: a real picture arriving again
+(the next tape, or a mid-tape blank that clears) reopens recording by itself through
+the same path the hold detector uses, and `c` starts one immediately or cancels the
+reopen.  Until 2026-11-12 this ended the run, which on an unattended batch meant the
+next tape met a dead window; `capture-selftest.sh` now proves the whole tape change
+(`FAKE_BLUE=4:5` with `PCTV_BLUE_SECS=3`: two files, one process).  The overlay says
+`NO SIGNAL mm:ss - blue, closes the file at mm:ss` while recording, `... file closed,
+watching for the next tape` after; the title gains `[NO SIGNAL]`.
 Only while capturing, and only after a real picture has been seen since the file
 opened, so a monitor started in front of a stopped deck waits for the tape instead of
-quitting.  `PCTV_BLUE_SECS=0` turns it off; `PCTV_VERBOSE` prints the three means
+closing anything.  `PCTV_BLUE_SECS=0` turns it off; `PCTV_VERBOSE` prints the three means
 every second (`monitor: blue: Y … U … V …`) so the predicate can be checked against a
 deck.
 
