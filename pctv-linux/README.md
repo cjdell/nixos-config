@@ -506,8 +506,12 @@ sudo ./pctv_probe stream composite1 > /tmp/live.bin          # raw mode-2 BT.656
 ```
 
 `fakeprobe.c` emits real-time BT.656 in exactly this card's line layout and can
-inject the two things that go wrong - a lost 32 KiB URB (a hole at a mid-line
-byte offset) and a hole aligned to whole lines (which no parser can locate) - and
+inject the things that go wrong - a lost 32 KiB URB (a hole at a mid-line
+byte offset), a hole aligned to whole lines (which no parser can locate), and
+`FAKE_MULTIGAP`: eight dropouts through one field's vertical interval, the
+damaged-tape rotation that walked the row repair off the end of the good-frame
+buffer (doc §14.2h) - that last case runs twice, once plain and once under
+AddressSanitizer, so the overflow cannot come back hiding in heap slack - and
 the script also `SIGSTOP`s the driver for a second to emulate the desktop being
 away.  Each case is asserted against the counters on the stop line (`dup`,
 `skip`, `short`, `repaired at the seam`, `held`), so a change that starts costing

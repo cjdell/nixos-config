@@ -15,6 +15,14 @@
 #   FAKE_GAPLINES=<s>   remove exactly 19 whole lines instead: guard codes stay
 #                       1728 B apart, so *no* parser can see where they went -
 #                       it has to show up as a short field and be held
+#   FAKE_MULTIGAP=<s>   eight dropouts through one field's vertical interval,
+#                       each proving one advanced row: a damaged tape's
+#                       rotation.  This is the shape that segfaulted the live
+#                       monitor five times on macbook-pro-2009 (2026-11-05..12)
+#                       when the row repair indexed past the good-frame buffer
+#                       - the case run twice, once plain and once under
+#                       AddressSanitizer, which catches that overrun with or
+#                       without heap slack to hide it in.
 #   FAKE_STALL=<s>      stop writing for FAKE_STALL_LEN s (data delayed, nothing
 #                       lost)
 #
@@ -50,6 +58,16 @@ nix shell nixpkgs#gcc --command cc -O2 -o "$TMP/pctv-monitor" pctv-monitor.c \
     -lSDL2 -lasound -lm -lpthread || { say "build failed"; exit 1; }
 nix shell nixpkgs#gcc --command cc -O2 -o "$TMP/fakeprobe" fakeprobe.c \
     || { say "fakeprobe build failed"; exit 1; }
+# AddressSanitizer build, for the one case whose bug a full page of heap slack
+# can hide (it did, five crashes deep: the overflow reads only 1.8 KB past the
+# buffer, so whether it SIGSEGVs is allocator luck - ASan makes it a fact).
+nix shell nixpkgs#gcc --command cc -O1 -g -fsanitize=address -o "$TMP/pctv-monitor-asan" pctv-monitor.c \
+    -I"$DEV/include/SDL2" -I"$ADEV/include" \
+    -L"$OUTP/lib" -L"$ALIB/lib" -Wl,-rpath,"$OUTP/lib" -Wl,-rpath,"$ALIB/lib" \
+    -lSDL2 -lasound -lm -lpthread || { say "ASan build failed"; exit 1; }
+# nixpkgs' SDL2 is now the sdl2-compat shim, which dlopens libSDL3 at runtime;
+# under the ASan runtime that dlopen misses the store paths, so name them.
+S3=$(nix-store -q --references "$OUTP" 2>/dev/null | grep -iE "sdl3" | head -1)
 
 # one capture; echoes the monitor's own summary of what happened
 capture() {          # $1 = seconds, $2 = extra env ("A=B C=D"), $3 = label
@@ -117,6 +135,36 @@ run_case "one lost URB (32768 B, mid-line)" 12 "FAKE_GAP=4" \
 # to be held (one repeated picture), which is the honest worst case.
 run_case "19 aligned lines dropped" 12 "FAKE_GAPLINES=4" \
     dup:0:0 skip:0:0 short:1:2 held:1:2
+
+# A damaged rotation: eight dropouts inside one field, each of which the pitch
+# can only prove ONE row of, so their sum walks the row-repair counter through
+# the vertical interval - and into the rows where it used to index past the
+# good-FRAME buffer (field_fill_rows read good_fuv[2r+parity] with r up to 295
+# against a 576-row allocation).  Five SIGSEGVs on macbook-pro-2009, always
+# over a bad stretch of tape, always mid-capture (2026-11-05..12).  The tape
+# itself must lose nothing beyond the dropouts themselves.
+run_case "damaged rotation (8 VBI dropouts, one field)" 12 "FAKE_MULTIGAP=4" \
+    dup:0:0 skip:0:0 written:290:335 short:0:0 held:0:0
+
+# The same case under AddressSanitizer: the overrun is 1.8 KB, which a heap
+# page of slack can survive - on zen3 it did, on the macbook it SIGSEGVed 5/5.
+# ASan makes the absence of the overflow a fact, not allocator luck.
+say ""
+say "== damaged rotation under AddressSanitizer (the 2026-11-12 overrun, named)"
+rm -f "$OUT"/pctv-cap-*
+env SDL_VIDEODRIVER=dummy PCTV_LOG=0 ASAN_OPTIONS=detect_leaks=0 \
+    LD_LIBRARY_PATH="$OUTP/lib${S3:+:$S3/lib}" \
+    PCTV_PROBE="$TMP/fakeprobe" PCTV_NO_SUDO=1 FAKE_MULTIGAP=4 \
+    "$TMP/pctv-monitor-asan" -i composite --capture --capture-seconds 12 --no-audio \
+    --master uyvy --out-dir "$OUT" >"$TMP/asan.out" 2>"$TMP/asan.log"
+if grep -q "ERROR: AddressSanitizer" "$TMP/asan.log"; then
+    bad "AddressSanitizer caught the row-repair overrun:"
+    grep -a -m3 -E "ERROR: AddressSanitizer|field_fill_rows|gap_resync" "$TMP/asan.log" | sed 's/^/    /'
+elif ! grep -q "capture stopped" "$TMP/asan.log"; then
+    bad "the ASan run never finished (see $TMP/asan.log)"
+else
+    pass "no heap overrun across 12 s of damaged rotation (ASan)"
+fi
 
 # The host is away for a second (SIGSTOP): data waits in the pipe, nothing is
 # lost, and - crucially - the writer must NOT repeat pictures to "fill" it.

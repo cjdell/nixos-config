@@ -12,6 +12,11 @@
  *   FAKE_GAPLINES=<s>  remove exactly 19 whole lines instead: the guard codes
  *                      stay 1728 B apart, so no parser can tell where they went
  *                      - it only shows up as a short field
+ *   FAKE_MULTIGAP=<s>  eight dropouts through one field's vertical interval,
+ *                      spaced so each proves exactly one row to the pitch:
+ *                      a damaged tape's rotation, and the shape that pushed
+ *                      the row counter into the VBI and off the end of the
+ *                      good-frame buffer (the 2026-11-12 SIGSEGV class)
  *   FAKE_STALL=<s>     write nothing for FAKE_STALL_LEN s (data delayed, not
  *                      lost)
  *   FAKE_FIELD_MS=<ms> field period, default 20 (= exactly 25 fps)
@@ -28,22 +33,36 @@ static void onsig(int s) { (void)s; stop = 1; }
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
                           return t.tv_sec + 1e-9 * t.tv_nsec; }
 static unsigned char line[1728];
-static long long written;
-static long long hole_at = -1, hole_len;
+static long long written;            /* generator frame: skipped bytes COUNT */
+/* Holes are absolute ranges in the generator frame, so a pair of them can be
+ * placed inside ONE field (fields are 312*1728 B each from stream start, and
+ * `written` is exactly field*312*1728 at the top of a field loop).  That is
+ * how the 2026-11-12 bottom-of-field crash is reproduced: a second mid-line
+ * hole near the end of a field drives the parser's row counter past the last
+ * frame row, and only a bug in the repair path turns that into a crash. */
+static struct { long long at, len; } holes[16];
+static int nholes;
+static int in_hole(long long g)
+{
+    for (int k = 0; k < nholes; k++)
+        if (g >= holes[k].at && g < holes[k].at + holes[k].len) return k;
+    return -1;
+}
 static void emit(const unsigned char *p, size_t n)
 {
-    if (hole_at >= 0 && written + (long long)n > hole_at &&
-        written < hole_at + hole_len) {
-        long long s = hole_at > written ? hole_at - written : 0;
-        long long e = hole_at + hole_len < written + (long long)n
-                    ? hole_at + hole_len - written : (long long)n;
-        if (s > 0 && write(STDOUT_FILENO, p, (size_t)s) != s) exit(0);
-        if (e < (long long)n && write(STDOUT_FILENO, p + e, n - (size_t)e) != n - e) exit(0);
-        written += n;
-        return;
+    size_t i = 0;
+    while (i < n) {
+        int k = in_hole(written + (long long)i);
+        if (k < 0) {                        /* live run: until the next hole */
+            size_t s = i;
+            while (i < n && in_hole(written + (long long)i) < 0) i++;
+            if (write(STDOUT_FILENO, p + s, i - s) != (ssize_t)(i - s)) exit(0);
+        } else {                            /* skip to the hole's end */
+            long long adv = holes[k].at + holes[k].len - written;
+            i = adv < (long long)n ? (size_t)adv : n;
+        }
     }
-    if (write(STDOUT_FILENO, p, n) != (ssize_t)n) exit(0);
-    written += n;
+    written += (long long)n;
 }
 int main(int argc, char **argv)
 {
@@ -51,6 +70,8 @@ int main(int argc, char **argv)
     double secs = argc > a ? atof(argv[a]) : 20.0;
     double gap_at = getenv("FAKE_GAP") ? atof(getenv("FAKE_GAP")) : -1;
     double gapl_at = getenv("FAKE_GAPLINES") ? atof(getenv("FAKE_GAPLINES")) : -1;
+    double holes2_at = getenv("FAKE_MULTIGAP") ? atof(getenv("FAKE_MULTIGAP")) : -1;
+    int holes2_armed = 0;
     double stall_at = getenv("FAKE_STALL") ? atof(getenv("FAKE_STALL")) : -1;
     double stall_len = getenv("FAKE_STALL_LEN") ? atof(getenv("FAKE_STALL_LEN")) : 0.8;
     double field_ms = getenv("FAKE_FIELD_MS") ? atof(getenv("FAKE_FIELD_MS")) : 20.0;
@@ -68,15 +89,51 @@ int main(int argc, char **argv)
             usleep(20000);
             continue;
         }
-        if (gap_at > 0 && hole_at < 0 && t >= gap_at) {
-            hole_at = written + 900;      /* mid-line, as a FIFO overrun is */
-            hole_len = 32768;
-            fprintf(stderr, "fakeprobe: 32768 B hole at byte %lld\n", hole_at);
+        if (gap_at > 0 && !nholes && t >= gap_at) {
+            holes[nholes++] = (typeof(holes[0])){ written + 900, 32768 };
+            fprintf(stderr, "fakeprobe: 32768 B hole at byte %lld\n",
+                    written + 900);       /* mid-line, as a FIFO overrun is */
         }
-        if (gapl_at > 0 && hole_at < 0 && t >= gapl_at) {
-            hole_at = written + 900;
-            hole_len = 19 * 1728;         /* aligned: undetectable by pitch */
-            fprintf(stderr, "fakeprobe: 19 aligned lines dropped at byte %lld\n", hole_at);
+        if (gapl_at > 0 && !nholes && t >= gapl_at) {
+            holes[nholes++] = (typeof(holes[0])){ written + 900, 19 * 1728 };
+            fprintf(stderr, "fakeprobe: 19 aligned lines dropped at byte %lld\n",
+                    written + 900);       /* aligned: undetectable by pitch */
+        }
+        /* The damaged-rotation signature that segfaulted the monitor five
+         * times on 2026-11-05..12 (kernel `segfault at ... in
+         * .pctv-monitor-wrapped`, HB stopping mid-capture, no stop line).
+         * `written` is exactly at a field boundary here, so every offset
+         * below is field-relative by construction.
+         *
+         * A dropout can prove at most ONE missing row to the pitch (between
+         * its surviving guard codes sit (900) + (1728 - 20) bytes no matter
+         * how much vanished - the pitch cannot see more), so it takes many
+         * of them for gap_resync's advance-the-row-counter (the gap_seams>1
+         * branch) to push field_lines past the 288 active rows into the VBI
+         * range.  Rows 288+ are where field_fill_rows() indexed the 576-row
+         * FRAME buffer as if it were a FIELD: 2r+parity crosses 575 and the
+         * good_fuv read runs off the end of its mmap.
+         *
+         * So: eight dropouts through the vertical interval, three lines
+         * apart (two lines apart and one dropout's surviving tail fakes a
+         * full line and resets the count), each [line*1728+900, +2576) so
+         * the resume lands 20 B into a line - past that line's swallowed
+         * guard code, making the next real guard read exactly one line of
+         * advance.  Seam #1 only records the row; seams 2..8 each advance:
+         * fills land on r = 288..294, frame rows 576..589 - a read 13 KB
+         * past the buffer.  Before the clamp the monitor dies on the third
+         * of these fields, mid-HB, exactly as it did on real tape. */
+        if (holes2_at > 0 && !holes2_armed && t >= holes2_at) {
+            holes2_armed = 1;             /* arm at the NEXT field boundary */
+        }
+        if (holes2_armed && nholes == 0) {
+            long long base = written;
+            for (int k = 0; k < 8; k++)
+                holes[nholes++] = (typeof(holes[0])){
+                    base + (288 + 3 * k) * 1728 + 900, 2576 };
+            fprintf(stderr, "fakeprobe: 8 VBI dropouts armed in field %lld "
+                            "(first at byte %lld)\n", field,
+                    base + 288 * 1728 + 900);
         }
         int F = (int)(field & 1);
         double due = (double)field * (field_ms / 1000.0);
@@ -92,9 +149,7 @@ int main(int argc, char **argv)
                 p[4 + x * 2] = 0x80;
             }
             emit(line, 1728);
-            if (hole_at >= 0 && written > hole_at + hole_len) { /* once */ }
         }
-        if (hole_at >= 0 && written > hole_at + hole_len && field < 0) {}
         field++;
     }
     fprintf(stderr, "fakeprobe: %lld fields, %lld bytes\n", field, written);

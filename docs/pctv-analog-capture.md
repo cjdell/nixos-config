@@ -1303,6 +1303,41 @@ is ~25 min of chronic ~16 MB/s sink, and a 90-min tape that stays behind all the
 way wants ~33 GB — so the cap *firing* is documented behaviour, not a surprise,
 and `PCTV_SPILL_DIR` wants a disk with room if that is the workflow.
 
+### 14.2h The row repair must never index past the frame — the 2026-11-12 mid-capture segfaults
+
+The symptom was the worst kind: during the damaged stretches of a tape - the ones
+where the picture cuts in and out - the monitor simply stopped. No stop line, no
+`SINK STALLED`, nothing; the `HB` line ended mid-take and the file stopped growing.
+`coredumpctl` said why: five `SIGSEGV`s of `.pctv-monitor-wrapped` on
+macbook-pro-2009 between 2026-11-05 and 12, and the kernel's `Code:` dump named
+the instruction - a `dst[x] = src[2x+1]` byte loop with a row index scaled by
+1440: `field_fill_rows()` extracting Y from `good_fuv`.
+
+The arithmetic: a dropout, however much it swallows, can prove **at most one**
+missing row to the pitch (between its two surviving guard codes sit under two
+lines' bytes), so what pushes `field_lines` past 287 is *many* small dropouts in
+one field - exactly a bad rotation's signature - and each of the parser's row
+advances (the `gap_seams > 1` branch of `gap_resync`) fills the skipped rows from
+the last clean frame. But `good_fuv` is a **frame** - 576 rows - while a field
+numbers rows to `FIELD_MAX = 296`, and `2r + parity` at r = 293 is frame row 587:
+a read ~14 KB past the buffer. Whether that SIGSEGVs is allocator luck (the slack
+of the last mapped page): on the macbook it faulted 5/5, on the build box the same
+overflow sailed through silently. The VBI rows being filled are dropped at commit
+anyway (`rows` caps at 288), so the fix is a clamp: past frame row 575 stretch
+the row above - the same thing the no-clean-frame path already does - and read
+nothing out of bounds (`pctv-monitor.c`, `field_fill_rows`).
+
+Proving it needed the new toys twice over. `capture-selftest.sh` injects it with
+`FAKE_MULTIGAP`: eight dropouts through one field's vertical interval, spaced so
+each advances the row counter by exactly one - fills land on r = 288..294, frame
+rows 576..589. And because a 1.8 KB overflow may or may not fault depending on
+who knows what about the heap, the case runs **under AddressSanitizer** too:
+pre-clamp it reports `heap-buffer-overflow ... field_fill_rows pctv-monitor.c`
+from `gap_resync` with certainty; post-clamp, twelve seconds of damaged rotation
+are clean. On the µs-stamped log the real crashes had read as `HB` line present
+at second T, none at T+1, no `log end:` ever - which is what made "the machine
+is haunted" reducible to six lines of arithmetic in the first place.
+
 ### 14.3 The system tuning that keeps the deadline
 
 All of it in `pctv_probe` at stream start (it is root, and it is the only stage
@@ -1415,6 +1450,7 @@ ever starts costing a picture again:
 | one lost 32 KiB URB, mid-line | `dup 0`, no short field, one `repaired at the seam` |
 | 19 aligned lines dropped | `short 1`, `held 1` - the undetectable case, held rather than sheared |
 | 1 s `SIGSTOP` of the monitor | `dup 0 skip 0`, full picture count: the loop was away, the data waited, nothing was repeated |
+| 8 VBI dropouts, one field (`FAKE_MULTIGAP`) | `dup 0 skip 0`, full picture count, the 8 rows accounted - and the same 12 s again under AddressSanitizer with zero reports: the 14.2h class stays dead |
 
 ### 14.6 The one assumption this makes
 

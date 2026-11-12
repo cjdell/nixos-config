@@ -1037,7 +1037,17 @@ static void field_fill_rows(int first, int count, int parity)
     if (first < 0) first = 0;
     if (first + count > FIELD_MAX) count = FIELD_MAX - first;
     for (int r = first; r < first + count; r++) {
-        if (have_good && good_fuv) {
+        /* good_fuv holds a FRAME: only the 288 active rows of a field map
+         * into its 576.  A damaged section can push r past 287 - every
+         * dropout in one field advances the row counter by one (gap_seams>1
+         * in gap_resync), and the VBI's guard codes advance it like any
+         * other - and then 2*r+parity indexes past the end of the buffer:
+         * the 2026-11-12 SIGSEGV, five cores on macbook-pro-2009, always
+         * mid-`capture` over a bad stretch of tape (the kernel's Code bytes
+         * are this loop's byte copy).  Those rows are VBI, dropped at commit
+         * by the 288-row cap anyway, so stretch the row above - exactly the
+         * no-clean-frame path - and read nothing out of bounds. */
+        if (have_good && good_fuv && 2 * r + parity < H) {
             const unsigned char *src = good_fuv + (size_t)(2 * r + parity) * W * 2;
             for (int x = 0; x < W; x++) fY[r][x] = src[x * 2 + 1];
             for (int x = 0; x < W / 2; x++) {
