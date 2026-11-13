@@ -30,7 +30,7 @@ let
   # and cmakeFlags), so this fetch is now only `tools/vision`'s: that project
   # does add_subdirectory(${LLAMA_DIR} llama) and builds mtmd + llama, which the
   # vendored ggml subset cannot provide. Keep the rev equal to setup.py's
-  # LLAMA_CPP_COMMIT (setup.py:240, still 3cf03257 on 0.2.13.1).
+  # LLAMA_CPP_COMMIT (setup.py:241, still 3cf03257 on main-13eedf55).
   llama = fetchFromGitHub {
     owner = "ggml-org";
     repo = "llama.cpp";
@@ -64,9 +64,60 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.2.13.1";
+  version = "0.2.13.1+main-13eedf55";
 
-  # v0.2.13.1 (2026-11-09, rev 628f7495) - the current release. Engine 0.1.59.1 (CMakeLists.txt:13 - the release
+  # main HEAD 13eedf55 (2026-11-12) - bleeding-edge bump, like 0.2.7.1/46c152a1 and 0.2.10 before it:
+  # upstream has cut no release newer than v0.2.13.1 (v0.2.14 is in preparation on main), and this is the
+  # tip, 160 commits past 628f7495. The ENGINE VERSION IS UNCHANGED - CMakeLists.txt:13 is still
+  # `project(strata VERSION 0.1.59.1 ...)` - so this is the 0.1.59.1 engine plus its post-release fixes.
+  # Most of the 160 are 0.2.14 App/Terminal/Control, download/net-policy, Windows-job and Linux-Arm vision
+  # work; the engine diff (src/ + include/ vs 628f7495) is exactly:
+  #   * expert_cache.cpp - #5708: a failed free-memory query is reported with its error, not passed off as 0 free.
+  #   * expert_source.cpp + new include/strata/core/resident_ram_copy.hpp - the automatic RAM copy's wording,
+  #     and STRATA_RESIDENT_PIN=0 now covers it too (we do not set the flag).
+  #   * prefill/gemm.cu + prefill/prefill.cpp + qwen35/q36_engine.cu - the MMQ row-id tables get the margin
+  #     llama.cpp's mul_mat_q reads past their end (384-508 B OOB; the Flash-Next table was already sized,
+  #     the dense path is opt-in STRATA_DENSE_MMQ we never set, the q36 engine is not ours). Memory safety,
+  #     no arithmetic change here.
+  #   * program/generate.cpp + serve_stop_bound.hpp + new gpu_pause_time.hpp and stream_watch.hpp - the #4677
+  #     stop bound (cap a decode window's committed rows at max_new and the first EOS) extends from HIP-only
+  #     to every backend, so our path does not change; the stall report now asks the prompt path's compute
+  #     stream whether its work is done, and AMD Linux shows how long the DRIVER PAUSED the GPU - straight
+  #     into our MES-reset/stall evidence (docs/strata-hang.md, docs/zen3-random-crashes.md).
+  #   * include/strata/core/conversation_cache.hpp - #5697: an evicted PARKED conversation gives its RAM back
+  #     to the system. This box's history is RAM pressure (the -cram OOMs, AGENTS.md "RAM" bullet), so this
+  #     one is a real win for the parked-conversation KV we run with.
+  #   * split_ring.hpp (#5722 per-card prompt-loan pricing - multi-card, not us), qwen35/context_fit.hpp
+  #     (Qwen3.6 - not us), two *_test.cpp / parity files (test-only).
+  # third_party/strata-ggml is BYTE-IDENTICAL (diff -rq empty) and setup.py:241 LLAMA_CPP_COMMIT is still
+  # 3cf03257, so the `llama` fetch above and every ggml byte move not at all.
+  #   * THE AUDIT PATCH NEEDED NO RE-BASE: none of the audited files (verify.cpp, verify.hpp,
+  #     iq_kernels.cu/.hpp, sampler.cu/.hpp) appear in `diff -rq src include` - they are byte-identical to
+  #     the 0.2.13.1 ones - and `patch -p1 --fuzz=0` and `git apply --check` both land on 13eedf55 with
+  #     ZERO offsets and zero rejects. The diff is untouched; its added lines were already byte-identical.
+  #   * postPatch clamps re-checked on 13eedf55: kv_q8.cu's target is still UNIQUE at :55 and the file still
+  #     contains no "65504"; prefill/kernels.cu's target is still exactly once, still at :2558, hf_sat still
+  #     at :69. Both files are not in the diff list either - byte-identical to the release, line numbers and all.
+  #   * serve/server.py: the installPhase rewrite targets MOVED but are byte-identical and still exactly once
+  #     each - died_note is defined at :440, the rewritten call at :8816, the ValueError at :8828 (was
+  #     :436/:8633/:8645). The engine launch is unchanged (popen [exe, "--serve", *args] at :1213);
+  #     /v1/status, /v1/unload, /health and /slots - what ./gpu-mode.sh drives - are all still served; all 18
+  #     engine args ./strata.nix passes are still parsed; and our config keys and the --engine/--config/
+  #     --host/--port CLI are unchanged. New Python-side behaviour: every child gets GGML_NO_BACKTRACE=1
+  #     (strata_control/childenv.py, stdlib-only - no gdb fork on an abort), the STOP of an early-ended
+  #     request never raises on a dead engine pipe, and the HTTP server binds without getfqdn's DNS lookup.
+  #   * DFlash2 unchanged on our path: the _SUPPORTED_NAME regex is byte-identical (our -unsloth-ud-iq4-xs-v31
+  #     still passes), SPEC_WINDOW stays 6 with WIDE_WINDOW still gated to Strix Halo / big Blackwell, AUTO_MTP
+  #     still names ("hip","gfx1201"), DRAFT_CONF stays 0.35, and the pack pins moved from drafting_fetch.py
+  #     to drafting.py:204-224 with IDENTICAL values (REPO/REVISION a22a1744, CONVERTED_BYTES 339,694,592 /
+  #     sha 4a42b982...) - /home/cjdell/Strata/dflash2/'s selq4 pack is reused, no re-download.
+  #   * Python surface: no new third-party module-scope import anywhere serve reaches (re-checked server.py
+  #     and the changed strata_control modules - all stdlib or internal), so serverPython stays as it is.
+  #   * Build surface: add_executable(strata src/program/generate.cpp) moved to cmake/strata_gpu_engine.cmake:483
+  #     (was :477); setup.py's build_vision_cpu is now at :5485 (was :5333) with the same flags postBuild
+  #     mirrors; every cmakeFlag we pass is still an option.
+  #
+  # v0.2.13.1 (2026-11-09, rev 628f7495) - previous pin (live 2026-11-10 -> 2026-11-13). Engine 0.1.59.1 (CMakeLists.txt:13 - the release
   # manifest still names its engine packages 0.1.59), app/Terminal 0.2.13, Control 0.1.59.1; the .1 is a
   # Control-only hotfix (Intel Arc app setup, READMEs, the release-manifest test): v0.2.13 -> v0.2.13.1 is 7 commits
   # and its only build-relevant line is the project() version bump - the diff touches apps/, README.*, docs/,
@@ -301,8 +352,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "628f74955a56fcba092495b800dd02af75373a0f";
-    hash = "sha256-nQ3Jdui9y6r5FqsEoJraKsqBLeCTRRERU0zS8CQTqSY=";
+    rev = "13eedf552417a6a791a7d13c6597e24300ee3a09";
+    hash = "sha256-50Z0ks2k6f+UsSJwOq528l4eIUnh+12/PH/KU+5sR0Y=";
   };
 
   nativeBuildInputs = [
@@ -353,7 +404,9 @@ stdenv.mkDerivation (finalAttrs: {
   # Our kernel AUDIT port (2026-10-05, from the 0.1.35 audit build; the HIP-adapted copy
   # of the upstream #879 reporter's instrumentation, gist 66419118nnn /
   # 7c9399d982d98229c61fcefaaa0b9215), re-based onto our exact pin 628f7495 (v0.2.13.1) on
-  # 2026-11-10: zero rejections for the second time - all 19 hunks apply with --fuzz=0 (verify.cpp
+  # 2026-11-10 and re-verified CLEAN on main-13eedf55 on 2026-11-13 (every audited file is byte-identical
+  # between the two pins, and `patch -p1 --fuzz=0` + `git apply --check` land with zero offsets and zero
+  # rejects): zero rejections for the second time - all 19 hunks apply with --fuzz=0 (verify.cpp
   # with a +3/+4/+10 offset, verify.hpp +19, three of iq_kernels.cu's four at +7, the rest at their own
   # line numbers), landing in
   # Verifier::init/record_window/run and inside native_expert_grouped - the #879 suspect site,
@@ -392,8 +445,10 @@ stdenv.mkDerivation (finalAttrs: {
   #
   # STATUS ON 0.2.13.1 (checked against the tree, not the changelog): neither clamp site moved into a clamp -
   # kv_q8.cu's int8 append is still unclamped at :55 (still unique, and the file contains no "65504" at
-  # all), and prefill/kernels.cu's clamp (3) target is still unclamped and now at :2558 -
-  # and upstream #1448
+  # all), and prefill/kernels.cu's clamp (3) target is still unclamped and now at :2558.
+  # RE-CHECKED ON main-13eedf55 2026-11-13: identical in every particular, both files byte-for-byte the
+  # release's, both --replace-fail targets still unique and unclamped.
+  # Upstream #1448
   # ("q8_1 scale overflow at the three remaining emit sites is clamped like the
   # others") landed in 0.1.41 and took over one of ours.  The three sites our 0.1.39
   # build clamped itself are all fixed upstream now - native_mmvq.cu
@@ -533,8 +588,9 @@ stdenv.mkDerivation (finalAttrs: {
     # (4, cont.) the retryable-guard rewrite, on the installed copy (see the
     # postPatch comment). substituteInPlace only uses sed, so it is safe here.
     # 0.2.11 moved the EngineDied mid-stream message into died_note(e)
-    # (server.py:437 on 0.2.11, still :436 on 0.2.13.1); the rewrite wraps its
-    # result, at :8633 now (was :8658) and the ValueError at :8645. The EngineDied 503 paths
+    # (server.py:437 on 0.2.11, :436 on 0.2.13.1, :440 on main-13eedf55); the rewrite wraps its
+    # result, at :8816 on 13eedf55 (:8633 on 0.2.13.1, :8658 on 0.2.11) and the ValueError at :8828
+    # (:8645 on 0.2.13.1) - both re-checked UNIQUE and byte-identical on 13eedf55. The EngineDied 503 paths
     # also call died_note but were never rewritten ("headers are sent" cases
     # are the ones the client can only read as text).
     substituteInPlace $out/share/strata/serve/server.py \
