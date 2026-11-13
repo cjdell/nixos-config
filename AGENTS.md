@@ -1192,14 +1192,19 @@ flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
 procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.13.1** (`628f74955a56fcba092495b800dd02af75373a0f`, updated 2026-11-10 from
-0.2.11 `c3b3f503` via 0.2.12 `146df3c4` — the engine went 0.1.57 → 0.1.58 →
-**0.1.59.1** across those two, so this was a real engine bump, not a docs tag; the
+**0.2.13.1+main-13eedf55** (`13eedf552417a6a791a7d13c6597e24300ee3a09` — main HEAD since
+2026-11-13, a bleeding-edge pin like 0.2.7.1/0.2.10 before it: upstream has cut nothing
+newer than v0.2.13.1 and 0.2.14 is in preparation on main; **engine 0.1.59.1 UNCHANGED**,
+so every 0.2.13.1 behaviour note below still applies verbatim, and `strata-kernel-audit.diff`
+was untouched — its audited files are byte-identical between the pins and it lands with
+zero offsets). Previous pin: the v0.2.13.1 release `628f74955a56fcba092495b800dd02af75373a0f`
+(2026-11-10, from 0.2.11 `c3b3f503` via 0.2.12 `146df3c4` — the engine went 0.1.57 → 0.1.58 →
+**0.1.59.1** across those two, so that was a real engine bump, not a docs tag; the
 `.1` tag itself is a Control-only Intel-Arc hotfix whose sole build-relevant line
 is `project(strata VERSION …)`). 0.2.0 split the repo into
 **app + Terminal + engine** — and 0.2.13 re-cut the engine build by backend
 (`cmake/backends/{cpu,cuda,hip}.cmake`, `add_executable(strata)` now lives in
-`cmake/strata_gpu_engine.cmake:477`) and **vendored the ggml it compiles into
+`cmake/strata_gpu_engine.cmake:483`) and **vendored the ggml it compiles into
 `third_party/strata-ggml`**, so `strata-package.nix` no longer passes
 `-DSTRATA_GGML_DIR` (verified with `diff -r`: every common source of llama.cpp
 `3cf03257`'s `ggml/` is byte-identical there — only the two CMakeLists are trimmed,
@@ -1209,7 +1214,7 @@ project does `add_subdirectory(${LLAMA_DIR} llama)` and needs the real checkout.
 0.2.0's split also means `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-11-10 (0.2.13.1)** — `ExecStart` names `/nix/store/<hash>-strata-0.2.13.1`
+2026-11-13 (main-13eedf55)** — `ExecStart` names `/nix/store/<hash>-strata-0.2.13.1+main-13eedf55`
 and `/v1/status` reports `"engine": "0.1.59.1"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
