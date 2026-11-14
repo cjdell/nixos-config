@@ -191,6 +191,14 @@ in
     # reality (old Z240 numbers: ~30-40 W of board/SSD/fans above what
     # the panel sums; the brown-out trips came from steps toward ~230 W).
     budget = 180;
+    # Same persistence lesson as the power cap, CPU side: the panel's
+    # slider is live-only (sysfs scaling_max_freq), so without a startup
+    # target every reboot lets the Xeon run back into its Tjmax ~100 °C
+    # pinned. 80 °C matches zen1's convention — the panel holds Tctl there
+    # via the cpufreq ceiling (≈ 3 GHz on this part) and re-applies it
+    # every service start; a slider move overrides live but is NOT kept
+    # across restarts/boot until changed HERE.
+    cpuTempTarget = 80;
   };
 
   # The panel reads/pins the cap the boot-time unit owns, so start after it.
