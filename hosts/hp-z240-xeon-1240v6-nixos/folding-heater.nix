@@ -131,9 +131,16 @@ in
   # refuses it (status=4/NOPERMISSION crash-loop without the prefix —
   # verified 2026-11-14); "+" makes these two run as root while the
   # client itself stays unprivileged.
+  # The "-" prefix is ALSO load-bearing (learned the same afternoon, 12:56:
+  # Xid 79 GPU-fallen-off-the-bus while the pause window had the client
+  # stopped): nvidia-smi then exits 6/NOTCONFIGURED, and without "-" a dead
+  # GPU failed ExecStartPre and crash-looped the WHOLE client — not even the
+  # CPU folded, 4 h dead. A GPU cap may never gate folding; on a dead card
+  # these lines now fail silently and the client comes up CPU-only (its own
+  # GPU probe finds nothing and simply skips the slot).
   systemd.services.fah-client.serviceConfig.ExecStartPre = lib.mkAfter [
-    "+${nvidiaSmi} -pm 1"
-    "+${nvidiaSmi} -pl 100"
+    "+-${nvidiaSmi} -pm 1"
+    "+-${nvidiaSmi} -pl 100"
   ];
 
   # Swap the module's ROCm OpenCL ICD (useless here — no AMD GPU) for the
@@ -161,11 +168,19 @@ in
   # box, the panel's baseline) and unit ordering for the slider. Its
   # EFFECT ALONE IS NOT SUFFICIENT — the desktop stack can and did revert
   # it before fah started; the ExecStartPre pair above is what holds.
+  # StartLimit* so a DEAD GPU (Xid 79) cannot make this retry forever:
+  # RestartSec 5 s never trips the default 10 s burst window, and after
+  # the 12:56 fall-off this unit would have spun all boot. Failing here
+  # is fine — the fah ExecStartPre pair is the enforcement.
   systemd.services.nvidia-power-limit = {
     description = "Cap GTX 970 power at 100 W (nvidia-smi -pl)";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-modules-load.service" ];
     before = [ "fah-client.service" ];
+    unitConfig = {
+      StartLimitIntervalSec = "15min";
+      StartLimitBurst = "12";
+    };
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
