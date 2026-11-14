@@ -126,6 +126,23 @@ in
         idle windows, so it is a duty-cycle throttle on GPU wattage and
         heat — the only power knob a GeForce card without NVML power
         limits has. Null = the client default (100 %).
+        Note: v8.5.6 logs "Unrecognized option 'gpu-usage'" when seeding
+        from config.xml, so treat it as inert on new clients and use
+        {option}`services.folding-at-home-native.enableGpu` or the panel's
+        NVML cap where those work.
+      '';
+    };
+
+    enableGpu = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether the boot-time configure oneshot enables the detected GPUs
+        (the fah-provision default) or explicitly clears the group's GPU
+        list (`--no-gpus`) so the box folds CPU-only. False is for hosts
+        where GPU fold load trips the power supply — hp-z240-xeon-1240v6
+        (240 W SFF PSU: power.limit reads 100 W while the card actually
+        draws 187 W at 99 % util and the box browns out).
       '';
     };
 
@@ -282,7 +299,9 @@ in
         ExecStart = pkgs.writeShellScript "fah-client-configure" ''
           set -u
           for _ in $(seq 1 30); do
-            ${fahPackages.fah-provision}/bin/fah-provision '${provisionAddress}' && exit 0
+            ${fahPackages.fah-provision}/bin/fah-provision ${
+              lib.optionalString (!cfg.enableGpu) "--no-gpus "
+            }'${provisionAddress}' && exit 0
             sleep 2
           done
           echo "fah-client did not come up; could not configure folding" >&2
