@@ -299,13 +299,18 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        # The loop below must outlast cfg.startDelay (the client sleeps in
+        # its own ExecStartPre before listening) AND systemd's start
+        # timeout, or the "failed to configure" noise makes every switch
+        # exit 4 — and on a wiped DB the client would silently stay paused.
+        TimeoutStartSec = "7m";
         ExecStart = pkgs.writeShellScript "fah-client-configure" ''
           set -u
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 70); do
             ${fahPackages.fah-provision}/bin/fah-provision ${
               lib.optionalString (!cfg.enableGpu) "--no-gpus "
             }'${provisionAddress}' && exit 0
-            sleep 2
+            sleep 5
           done
           echo "fah-client did not come up; could not configure folding" >&2
           exit 1
