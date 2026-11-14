@@ -216,6 +216,18 @@ if osd_rect:
             raise SystemExit(
                 f"clean.vsh: osd rect {osd_rect} outside {clip.width}x{clip.height}"
             )
+        # BlankClip demands subsampling-aligned dimensions — on a 4:2:2 clip
+        # (uyvy422 capture masters reach it as yuv422p) an odd width is
+        # outright rejected with "BlankClip: invalid width", and x=385 does
+        # exactly that to the left-hand blank. Snap the rect to the chroma
+        # grid: x/y down, w/h up, so the protected box only ever grows and
+        # cannot uncover a stamp digit.
+        mx = clip.format.subsampling_w + 1
+        my = clip.format.subsampling_h + 1
+        x -= x % mx
+        y -= y % my
+        w = min(-(-w // mx) * mx, clip.width - x)
+        h = min(-(-h // my) * my, clip.height - y)
         n = clip.format.num_planes
 
         def blank(ww, hh, val):
