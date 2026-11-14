@@ -127,9 +127,13 @@ in
   # the 100 W cap (this VBIOS's minimum) is set with only fah itself left
   # to touch the GPU. -pm 1 is not decoration: without it nvidia-smi warns
   # and the limit's lifetime is tied to driver sessions.
+  # The "+" prefix is LOAD-BEARING: the service runs as user fah and NVML
+  # refuses it (status=4/NOPERMISSION crash-loop without the prefix —
+  # verified 2026-11-14); "+" makes these two run as root while the
+  # client itself stays unprivileged.
   systemd.services.fah-client.serviceConfig.ExecStartPre = lib.mkAfter [
-    "${nvidiaSmi} -pm 1"
-    "${nvidiaSmi} -pl 100"
+    "+${nvidiaSmi} -pm 1"
+    "+${nvidiaSmi} -pl 100"
   ];
 
   # Swap the module's ROCm OpenCL ICD (useless here — no AMD GPU) for the
