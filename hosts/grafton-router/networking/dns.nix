@@ -107,6 +107,9 @@ in
         "coffeelakelenovo-nixos                       ,192.168.49.56,1h"
         "hp-elitedesk-ryzen-2400-nixos                ,192.168.49.57,1h"
         "lenovo-thinkcentre-core-11400-nixos          ,192.168.49.58,1h"
+        # HP Z240 SFF folding heater (Xeon E3-1240 v6 + GTX 970), adopted
+        # 2026-11-14; was dynamic .156 on its first install.
+        "3c:52:82:60:de:a9,hp-z240-xeon-1240v6-nixos  ,192.168.49.59,1h"
         "3d-printer-server                            ,192.168.49.60,1h"
         "coffeelakedell-nixos                         ,192.168.49.61,1h"
         "dell-vostro-kabylake-nixos                   ,192.168.49.62,1h"

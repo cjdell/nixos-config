@@ -148,6 +148,11 @@
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKRvbzK5uAlww+wmGRk8Y6Tfe0As7Z3FUDo9/16tPT11 root@haswellatx-nixos (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICz9IKHBT5WoeiTooTqU0YdTjTo9toRZp44aoIQfvUE4 root@asus-i7-6700-nixos (nix builder)"
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEYNL22AWqq7A7e7Nue/vt2LvV1mr7edMHH5NK0uKKP4 root@kabylakeitx-nixos (nix builder)"
+      # hp-z240-xeon-1240v6-nixos — adopted 2026-11-14 (fresh install of the
+      # blank Micron NVMe, .59). Key also appended live to /root/.ssh/
+      # authorized_keys so its nixos-install could use zen3 as a builder;
+      # this line makes it survive zen3's next switch.
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ1dymjPguf/uFGmpITUMcf/riXQ78onZyvY2j/FuJZl root@hp-z240-xeon-1240v6-nixos (nix builder)"
     ];
 
     boot.kernel.sysctl = {
