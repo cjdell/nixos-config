@@ -139,10 +139,13 @@ in
       description = ''
         Whether the boot-time configure oneshot enables the detected GPUs
         (the fah-provision default) or explicitly clears the group's GPU
-        list (`--no-gpus`) so the box folds CPU-only. False is for hosts
-        where GPU fold load trips the power supply — hp-z240-xeon-1240v6
-        (240 W SFF PSU: power.limit reads 100 W while the card actually
-        draws 187 W at 99 % util and the box browns out).
+        list (`--no-gpus`) so the box folds CPU-only. Set false on a host
+        whose power supply cannot take GPU fold load — hp-z240-xeon-1240v6
+        had 240 W SFF brown-outs until its GPU fold was fixed with an
+        enforced 100 W cap (see that host's folding-heater.nix power
+        history: a NVML power cap only counts if it is applied after the
+        display stack is up, with persistence mode on, and verified under
+        load via power.draw + clocks_throttle_reasons).
       '';
     };
 
