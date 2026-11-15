@@ -42,6 +42,11 @@ in
           legalName = "Jack";
           mailAddresses = [ "jack@chrisdell.info" ];
         };
+        deepak = {
+          present = true;
+          displayName = "Deepak";
+          legalName = "Deepak";
+        };
       };
       groups = {
         "admins" = {
@@ -201,6 +206,31 @@ in
           };
         };
       };
+      # NOTE: kanidm-provision silently ignores person fields it doesn't know,
+      # so the enableUnix flag below is a no-op — cjdell's posixaccount class
+      # was actually set by hand. What LDAP-backed apps (Jellyfin's LDAP-Auth
+      # plugin on N100-NAS, hosts/N100-NAS/jellyfin.nix) really need per user:
+      #  1. class `posixaccount` — the plugin's bind (cjdell) is a unix bind,
+      #     which kanidm bounds to the ANONYMOUS identity (process_ldap_uuid_to_
+      #     identity), and anonymous may only read posixaccount entries
+      #     (idm_acp_all_accounts_posix_read). Without the class the user is
+      #     invisible to the plugin's (uid={username}) search.
+      #  2. a credential LDAP bind accepts: either a POSIX password (min length
+      #     15 — that's what the jellyfin_ldap_auth sops secret holds for
+      #     cjdell), or membership of an `account_policy`-classed group with
+      #     allow_primary_cred_fallback=true, which makes LDAP bind fall back
+      #     to the primary (web) password. `deepak` uses that fallback via the
+      #     manually-created `ldap-cred-fallback` group.
+      # Set a person's primary password (the withSecretProvisioning patch adds
+      # --from-environment; password via KANIDM_RECOVER_ACCOUNT_PASSWORD_FILE):
+      #   sudo kanidmd scripting recover-account -c "$(systemctl show kanidm -p ExecStart \
+      #     | grep -oE '/nix/store/[a-z0-9]+-server\.toml' | head -1)" <name> --from-environment
+      # posix class + fallback-group membership, via PUT/POST on the v1 API
+      # with an idm_admin bearer (idm_admin's primary is regenerated randomly
+      # by the module on every kanidm start, so script it: recover-account
+      # idm_admin, then POST /v1/auth init2→begin→cred for the bearer token):
+      #   POST /v1/person/<n>/_attr/class   body ["posixaccount"]
+      #   POST /v1/group/ldap-cred-fallback/_attr/member   body ["<n>@kanidm.home.chrisdell.info"]
       extraJsonFile = pkgs.writeText "kanidm_extra" (
         builtins.toJSON {
           persons.cjdell.enableUnix = true;
