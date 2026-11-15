@@ -21,6 +21,7 @@ rec {
 
   # LAN's /64 slice of the delegated prefix (subnet-id 0x49)
   LAN_IPV6_PREFIX = "2a02:8010:6680:49::";
+  LAN_IPV6_SUBNET = "${LAN_IPV6_PREFIX}/64"; # what LAN clients present as their source
   LAN_IPV6_ADDRESS = "${LAN_IPV6_PREFIX}1"; # router on lan (…:49::1/64)
 
   # ---------------------------------------------------------------------------

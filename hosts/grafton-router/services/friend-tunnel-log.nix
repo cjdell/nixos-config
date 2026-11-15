@@ -251,10 +251,15 @@ in
     forceSSL = true;
     root = stateDir;
     extraConfig = ''
-      # Exactly the ask: 192.168.49.x and nothing else. A v6-only client on the
-      # LAN is therefore locked out on purpose — add LAN's /64 here if that ever
-      # bites (and note the wildcard DNS means any LAN box can reach it).
+      # LAN only, both families. v6 is not optional here: the wildcard record
+      # gives this name an AAAA, so a browser on the LAN usually dials the
+      # router's public IPv6 and presents its OWN :49:: address as the source —
+      # allow 192.168.49.0/24 alone 403s a working LAN client (observed).
+      # Temporary/privacy addresses are fine: they are inside the same /64.
+      # The friend's :8472::/64 stays denied on purpose — it reaches the internet
+      # through us, which is not the same thing as being on the LAN.
       allow ${c.LAN_SUBNET};
+      allow ${c.LAN_IPV6_SUBNET};
       deny all;
     '';
     locations."/".extraConfig = ''
