@@ -300,13 +300,38 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
         # The loop below must outlast cfg.startDelay (the client sleeps in
-        # its own ExecStartPre before listening) AND systemd's start
-        # timeout, or the "failed to configure" noise makes every switch
-        # exit 4 — and on a wiped DB the client would silently stay paused.
-        TimeoutStartSec = "7m";
+        # its own ExecStartPre before listening) AND fit inside systemd's
+        # start timeout, or the "failed to configure" noise makes every
+        # switch exit 4 — and on a wiped DB the client would silently stay
+        # paused. Budget it by wall clock, not by attempt count: one attempt
+        # costs 5-30 s depending on how the client fails (refused is
+        # instant; a client that accepts and never answers, e.g. the v7
+        # linuxserver container on zen3, eats two 10 s websocket timeouts
+        # inside fah-provision's 15 s socket wait).
+        TimeoutStartSec = "10m";
         ExecStart = pkgs.writeShellScript "fah-client-configure" ''
           set -u
-          for _ in $(seq 1 70); do
+          systemctl=${pkgs.systemd}/bin/systemctl
+          end=$(( $(date +%s) + 480 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            # Ask systemd what the client's state is, do not infer it from
+            # a refused socket. fah-pause-window.service stops fah-client
+            # for the whole expensive-electricity window, so a boot or a
+            # switch inside that window answers connection-refused for the
+            # entire budget: hp-z240-xeon-1240v6 booted at 13:12 on
+            # 2026-11-15, the pause stop landed at 13:13:56, and this unit
+            # then burned 6 min and failed for nothing — a failed unit that
+            # every later `nixos-rebuild` reports as exit 4. "activating"
+            # (in ExecStartPre, i.e. cfg.startDelay) is the wait-for-the-
+            # port case; a client the window owns has nothing to configure,
+            # and it folds from its own DB when it is started again.
+            state=$($systemctl is-active fah-client.service)
+            case "$state" in
+              inactive | failed | deactivated)
+                echo "fah-client is $state (pause window?); nothing to configure"
+                exit 0
+                ;;
+            esac
             ${fahPackages.fah-provision}/bin/fah-provision ${
               lib.optionalString (!cfg.enableGpu) "--no-gpus "
             }'${provisionAddress}' && exit 0

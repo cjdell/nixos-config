@@ -9,8 +9,15 @@
   ../../common/sunshine.nix
   ../../common/wine.nix
 
-  ((import ../../common/folding-at-home.nix) "amd")
-  ../../common/folding-at-home-sops.nix
+  # The linuxserver/foldingathome container (common/folding-at-home.nix) is
+  # retired here: it folded nothing on this box (v7 image, no FahCore ever
+  # spawned, and its Web Control answered on 0.0.0.0:7396 without ever
+  # sending state), while the v8 image cannot see an AMD GPU at all — that is
+  # what common/folding-at-home-native.nix is for, on the heaters. Folding is
+  # not this host's job (it is the fleet's build + AI box), so there is no
+  # replacement: the imports, the `fah` user (uid 7396), the /srv/fah
+  # activation script and the sops `fah-env` template are all gone with them.
+  # The module itself stays for N100-NAS and the legacy machines/* configs.
 
   ./ai
   # Dev PostgreSQL (loopback-only, trust) for hass-rs's persistence layer.
