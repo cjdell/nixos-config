@@ -152,6 +152,54 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
   (visible ~20 % of samples, dates `17 10 1995`→`24 7 1996`: the tape is
   sessions from months apart, one capture). Then measure the box once with
   a 3× zoom + `drawgrid` ROI grab (40 px rule) and pass it as `--osd-rect`.
+   The rect is snapped **outward to the chroma grid** inside `clean.vsh`
+   (2026-11-14): `std.BlankClip` refuses a width the format cannot subsample,
+   so an odd `x` (385!) killed every render that combined `--osd-rect` with
+   anything, *after* the pre-index had already burned 27 minutes — which is
+   exactly how it got misdiagnosed as a `--to` interaction once. Symptom:
+   `BlankClip: invalid width` at script evaluation. Never believe `--to` is
+   implicated; it is graph-build, not trim.
+ * **A dropout event is wider than its blue core — scan the shoulders.**
+   Measured across five 1992 tapes (2026-11-14/15 batch, three render cycles
+   to prove): the blue run is bracketed by two invisible classes. **Onset
+   flash**: 2–4 frames of bright head-contact noise (Y→150–228, chroma
+   NEUTRAL) starting 0.2–0.9 s before the blue — no blue test sees it.
+   **Recovery**: striped tracking failure, often rainbow (CHROMA banding,
+   luma-smooth → low YDIF in output), running **0.5–2.5 s** after the blue
+   ends — and its edge frames sit below every fixed threshold, so margins
+   are load-bearing, not the threshold. Tape *tails* carry the same family
+   as tears (YDIF spikes, invisible to blue; France/Portugal/Cotswold death
+   edges all had 5–10 s of it). The detector that catches all three, run on
+   the **interlaced source** (the truth lives there; the deinterlacer smooths
+   some of it away and *amplifies* the rest — 2 bad source frames became 4
+   smeared output frames at every PS/FR storm): full-fps window, suspect =
+   `max(YDIF, UDIFF, VDIFF) > 40`. Cut storm edges as
+   `TO = first_suspect − 0.3`, `resume = last_suspect + 0.3…0.45`; gate a
+   tail trim with the same scan before choosing `--to`. The 0.4 s blue-guard
+   from the Dell 02 lesson is necessary and nowhere near sufficient: 11 of
+   17 batch seams still had flash or recovery residue inside it.
+ * **Keep blue strict — compensate with the shoulder scan, not the threshold.**
+   The loose `d>45` variant shreds content: France 1997's 10-minute pool
+   sequence read as 97 % "loose blue" (frames: blue water; strict detector:
+   0/1800). Dark-blue `U-V>80 && Y<120` is the blue detector because dropout
+   is a *luminance collapse* (Y≈47); everything dropout does that is NOT
+   dark-blue belongs to the line-difference scan above, not to blue.
+ * **Final sweep acceptance = per-frame `max(YDIF,UDIFF,VDIFF)>35` in
+   ±1.0 s windows at every seam and tail, `tr>1` fails.** A ±0.36 s window
+   (the original) misses the recovery class entirely, and a >3 threshold
+   waved through 4-frame flashes. Isolated single-frame speckles mid-content
+   are inherent to tape (a census of PS2 found a half-torn frame at t=358.5
+   with normal frames either side): match the delivery standard to what a
+   viewer sees — excise bands at seams, live with speckles in the field,
+   and be consistent.
+ * **Junction NCCs need an energy guard ≥8 s of overlap** and any spike must
+   be frame-checked before it moves a cut: three ~0.004-0.011 "matches" in
+   the batch (Basaly 1→2, Basaly 2→3, France J1/X) were all guard-edge noise
+   and the frame pairs showed unrelated scenes immediately. (The one REAL
+   junction, Portugal (1)→(2), pinned PS2[0]=PS1[6582.72] at 0.0355 where
+   frames showed the same plaza moments earlier — and it turned out to be a
+   rewind re-capture of PS1's tracking-tear tail: stitch through the tears
+   on the healthy copy and excise the 14 s both tapes damaged.)
 
 ## Tuning the deinterlace (fences, pans, camcorder OSD)
 
@@ -419,6 +467,7 @@ VRAM free with the LLM resident).
 | `clean.vsh`         | VapourSynth pipeline (env-var driven: `FC_SRC`/`FC_DEINT`/`FC_FIELD`/`FC_DENOISE`/`FC_CHROMA_BLUR`/`FC_CROP`) |
 | `footage-clean.sh`  | CLI orchestrator (probe → stages → encode)                    |
 | `footage-probe.sh`  | standalone "what is this file / what should I run" report     |
+| `batch/*.sh`        | multi-tape orchestration for a render box (driver: gate→cut→concat; render: kit+F@H lease; final: seam/tail sweep; queue: per-tape pipeline). Live copies run from the render host's home dir; the store paths (`FF=`, `KIT=`) pinned inside are per-host — refresh them there, not here. |
 
 ## Extension points (deliberately not in v1)
 
