@@ -14,7 +14,7 @@
 # address, and a tiny python web server answers inbound requests from the
 # public internet — the proof both directions work.
 #
-#   zen3 / internet ──▶ 2a02:8010:6680:f0::/64 ─▶ router wg-friend
+#   zen3 / internet ──▶ 2a02:8010:6680:8472::/64 ─▶ router wg-friend
 #     ─▶ (WG over UDP-over-wss-over-443) ─▶ VM wg-friend ─▶ br-friend ─▶ fdev0
 {
   config,
@@ -25,6 +25,25 @@
 let
   c = import ../networking/constants.nix;
   guestConstants = c; # the guest uses the same constants as the host
+
+  # PARKED since 2026-11-15. The live wg-friend peer is the friend's own
+  # keypair (constants FRIEND_ROUTER_WG_PUBKEY), and ONE /64 can carry only one
+  # peer — AllowedIPs also authorise a received packet's inner source address,
+  # so two peers on one /64 can each legitimately claim any address in it,
+  # which makes the pair a mutual blackhole/MITM pair rather than two tenants.
+  # So while he is connected this guest must be absent from the config, not
+  # merely un-started: autostart=false is NOT enough, because the
+  # friend-router-secrets unit below requiredBy's the VM's virtiofsd and that
+  # pulls the whole microVM back up (observed: the switch stopped it and then
+  # started it again in the same activation). This gate removes all three
+  # host-side entries, so nothing references it.
+  #
+  # To revive the rig: give it its own /64 (and its own tunnel-end addresses, so
+  # ::9/::10 stop colliding with his), flip FRIEND_ROUTER_WG_PUBKEY back to its
+  # key dVV0xEAiDqiYW3oatJ5oTKQP5aDADXYUWDoSvY4qoCk=, and set this to true.
+  # br-strict, the demo web server and scripts/friend-tunnel-demo.sh all still
+  # work unchanged.
+  demoEnabled = false;
 
   vmSecretShare = "/run/vm-secrets/friend-router";
 
@@ -86,7 +105,7 @@ let
     echo "friend-lan-device ready on fdev0"
   '';
 in
-{
+lib.optionalAttrs demoEnabled {
   # Host side: keep the VM's two secret files published before virtiofsd
   # opens the share (the grafton-hackspace-client pattern).
   system.activationScripts.publish-friend-router-secrets = lib.stringAfter [
@@ -107,6 +126,8 @@ in
 
   microvm.vms.friend-router = {
     inherit pkgs;
+    # Only reached when demoEnabled is true — see the gate at the top of the
+    # `let`, which is what actually parks the rig.
     autostart = true;
 
     config = {
@@ -270,6 +291,18 @@ in
             networkConfig.DHCP = "no";
             address = [ "${guestConstants.FRIEND_V6_VM}/64" ];
             routes = [
+              # Pin the tunnel peer to this link. The shared /64 is connected on
+              # THREE links here (wg-friend, br-friend, fdev0) — realistic, and
+              # exactly the trap: the /64s tie on metric, so a route lookup for
+              # the router's own tunnel end from a LAN-side source (this host's
+              # br-friend/fdev0 address) wins on br-friend and the reply dies in
+              # NDP on the LAN. ICMP echo replies escape that because they are
+              # pinned to the incoming interface, so ping works while TCP
+              # handshakes from this host silently time out. A /128 is more
+              # specific than any /64 and always wins.
+              {
+                Destination = "${guestConstants.FRIEND_V6_ROUTER}/128";
+              }
               {
                 Destination = "::/0";
                 PreferredSource = guestConstants.FRIEND_V6_VM;
@@ -326,7 +359,7 @@ in
         };
       };
 
-      # Inbound half of the demo: curl http://[2a02:8010:6680:f0::10]/ from
+      # Inbound half of the demo: curl http://[2a02:8010:6680:8472::10]/ from
       # the internet side and this answers.
       systemd.services.friend-demo-web = {
         description = "Friend LAN demo web server (python http.server)";

@@ -9,6 +9,7 @@
     ./frigate.nix
     ./frigate-whisper.nix
     ./friend-tunnel.nix
+    ./friend-tunnel-log.nix
     ./ghost.nix
     ./hackspace-tunnel.nix
     ./headscale.nix

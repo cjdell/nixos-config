@@ -202,6 +202,18 @@ in
           # the masquerade rule in the nat table has its filter counterpart.
           iifname ${c.LAN_INTERFACE} ip daddr ${c.GATLING_SUBNET} accept comment "LAN to gatling-services subnet"
 
+          # --- Friend tunnel: keep him OUT of the house -------------------------------
+          # Must come BEFORE the delegated-prefix rule below, which would
+          # otherwise hand a third party on wg-friend the same trust as every
+          # internal interface: his source address is inside our /48, so without
+          # this he reaches any globally-addressed box in the house — verified
+          # from the demo VM: HTTP 301 from :49::1 and HTTP 200 from zen3
+          # (:49::50). His own internet egress is untouched (established/related
+          # passed in the forward chain), his DNS is INPUT with its own rule, and
+          # inbound connections to his /64 arrive on the WAN decapsulated, never
+          # on wg-friend — so this only closes the walk-in.
+          iifname wg-friend ip6 daddr ${c.DELEGATED_PREFIX} reject with icmpx type admin-prohibited comment "friend /64 may not reach our /48"
+
           # IPv6 — delegated prefix + trusted network
           ip6 saddr ${c.DELEGATED_PREFIX} accept comment "outbound from delegated IPv6 prefix"
           ip6 saddr ${c.DBTHR33_SUBNET}   accept comment "DBTHR33 trusted network"

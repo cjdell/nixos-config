@@ -1,7 +1,7 @@
 # Friend tunnel — share one /64 of the delegated /48 with a friend behind a
 # web-traffic-only ISP (see networking/constants.nix for the layout).
 #
-#   internet ──▶ pppoe-zen ──▶ route f0::/64 via wg-friend ──▶ WireGuard
+#   internet ──▶ pppoe-zen ──▶ route :8472::/64 via wg-friend ──▶ WireGuard
 #                                                                       │ UDP
 #   friend-router VM ── wstunnel client ── wss :443 ──▶ nginx (TLS, the
 #   public edge's cert) ── ws 127.0.0.1:8087 ──▶ wstunnel server ──▶ UDP
@@ -44,7 +44,7 @@ in
       ListenPort = c.WG_FRIEND_PORT; # wstunnel re-delivers WG's UDP here
     };
     # The whole friend LAN (its devices address from the /64 themselves), so
-    # replies to e.g. f0::10 pass the peer filter.
+    # replies to e.g. :8472::10 pass the peer filter.
     wireguardPeers = [
       {
         PublicKey = c.FRIEND_ROUTER_WG_PUBKEY;
@@ -83,14 +83,36 @@ in
     };
   };
 
-  # Public edge: $FRIEND_TUNNEL_HOST is fronted by the existing wildcard cert
-  # ("chrisdell.info" covers *.home.chrisdell.info), and the only thing it
-  # serves is the wstunnel upgrade under the secret path prefix. The VM dials
-  # it via an /etc/hosts entry (2a02:8010:6680:49::1); a real deployment adds
-  # the AAAA to Route53 like every other *.home name.
+  # ── Connection-attempt logging ──────────────────────────────────────────
+  # NixOS emits no access_log at all, so without this we could see that the
+  # carrier connected (wstunnel logs that) but never WHO dialled or why nginx
+  # refused them — which is the whole point of the status page. Sent to syslog
+  # (= the journal, tag `nginx_tunnel`) rather than a file: no directory to
+  # create, no ownership for the worker to get wrong, journald does retention.
+  #
+  # Two things that cost an outage to learn, both true of this box's nginx 1.30:
+  #   * `tag=` allows ONLY alphanumerics and underscore. `tag=nginx-tunnel`
+  #     makes the WHOLE config fail to load, which takes every other vhost on
+  #     this edge down with it (and autoRollback then reboots the router).
+  #   * a custom `log_format` cannot be added from here: `appendConfig` is
+  #     emitted at the END of http{}, and nginx resolves the format name when it
+  #     parses `access_log`, so server blocks above it die with
+  #     `unknown log format`. Use the built-in `combined` and parse it in the
+  #     renderer instead (services/friend-tunnel-log.nix).
+  #
+  # The vhost itself: $FRIEND_TUNNEL_HOST is fronted by the existing wildcard
+  # cert ("chrisdell.info" covers *.home.chrisdell.info), and the only thing it
+  # serves is the wstunnel upgrade under the secret path prefix. The demo VM
+  # dialled it via an /etc/hosts entry (192.168.99.1); the friend dials it over
+  # real DNS, which the wildcard record plus route53 dynamic DNS already gives.
   services.nginx.virtualHosts.${c.FRIEND_TUNNEL_HOST} = {
     useACMEHost = "chrisdell.info";
     forceSSL = true;
+    # Server-level, so BOTH locations log: `location /` is where the interesting
+    # failure lands — a client whose upgrade path does not match gets the 404.
+    extraConfig = ''
+      access_log syslog:server=unix:/dev/log,facility=local7,tag=nginx_tunnel,severity=info combined;
+    '';
     locations."/".extraConfig = ''
       return 404;
     '';

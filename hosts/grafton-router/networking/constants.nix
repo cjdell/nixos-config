@@ -84,24 +84,40 @@ rec {
   STRICT_IPV4 = "192.168.99.1"; # router side of the strict link
   STRICT_SUBNET = "192.168.99.0/24";
   FRIEND_ROUTER_IP = "192.168.99.2"; # friend-router VM "WAN" (v4, NATed)
-  FRIEND_V6_SUBNET = "2a02:8010:6680:f0::/64"; # the shared /64 from our /48
-  FRIEND_V6_ROUTER = "2a02:8010:6680:f0::1"; # wg-friend on the router
-  FRIEND_V6_VM = "2a02:8010:6680:f0::2"; # wg-friend on the friend VM
+  # Subnet id 0x8472 of Zen's /48; :49: is the LAN, :10: is VLAN10 (PD). Any
+  # /64 inside the /48 works — Zen routes the whole /48 to this session and the
+  # router blackholes it on lo, so a new slice needs no upstream change.
+  FRIEND_V6_SUBNET = "2a02:8010:6680:8472::/64"; # the shared /64 from our /48
+  FRIEND_V6_ROUTER = "2a02:8010:6680:8472::1"; # wg-friend on the router
+  FRIEND_V6_VM = "2a02:8010:6680:8472::2"; # wg-friend on the friend VM
   # br-friend (the friend's LAN) needs its own global address, distinct from
   # the two tunnel ends: networkd only sends router advertisements from a
   # link that has a static IPv6 address configured.
-  FRIEND_V6_LAN = "2a02:8010:6680:f0::9"; # friend-router LAN gateway on br-friend
-  FRIEND_V6_DEV = "2a02:8010:6680:f0::10"; # static token addr on the VM's demo device
+  FRIEND_V6_LAN = "2a02:8010:6680:8472::9"; # friend-router LAN gateway on br-friend
+  FRIEND_V6_DEV = "2a02:8010:6680:8472::10"; # static token addr on the VM's demo device
   WSTUNNEL_PORT = 8087; # wstunnel server, loopback only (nginx fronts it on 443)
+  WG_FRIEND_INTERFACE = "wg-friend"; # the tunnel interface on the router
   WG_FRIEND_PORT = 51830; # wg-friend's listen port (51820 is wg0's)
   FRIEND_TUNNEL_HOST = "homerail.home.chrisdell.info"; # edge name the client dials (wildcard cert covers it)
+  # LAN-only status page: live log of his successful/failed connection attempts
+  # (rendered by services/friend-tunnel-log.nix, nginx allow-lists LAN_SUBNET).
+  FRIEND_TUNNEL_LOG_HOST = "tunnel-log.home.chrisdell.info";
   # Shared-secret WebSocket upgrade path. NOT the auth story (WG keys are);
   # it just keeps random wstunnel clients off the endpoint. Committed on
   # purpose: nginx `location` cannot read a sops value at runtime.
   FRIEND_TUNNEL_WS_PREFIX = "hrx9KqL2tWm4Zd7VbN";
 
-  # Public halves of the wg-friend keypair. The private halves are sops
-  # secrets friend_tunnel_wg_key (router) and friend_router_wg_key (VM).
+  # Public halves of the wg-friend keypair. The router's private half is the
+  # sops secret friend_tunnel_wg_key.
   FRIEND_TUNNEL_WG_PUBKEY = "P3SQVFg2RFF0e3YDbrKwJLrHiV2Z65U9Bap5YpW9gDA=";
-  FRIEND_ROUTER_WG_PUBKEY = "dVV0xEAiDqiYW3oatJ5oTKQP5aDADXYUWDoSvY4qoCk=";
+  # The live peer: a pre-generated keypair handed to the friend in his setup
+  # guide (its private half lives in the gitignored docs/friend-ipv6-over-websocket.md),
+  # so he can build without waiting on a round trip. The peer before him was the
+  # demo VM (sops friend_router_wg_key, pubkey
+  # dVV0xEAiDqiYW3oatJ5oTKQP5aDADXYUWDoSvY4qoCk=), now parked: one /64 carries
+  # exactly one peer, because AllowedIPs also authorise a received packet's
+  # INNER source address — two peers on one /64 can each legitimately claim any
+  # address in it, which turns the pair into a mutual blackhole/MITM pair.
+  # To revive the demo, give it its own /64 and swap this value back.
+  FRIEND_ROUTER_WG_PUBKEY = "oRzdjrO+QZkPXPmbFMsmBd0q0jYS9vh7mRNuZvnC1AI=";
 }

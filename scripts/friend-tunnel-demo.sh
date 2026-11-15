@@ -10,7 +10,7 @@ WG="nix shell nixpkgs#wireguard-tools --command wg"
 
 echo "### 1. router-side units & links"
 systemctl is-active wstunnel-server friend-router-secrets microvm@friend-router nginx
-ip -br addr show br-strict; ip -br addr show wg-friend; ip -6 route show 2a02:8010:6680:f0::/64
+ip -br addr show br-strict; ip -br addr show wg-friend; ip -6 route show 2a02:8010:6680:8472::/64
 
 echo; echo "### 2. WireGuard state (router end)"
 sudo nix shell nixpkgs#wireguard-tools --command wg show wg-friend
@@ -28,7 +28,7 @@ $VM 'timeout 6 ping -c1 -W2 1.1.1.1 2>&1 | tail -2'
 echo "-- absent: IPv6 on the ISP link itself (ext0 has no global address, no RA route):"
 $VM 'ip -6 addr show dev ext0 scope global | grep -c inet6; ip -6 route show | grep "dev ext0" | grep -v fe80 | wc -l; echo "(0 + 0 = the ISP gives us no v6 at all; every v6 packet below rides the tunnel)"'
 
-echo; echo "### 5. friend IPv6 egress rides the tunnel (source must be f0::/64)"
+echo; echo "### 5. friend IPv6 egress rides the tunnel (source must be :8472::/64)"
 $VM 'timeout 12 curl -s6 --max-time 10 https://ifconfig.co/json | grep -E "ip|ip_version" | head -4'
 
 echo; echo "### 6. DNS through the tunnel (RA RDNSS -> AdGuard 2a02:8010:6680:49::1)"
@@ -41,9 +41,9 @@ $VM 'timeout 8 rdisc6 -r 1 -w 3500 br-friend 2>&1 | head -18; echo "-- fdev0 glo
 
 echo; echo "### 8. inbound: web server on the friend LAN reached via the shared /64"
 echo "-- served by the VM itself:"
-$VM 'curl -s --max-time 5 -o /dev/null -w "  local:    HTTP %{http_code}\n" http://[2a02:8010:6680:f0::10]/'
-echo "-- from zen3 (LAN -> route f0::/64 -> wg-friend -> tunnel -> fdev0):"
-ssh -o BatchMode=yes -o ConnectTimeout=6 cjdell@192.168.49.50 'curl -6 -s --max-time 8 -o /dev/null -w "  zen3:     HTTP %{http_code}\n" http://[2a02:8010:6680:f0::10]/'
+$VM 'curl -s --max-time 5 -o /dev/null -w "  local:    HTTP %{http_code}\n" http://[2a02:8010:6680:8472::10]/'
+echo "-- from zen3 (LAN -> route :8472::/64 -> wg-friend -> tunnel -> fdev0):"
+ssh -o BatchMode=yes -o ConnectTimeout=6 cjdell@192.168.49.50 'curl -6 -s --max-time 8 -o /dev/null -w "  zen3:     HTTP %{http_code}\n" http://[2a02:8010:6680:8472::10]/'
 echo "-- body as zen3 sees it:"
-ssh -o BatchMode=yes -o ConnectTimeout=6 cjdell@192.168.49.50 'curl -6 -s --max-time 8 http://[2a02:8010:6680:f0::10]/ | head -c 300; echo'
+ssh -o BatchMode=yes -o ConnectTimeout=6 cjdell@192.168.49.50 'curl -6 -s --max-time 8 http://[2a02:8010:6680:8472::10]/ | head -c 300; echo'
 echo; echo "### done"

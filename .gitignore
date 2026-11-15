@@ -20,6 +20,15 @@ __pycache__/
 *.rar
 *.msi
 
+# --- Hand-off documents carrying live credentials --------------------------
+# docs/friend-ipv6-over-websocket.md is the shareable build guide for the
+# /64-over-WebSocket tunnel. The *implementation* is committed
+# (services/friend-tunnel.nix + the friend-router microVM); this file is the
+# printable copy that additionally spells out the live shared secrets — the
+# wstunnel upgrade path, both public keys, the /64 and what the friend can
+# reach — so it stays out of git on purpose. Regenerate it from the config.
+/docs/friend-ipv6-over-websocket.md
+
 # --- PCTV 320cx reverse-engineering scratch -------------------------------
 # The driver source lives in pctv-linux/driver/ (tracked); everything below
 # is generated capture data, extracted firmware or compiled probe binaries.
