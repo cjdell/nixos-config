@@ -192,6 +192,28 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
    with normal frames either side): match the delivery standard to what a
    viewer sees — excise bands at seams, live with speckles in the field,
    and be consistent.
+ * **Render stitched tapes per-segment, never as one whole-stitch clip**
+   (2026-11-16, after a fourth PS cycle proved it). The kit's temporal
+   filters have no knowledge of concat boundaries: qtgmc's motion
+   estimators run straight across a hard scene jump and **ghost 2–4 output
+   frames around the seam** — weaving women composited over the plaza
+   frame, noise streaks — even when the master frames at the cut are
+   frame-inspected spotless and the stitch file's own m-curve is clean.
+   No cut position avoids it (the smear followed the TO whenever the TO
+   moved); it is the render architecture. `tape-render-segs.sh`
+   (`PERSEG=1` in the tape conf) renders each segment through the kit
+   individually — each tail clamps at its own end, no filter ever sees
+   across a gap — and stream-copies the HEVC/PCM results together with a
+   duration-sum assert. Per-segment seam frames get one crisp head frame
+   (m 40-70, sharp, no cross-scene blend — first frame has no temporal
+   window; harmless, frame-verified). The sweep's seam coordinates must
+   come from the **rendered** segment files (`wseg*`), never the cut
+   files: encode priming shifts every seam a few frames. Related sweep
+   bug class found the same day: a probe that returns empty must fail
+   the sweep loudly — the buggy v3 sweep computed seam@0.000 six times
+   from unprobeable filenames and reported ALL-CLEAN while checking the
+   start of the file; a gate whose failure mode is a pass is worse than
+   no gate.
  * **Junction NCCs need an energy guard ≥8 s of overlap** and any spike must
    be frame-checked before it moves a cut: three ~0.004-0.011 "matches" in
    the batch (Basaly 1→2, Basaly 2→3, France J1/X) were all guard-edge noise
@@ -467,7 +489,7 @@ VRAM free with the LLM resident).
 | `clean.vsh`         | VapourSynth pipeline (env-var driven: `FC_SRC`/`FC_DEINT`/`FC_FIELD`/`FC_DENOISE`/`FC_CHROMA_BLUR`/`FC_CROP`) |
 | `footage-clean.sh`  | CLI orchestrator (probe → stages → encode)                    |
 | `footage-probe.sh`  | standalone "what is this file / what should I run" report     |
-| `batch/*.sh`        | multi-tape orchestration for a render box (driver: gate→cut→concat; render: kit+F@H lease; final: seam/tail sweep; queue: per-tape pipeline). Live copies run from the render host's home dir; the store paths (`FF=`, `KIT=`) pinned inside are per-host — refresh them there, not here. |
+| `batch/*.sh`        | multi-tape orchestration for a render box (driver: gate→cut→concat; render: kit+F@H lease (whole file, or `tape-render-segs.sh` per-segment for stitched tapes — the default there); final: seam/tail sweep from rendered-segment durations; queue: per-tape pipeline (`PERSEG=1`)). Live copies run from the render host's home dir; the store paths (`FF=`, `KIT=`) pinned inside are per-host — refresh them there, not here. |
 
 ## Extension points (deliberately not in v1)
 

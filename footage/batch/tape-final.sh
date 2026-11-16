@@ -8,7 +8,10 @@ FF=/nix/store/9qh7i54hk78czcdvxwd78q4i1idc9mc3-ffmpeg-9.0.2-bin/bin/ffmpeg
 FP=$(sed -n "s|^FFPROBE=||p" $HOME/nixos-config/result/bin/footage-clean | tr -d "\"")
 D="$1"; O="$2"; . "$D/conf"
 W=${WORK:-$D}/seg
-ok=1; i=$(ls "$W"/seg*.mkv 2>/dev/null | wc -l)
+ok=1
+pre=seg; [ -n "$(ls "$W"/wseg*.mkv 2>/dev/null | head -1)" ] && pre=wseg
+mapfile -t SEGFS < <(ls "$W"/$pre*.mkv 2>/dev/null | sort -V)
+i=${#SEGFS[@]}
 relchk() {
   local r
   r=$($FF -nostdin -v error -ss "$2" -t 2.8 -i "$1" -vf "signalstats,metadata=print:file=-" -an -f null - 2>/dev/null | awk -v lo="$3" -v hi="$4" '
@@ -23,8 +26,8 @@ relchk() {
 }
 cum=0
 for k in $(seq 1 $((i-1))); do
-  n=$(printf %02d $k)
-  d=$($FP -v error -show_entries format=duration -of default=nw=1:nk=1 "$W/seg$n.mkv")
+  d=$($FP -v error -show_entries format=duration -of default=nw=1:nk=1 "${SEGFS[$((k-1))]}")
+  [ -n "$d" ] || { echo "SWEEP-PROBLEM — cannot probe ${SEGFS[$((k-1))]}"; exit 1; }
   cum=$(awk -v c="$cum" -v d="$d" 'BEGIN{printf "%.3f", c+d}')
   relchk "$O" $(awk "BEGIN{printf \"%.2f\", $cum-1.2}") 0.40 1.60 "seam $k @ $cum"
 done
