@@ -200,9 +200,17 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
    50 fps, so the 1.2 s window is ~60 frames; a `tr` of exactly 1 is the
    excision's own content jump (m 40–70 at normal luma — Dell 03 had one
    per seam) and passes by design — the hunted shape is a ≥2-frame
-   flash/dip cluster. A ±0.36 s window
-   (the original) misses the recovery class entirely, and a >3 threshold
-   waved through 4-frame flashes. Isolated single-frame speckles mid-content
+   flash/dip cluster. A ±0.36 s window (the original) misses the
+   recovery class entirely, and a >3 threshold waved through 4-frame flashes.
+   A window can also fail on **qtgmc-amplified texture motion** instead of
+   damage: a D10 stone-wall pan put two chroma-neutral m 37–40 frames
+   (Y 109–136, well below flash level, source m<35) inside the window and
+   flagged TEAR 3/59 (2026-11-17). The rule when a seam fails: adjudicate
+   the frames, not the number — frame sheet across the window; if they are
+   continuous sharp content (no whiteout, no blue, no striping) the seam
+   passes and the scratch is removed by hand. Re-cutting would buy a
+   viewer-invisible "fix".
+   Isolated single-frame speckles mid-content
    are inherent to tape (a census of PS2 found a half-torn frame at t=358.5
    with normal frames either side): match the delivery standard to what a
    viewer sees — excise bands at seams, live with speckles in the field,
