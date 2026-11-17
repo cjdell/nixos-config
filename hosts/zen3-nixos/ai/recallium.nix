@@ -97,6 +97,35 @@ in
   # itself. A curl exit 7 (nothing listening yet, the container is still booting)
   # used to kill the script under `set -e`, and a failed unit makes the whole
   # activation report `status 4` even though everything was applied.
+  # ---- Recallium LLM shim: force chat_template_kwargs.enable_thinking=false --
+  #
+  # Recallium asks for max_tokens=2000 on every insight/enrichment call.
+  # Strata's answer_room splits that into 1488 thinking + ~512 answer, so the
+  # JSON answer is cut mid-object (finish_reason=length) and Recallium stores
+  # the json_repair-patched result. Measured on the 2026-11-17 nightly run:
+  # 25 of 25 truncated calls needed repair, ~87 s each, ~50 min of GPU time.
+  #
+  # The 2000 is compiled into the image (analysis_executor.cpython-313-*.so,
+  # PROTECTED_BUILD=true; /api/config merely *displays* prompt_max_tokens), so
+  # the request body is the only lever. With thinking off the whole budget
+  # goes to the answer: complete JSON, no repair, a fraction of the decode.
+  #
+  # Transparent proxy: rewrites POST .../chat/completions bodies, streams
+  # everything else (SSE included) through untouched.
+  systemd.services.recallium-llm-shim = {
+    description = "Recallium LLM shim (forces enable_thinking=false)";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network.target" ];
+    after = [ "network.target" ];
+    environment.SHIM_LISTEN_PORT = "8090";
+    serviceConfig = {
+      ExecStart = "${pkgs.python3}/bin/python3 ${./recallium-llm-shim.py}";
+      DynamicUser = true;
+      Restart = "always";
+      RestartSec = 2;
+    };
+  };
+
   systemd.services.recallium-healthcheck = {
     description = "Restart Recallium container if its MCP endpoint stops responding";
     serviceConfig = {
@@ -235,9 +264,10 @@ in
         # Stable LLM endpoint for Recallium's OpenAI provider (container's
         # base_url in llm_provider_accounts id 3 is fixed at
         # http://host.containers.internal/recallium-llm). The prefix is
-        # rewritten to /v1/ and the call is proxied to the model server on
-        # loopback (:8080 - whichever of ./strata.nix / ./avalon.nix
-        # ../default.nix imports) - the same upstream as the
+        # rewritten to /v1/ and proxied to recallium-llm-shim (:8090), which
+        # adds chat_template_kwargs.enable_thinking=false and forwards to the
+        # model server on loopback (:8080 - whichever of ./strata.nix /
+        # ./avalon.nix ../default.nix imports) - the same upstream as the
         # strata.ai.chrisdell.info vhost, reached directly instead of
         # hairpinning through TLS and the public IPv6 address. Nothing in the
         # container's DB has to change: llama-server ignores the requested
@@ -245,8 +275,13 @@ in
         # llm_provider_configs still works (verified 2026-11-04: a
         # /v1/chat/completions with an unknown model returns the loaded
         # qwen3.8-flash-next).
+        #
+        # Why the shim exists: max_tokens=2000 is compiled into Recallium and
+        # Strata spends 1488 of it thinking, so every insight JSON came back
+        # truncated (25/25 needed json_repair on 2026-11-17). Thinking off
+        # gives the whole budget to the answer. See recallium-llm-shim.py.
         "/recallium-llm/" = {
-          proxyPass = "http://127.0.0.1:8080";
+          proxyPass = "http://127.0.0.1:8090";
           extraConfig = ''
             rewrite ^/recallium-llm/?(.*)$ /v1/$1 break;
             # llama-server's DNS-rebinding guard (httplib + CDM delay) refuses

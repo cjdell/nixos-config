@@ -20,7 +20,8 @@ flowchart LR
     Agent[IDE agent / chat client<br/>Cursor, Claude, opencode, Zed] -->|MCP over HTTP| Nginx[nginx :80<br/>/recallium-mcp]
     Nginx --> MCP[Recallium container<br/>MCP server :8000]
     MCP -->|OpenAI API| Nginx2[nginx :80<br/>/recallium-llm]
-    Nginx2 -->|proxy, Host: 127.0.0.1| Strata[Strata :8080<br/>/v1]
+    Nginx2 -->|proxy| Shim[recallium-llm-shim :8090<br/>enable_thinking=false]
+    Shim -->|Host: 127.0.0.1| Strata[Strata :8080<br/>/v1]
     Strata --> Engine[Qwen3.8-Flash-Next UD-IQ4_XS<br/>R9700 VRAM + RAM + CPU]
     MCP --> PG[(Postgres 17<br/>in container :5432)]
     MCP --> UI[Web UI :9000]
@@ -41,6 +42,24 @@ flowchart LR
     carries only the public names.
   - **`client_max_body_size 32m;`** — a metadata prompt carries the whole
     session and nginx's 1 MiB default would 413 it (Strata's own cap is 32 MiB).
+- **Thinking is forced off for Recallium's calls** (`recallium-llm-shim`, a
+  ~40-line stdlib Python proxy on `127.0.0.1:8090`, `hosts/zen3-nixos/ai/recallium-llm-shim.py`).
+  Recallium asks for `max_tokens=2000` on every insight/enrichment call and
+  Strata's `answer_room` spends 1488 of that on the thinking channel, so the
+  JSON answer was cut mid-object (`finish_reason=length`) and then patched by
+  Recallium's `json_repair`: on the 2026-11-17 nightly run **25 of 25**
+  truncated calls needed repair at ~87 s each (~50 min of R9700 time). The 2000
+  is compiled into the image (`analysis_executor.cpython-313-*.so`,
+  `PROTECTED_BUILD=true`; `/api/config` only *displays* `prompt_max_tokens`),
+  so the shim fixes it in the request body instead: it adds
+  `chat_template_kwargs.enable_thinking=false` (the pack's own
+  `chat_template.jinja` turns that into an empty `_think_` block) and streams
+  everything else through untouched, SSE included. Verified 2026-11-17 through
+  both `127.0.0.1:8090` and the nginx `/recallium-llm/` path: 12-token answer,
+  no `reasoning_content`, `stop` instead of `length`, and no `thinking limited to
+  1488 of max_tokens 2000` line in the Strata journal. Roll back by pointing
+  `/recallium-llm/`'s `proxyPass` back at `http://127.0.0.1:8080` and dropping
+  the unit.
 - **Model routing** — Strata serves ONE model and routes by engine, not by the
   requested name: a `/v1/chat/completions` naming any (even unknown) model
   returns the loaded `qwen3.8-flash-next-ud-iq4-xs`. So the `model_name` row in
@@ -57,7 +76,7 @@ flowchart LR
 
 | Thing | Value |
 | --- | --- |
-| LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx proxy → Strata) |
+| LLM provider | openai → `http://host.containers.internal/recallium-llm` (nginx → `recallium-llm-shim` :8090 → Strata, thinking forced off) |
 | LLM model | served by the engine: `qwen3.8-flash-next-ud-iq4-xs`. Recallium's row says `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, openai provider account id 3) — Strata ignores the name |
 | LLM GPU | R9700 (32 GB VRAM + RAM + CPU offload) — the model `hosts/zen3-nixos/ai/strata.nix` runs |
 | Embedding | `nomic-ai/nomic-embed-text-v1.5` (local, 768-dim, config id 1) |

@@ -775,9 +775,17 @@ its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
   (user `recallium` / `recallium_password`, db `recallium_memories`)
 - **Chain:** container (OpenAI provider, fixed `base_url`
   `http://host.containers.internal/recallium-llm`) → nginx `/recallium-llm/`
-  (in `hosts/zen3-nixos/ai/recallium.nix`) → **Strata on `127.0.0.1:8080/v1`** —
-  the same upstream `https://strata.ai.chrisdell.info/` serves, hit on loopback
-  instead of hairpinning TLS. Switching backend = edit that one location block
+  (in `hosts/zen3-nixos/ai/recallium.nix`) → **`recallium-llm-shim` on
+  `127.0.0.1:8090`** → **Strata on `127.0.0.1:8080/v1`** — the same upstream
+  `https://strata.ai.chrisdell.info/` serves, hit on loopback instead of
+  hairpinning TLS. The shim (`hosts/zen3-nixos/ai/recallium-llm-shim.py`,
+  `recallium-llm-shim.service`) exists because Recallium asks for
+  `max_tokens=2000` and Strata's `answer_room` spends 1488 of it thinking, so
+  every insight answer came back truncated and `json_repair`-patched (25/25 on
+  the 2026-11-17 nightly run, ~87 s each). The 2000 is compiled into the image
+  (`PROTECTED_BUILD`), so the shim adds
+  `chat_template_kwargs.enable_thinking=false` to `/chat/completions` bodies and
+  streams the rest untouched. Switching backend = edit that one location block
   + `nixos-rebuild switch`; no DB change (see docs/recallium.md). The old
   `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it, and
   `config.ai.recalliumGpu` is now read only by the disabled `llama-swap.nix`.
