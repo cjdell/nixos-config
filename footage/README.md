@@ -178,6 +178,17 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
    tail trim with the same scan before choosing `--to`. The 0.4 s blue-guard
    from the Dell 02 lesson is necessary and nowhere near sufficient: 11 of
    17 batch seams still had flash or recovery residue inside it.
+  * **Quiet-blue drops hide their shoulders — treat an empty shoulder scan
+   as unmeasured, not as clean.** Dell 04's storms (2026-11-16/17 batch)
+   had source m-curves below the noise floor across the whole scan, and
+   cuts built from frame-exact blue with ±0.4–0.6 s margins still leaked
+   ONE onset-flash frame into the kept tail and TWO recovery-dip frames
+   into the resume — caught only by the rendered-side seam sweep
+   (YDIF 37–57 clusters; single-frame Y168 flash, Y84 dip; the storms
+   themselves ≤ 2.6 s). For the quiet-blue class use
+   `TO = first_blue − 0.9`, `resume = last_blue_end + 1.4`. Per-segment
+   render made the repair ~30 min (`d4-repair` pattern: re-cut + re-render
+   only the flagged wsegs, re-concat, re-sweep) instead of a full pass.
  * **Keep blue strict — compensate with the shoulder scan, not the threshold.**
    The loose `d>45` variant shreds content: France 1997's 10-minute pool
    sequence read as 97 % "loose blue" (frames: blue water; strict detector:
@@ -185,7 +196,11 @@ and `--crf 0` with `--codec x264` (bit-exact — see "Lossless?" below).
    is a *luminance collapse* (Y≈47); everything dropout does that is NOT
    dark-blue belongs to the line-difference scan above, not to blue.
  * **Final sweep acceptance = per-frame `max(YDIF,UDIFF,VDIFF)>35` in
-   ±1.0 s windows at every seam and tail, `tr>1` fails.** A ±0.36 s window
+   ±1.0 s windows at every seam and tail, `tr>1` fails.** Watch output is
+   50 fps, so the 1.2 s window is ~60 frames; a `tr` of exactly 1 is the
+   excision's own content jump (m 40–70 at normal luma — Dell 03 had one
+   per seam) and passes by design — the hunted shape is a ≥2-frame
+   flash/dip cluster. A ±0.36 s window
    (the original) misses the recovery class entirely, and a >3 threshold
    waved through 4-frame flashes. Isolated single-frame speckles mid-content
    are inherent to tape (a census of PS2 found a half-torn frame at t=358.5
@@ -489,7 +504,7 @@ VRAM free with the LLM resident).
 | `clean.vsh`         | VapourSynth pipeline (env-var driven: `FC_SRC`/`FC_DEINT`/`FC_FIELD`/`FC_DENOISE`/`FC_CHROMA_BLUR`/`FC_CROP`) |
 | `footage-clean.sh`  | CLI orchestrator (probe → stages → encode)                    |
 | `footage-probe.sh`  | standalone "what is this file / what should I run" report     |
-| `batch/*.sh`        | multi-tape orchestration for a render box (driver: gate→cut→concat; render: kit+F@H lease (whole file, or `tape-render-segs.sh` per-segment for stitched tapes — the default there); final: seam/tail sweep from rendered-segment durations; queue: per-tape pipeline (`PERSEG=1`)). Live copies run from the render host's home dir; the store paths (`FF=`, `KIT=`) pinned inside are per-host — refresh them there, not here. |
+| `batch/*.sh`        | multi-tape orchestration for a render box (driver: gate→cut + per-segment duration assert→concat, `SKIPCONCAT=1` skips the raw concat rebuild — single-file tapes rendered per-segment don't need 2× tape size of NFS written for nothing; render: kit+F@H lease (whole file, or `tape-render-segs.sh` per-segment for stitched tapes — the default there); final: seam/tail sweep from rendered-segment durations; queue: per-tape pipeline (`PERSEG=1`)). Live copies run from the render host's home dir; the store paths (`FF=`, `KIT=`) pinned inside are per-host — refresh them there, not here. |
 
 ## Extension points (deliberately not in v1)
 

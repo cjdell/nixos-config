@@ -1,10 +1,16 @@
 #!/run/current-system/sw/bin/bash
-# Generic stitch driver for batch tapes. Input: $1 = working dir containing
-#   conf: SRC_<tag>=<path> lines, OUT=<stitched path>, optional OSD= rect
+# Generic stitch/cut driver for batch tapes. Input: $1 = working dir containing
+#   conf: SRC_<tag>=<path> lines, STITCHED=<stitched path>, WORK,
+#         optional OSDARG, PERSEG=1, SKIPCONCAT=1
 #   cuts: <tag> <ss> <to>  (tab/space separated, concat order)
-# Does: per-edge deep gate (relative-pts, 0.4s, thresh d>45) -> cuts on NFS
-# -> sum-probed-duration assert -> seam check on stitched -> STITCH2-OK /
-# *_FAIL markers. No render here.
+# Does: per-edge deep gate (relative-pts, 0.4s, strict-blue) -> cuts on NFS
+# -> PER-SEGMENT DURATION ASSERT (probed duration vs to-ss, >0.30s = the
+#    source's packet timestamps or the input seek lie at that spot — refuse
+#    to render) -> concat + seam check -> STITCH-OK / DRIVER-READY.
+# SKIPCONCAT=1 (single-file tapes rendered per segment): stops after the
+#   duration assert — the raw concat is identical content and the final
+#   sweep verifies seams on the RENDERED watch copy anyway. No 119 GB of
+#   NFS written for nothing.
 set -uo pipefail
 export PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin
 FF=/nix/store/9qh7i54hk78czcdvxwd78q4i1idc9mc3-ffmpeg-9.0.2-bin/bin/ffmpeg
@@ -42,7 +48,18 @@ for row in "${CUTS[@]}"; do
   eval "src=\$SRC_$tag"
   i=$((i+1)); n=$(printf %02d $i)
   $FF -nostdin -v error -y -ss "$ss" -to "$to" -i "$src" -c copy -avoid_negative_ts make_zero "$W/seg$n.mkv" || { echo "DRIVER-FAIL cut$n"; exit 1; }
+  d=$($FP -v error -show_entries format=duration -of default=nw=1:nk=1 "$W/seg$n.mkv")
+  dev=$(awk -v d="$d" -v e="$to" -v s="$ss" 'BEGIN{x=d-(e-s); printf "%.3f",(x<0)?-x:x}')
+  echo "  seg$n probed=$d expected=$(awk -v e="$to" -v s="$ss" 'BEGIN{printf "%.3f",e-s}') dev=$dev"
+  awk -v x="$dev" 'BEGIN{exit !(x<=0.30)}' || { echo "DRIVER-FAIL seg$n duration dev $dev (seek/ts drift)"; exit 1; }
 done
+echo "$(date +%T) cuts verified"
+if [ "${SKIPCONCAT:-0}" = 1 ]; then
+  echo "SKIPCONCAT: no stitched rebuild (per-seg render mode)"
+  echo "DRIVER-READY"
+  echo "DRIVER-DONE"
+  exit 0
+fi
 sum=0
 for k in $(seq 1 $i); do
   n=$(printf %02d $k)
