@@ -85,11 +85,11 @@
       description = "llama-swap router (r9700) serving litellm's LLM calls (unused while llama-swap is disabled)";
     };
 
-    # Which Qwen3.8-Flash-Next build Strata serves (see ./strata.nix, which
-    # carries the GGUF/pack paths and the per-model engine args for each).
-    # Both packs are prepared by hand under /home/cjdell/Strata/pack, and the
-    # unit's ConditionPathExists refuses to start one that has not been built,
-    # so switching is one line + a rebuild - never a surprise at boot.
+    # Which model Strata serves (see ./strata.nix, which carries the GGUF/pack
+    # paths and the per-model engine args for each). Every Flash-Next pack is
+    # prepared by hand under /home/cjdell/Strata/pack, and the unit's
+    # ConditionPathExists refuses to start one that has not been built, so
+    # switching is one line + a rebuild - never a surprise at boot.
     #   "iq3s"       GSQ-RCO IQ3_S, 78 GB, all experts in RAM (live since
     #                2026-10-06; docs/strata.md)
     #   "ud-iq4-xs"  Unsloth UD-IQ4_XS, 93.7 GB, ~4-bit dynamic: +8.6 GiB of
@@ -100,14 +100,28 @@
     #                four shards instead of three, 345 of 1224 tensors re-typed and
     #                33 expert layers moved to Q5_0.  Needs the engine 0.1.57 that
     #                ships with Strata 0.2.11.
+    #   "qwen36-ud-q4-k-xl"
+    #                Qwen3.6-35B-A3B (the second FAMILY, not a Flash-Next pack):
+    #                35B MoE / 3B active / 256 experts, Unsloth's 22.85 GB MTP
+    #                GGUF read in place by the engine's own q36 path (no pack,
+    #                no expert profile, MTP drafts from the file), 128K context
+    #                chosen so every expert holds in the R9700's VRAM; ~180
+    #                tok/s decode measured there by upstream vs 60-78 for
+    #                Flash-Next, at a third of the context and a quarter of the
+    #                model.  Needs scripts/fetch-strata-qwen36-35b-a3b.sh +
+    #                scripts/repack-strata-qwen36-35b-a3b.sh (tokenizer only)
+    #                and the 0.2.15 engine. The config's model_name
+    #                ("qwen3.6-35b-a3b-ud-q4_k_xl") carries the arch string
+    #                serve parses, hence the exact spelling.
     strataModel = lib.mkOption {
       type = lib.types.enum [
         "iq3s"
         "ud-iq4-xs"
         "ud-iq4-xs-v31"
+        "qwen36-ud-q4-k-xl"
       ];
       default = "iq3s";
-      description = "the quant Strata serves: iq3s (GSQ-RCO) or ud-iq4-xs[-v31] (Unsloth)";
+      description = "the model Strata serves: iq3s (GSQ-RCO), ud-iq4-xs[-v31] (Unsloth Flash-Next) or qwen36-ud-q4-k-xl (Qwen3.6-35B-A3B)";
     };
   };
 

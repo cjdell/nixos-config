@@ -1211,3 +1211,102 @@ answer about the picture, and `prompt_tokens` should be roughly (image tokens + 
   that is expected, not a failure.
 - `# ./llama-swap.nix` and the strata module are mutually exclusive on this
   box: both target the R9700 and tens of GB of RAM.
+
+## v0.2.15, and the second family: Qwen3.6-35B-A3B (prepared 2026-11-18)
+
+**Pin.** `c77572806996349b49995e4f98d41b5294d36a21`, tag **v0.2.15** (released
+2026-11-16; v0.2.14 and a v0.2.14.1 Control hotfix came out with it while we were
+on main-13eedf55). First release pin since 0.2.13.1. **Engine 0.1.59.1 → 0.1.60/
+0.1.61** — the source `project()` reads 0.1.61, but the release feed still ships
+the 0.2.14 binaries as 0.1.60, so a source build here is 0.2.14's engine plus all
+of main since; same posture as the old bleeding-edge pins. `strata --version`
+prints `strata 0.1.61` on our build.
+
+**What 0.2.14 did to the card we run** (the release note's own headline): the
+prompt path runs **Strata's own kernels instead of llama.cpp's MMQ** — "answers
+can differ from 0.2.13 in some words", R9700 256-token prompt 396 → 255 ms, 1K
+877 → 440 ms, 2K 1942 → 1041 ms. That is `STRATA_PREFILL_MMQ=ON` (the default)
+with the new `STRATA_MMQ` (decode-side MMQ) defaulting OFF — which is byte-for-
+byte the shape of our existing `-DSTRATA_PREFILL_MMQ=ON` flag, so **no cmakeFlags
+changed**; the behaviour change rides with the version bump regardless. Given the
+`STRATA_PF_FUSED_Q50` decision above (this box barely prefills: p50 223 tokens),
+the win is real but small here; the "answers can differ" clause is the part to
+remember for any future A/B. Also in 0.2.14 for our lane: the 32 GB-R9700 DFlash2
+"prompt stall never reproduced with the fix" honesty note (the gfx1201 `AUTO_MTP`
+gate stays, our explicit `"drafting": "dflash2"` stays), and engine 0.1.60
+"pauses the GPU 115–810 ms at engine and vision starts" — a startup cost, and a
+second reason the card is a lease, not an allocation.
+
+**The build** (all verified against the pinned tree before building, then by the
+build log): `strata-kernel-audit.diff` re-based with 18/19 hunks clean and one
+hand-place — upstream's new `native_expert_i8*` block landed inside the
+iq_kernels.cu hunk #1 anchor; re-anchored after `native_grouped_set_v1`, and the
+regenerated file applies on a pristine checkout at `--fuzz=0` with **zero**
+offsets (third clean re-base in a row). Both fp16-saturation clamps still needed
+and still unique: `kv_q8.cu:55` (file still has no `65504` at all) and
+`prefill/kernels.cu:2558` (`hf_sat` now at :69). The `server.py` died_note
+rewrite targets moved (:443 def / :8716 call / :8728 ValueError) and remain
+unique. **The `llama` fetchFromGitHub is gone**: v0.2.15 vendors llama.cpp at the
+same `3cf03257` in `third_party/strata-llama` and `tools/vision` defaults to it —
+`strata-vision` builds and links from it without `-DLLAMA_DIR`.
+
+**The second family.** `strata --families` on this build prints
+`qwen4exp qwen35moe`, and the `qwen35moe` engine is why this bump was worth doing
+the same day: `ai.strataModel` gained **`qwen36-ud-q4-k-xl`** — Unsloth's
+`Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` (22,853,663,008 B, sha `55983c5a…`, HF rev
+`5bc3e238…`, all from setup.py's `QWEN36_FILES`, pinned in
+`scripts/fetch-strata-qwen36-35b-a3b.sh`). "35B a3b" = 35B total, **3B active**
+(256 experts, top-8), the naming scheme of `a17b`/`a3b` in the Flash-Next repo
+names; the GGML arch is `qwen35moe`, the code dir `src/qwen35/` and the engine
+file `q36_engine.cu`, which is why sources spell both 3.5 and 3.6 — the catalog
+name is **Qwen3.6-35B-A3B** (no Qwen3.5-35B-A3B exists). It shares Flash-Next's
+tokenizer and its vision encoder family (Unsloth ships `mmproj-F16.gguf`, same
+qwen3vl_merger), and Apache-2.0.
+
+It runs on an **own path**, which is a different machine than the Flash-Next
+pack pipeline and is why the `models` entry has its own shape (`ownPath = true`):
+
+- **No pack.** The engine reads the GGUF in place and places the experts itself
+  (every one in VRAM where they fit; otherwise the hybrid mode: most-used in
+  VRAM, the rest by a CPU pool). So: no `iq_pack.py`, no `--compat-bf16`, no
+  expert profile, no PLE shard, no `--resident-budget-gib`, and the only
+  hand-prepared artifact is the **tokenizer** pack
+  (`tools/strata_tokenizer.py` → `/home/cjdell/Strata/pack/qwen36-ud-q4-k-xl/
+  tokenizer/`, round-trip 16/16 — `scripts/repack-strata-qwen36-35b-a3b.sh`).
+- **Drafting from inside the file.** The `-MTP-GGUF` repo carries an MTP block
+  and `--mtp N` on this path is a **draft count per step**, not the Flash-Next
+  draft-layer folder (doctor.py: "--mtp 2 is the draft depth, not a folder
+  (#3298)"). The run line is setup.py's `install_own_path` step 7 verbatim:
+  `--native <gguf> --max-context 131072 --prefill auto --mtp 2` (2 = their pin,
+  "measured best on the R9700"). The config therefore carries **no `drafting`
+  key** — serve's DFlash2 layer is Qwen3.8-Flash-Next by design
+  (`supported_model()`: "another model: its drafting is not this choice's
+  business (… Qwen3.6…)") and a reshaped run line on this path would corrupt
+  the `--mtp` count — and one new key, `arch = "qwen35moe"`, which is how serve
+  picks the family's card defaults (temperature 1.0 / top_p 0.95 / top_k 20 /
+  presence_penalty 1.5) and matches `FAMILY_MODEL_NAMES`.
+- **131072, not 262144, and no KV knobs.** `strata_control/own_path_fit.py`
+  costs the card as 8.55 GiB base + 1.31 GiB hybrid minimum + **47,104 B/token**
+  — fp32 KV of the 10 attention layers plus the MTP block, plus the engine's
+  full-context fp16 K/V for prompt attention — so `--kv int8` and the whole
+  `--conversation-cache-*`/`--rope-*` apparatus do not exist here (262144 is
+  trained; this path has no rope scaling yet). On 32 GiB with UD-Q4_K_XL
+  (experts ≈ 21.2 GB + dense ≈ 4.5) one **128K session is right at "every
+  expert stays in VRAM"**, which is what the speed depends on: upstream measured
+  on this exact card "4 slots left 15 of 256 experts per layer, decode 81 tok/s
+  against ~180" — 180 against Flash-Next's 60–78, for a model a quarter the
+  size and a third of the context. Consequently `own_path_parallel_recommend()`
+  returns 0 on a 32 GB card, the entry runs no `"parallel"`, and
+  `configFileBatch` gets `parallel = 1` for this family so `strata-batch on`
+  can never talk a q36 start into slot-carving.
+- **Name gate, again.** own_path_fit parses the size back out of
+  `model_name` for the startup context check (`from_model_name`) and
+  `FAMILY_MODEL_NAMES` maps arch → expected name, so the config's name is
+  `qwen3.6-35b-a3b-ud-q4_k_xl` — the `-<size-lower>` suffix is free, the prefix
+  is not.
+
+**Deployment note**: everything above is built and evaluated (the q36 config
+renders from the module with the 0.2.15 engine, conditions and all), the files
+are on disk and hash-verified, but **`ai.strataModel` stays `ud-iq4-xs-v31`** —
+Flash-Next serves :8080 until the switch is deliberately made; a switch that
+changes the engine pin restarts the live engine with the same model regardless.

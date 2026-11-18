@@ -1445,6 +1445,42 @@ almost entirely fixed cost.
   (own_path_fit parses the size back out of it). Serving it needs the 0.2.15
   engine (`--families` → `qwen4exp qwen35moe`); switching = one
   `ai.strataModel` line + rebuild + restart, same ConditionPathExists contract.
+- **Model choice via the API — `strata-swap`, live on `:8080` since 2026-11-18.**
+  The engine is still one-model-per-process; what changed is the front.
+  `strata-swap.py` (system unit `strata-swap`, root because it drives
+  `systemctl`, loopback-only) owns **127.0.0.1:8080 — which every nginx
+  location already proxied — so no client URL changed**; the engines moved
+  behind it (primary `strata.service` → `:8091`, partner `strata-second.service`
+  → `:8092`, the partner = the other of {`config.ai.strataModel`, q36}, built
+  by the same `finalize (runConfigBaseFor mm …)` path so the two configs
+  cannot drift; verified byte-identical JSON hashes for the primary across the
+  refactor). Its contract (full rationale in the file header):
+  `GET /v1/models` advertises **both** ids (the other one listed
+  `"unloaded"` — serve's own loads-on-use form); a request whose `model`
+  **exactly** names the other engine triggers a SWAP — stop live unit → wait
+  `amd-smi` free VRAM (`vram_min_mib`: flash-next 30000 / q36 25000; NOTE the
+  amd-smi 7.2.4 `metric -m --json` shape is `gpu_data[0].mem_usage.free_vram`,
+  not a flat list — the flat read silently returned None = gate skipped until
+  fixed the same day) → `systemctl start strata-second` → poll `/v1/status`
+  `loaded:true` (≤25 min,
+  inside nginx's 3600 s location timeout) → forward the buffered request. A
+  failed bring-up **rolls the stopped unit back** and 503s; with nothing live
+  the shim **never starts an engine** (503 `gpu-mode llm`) — the lease
+  invariant stays gpu-mode's. Unknown/absent `model` = untouched pass-through
+  to whatever is live, which is what keeps Recallium's stale DB row and every
+  name-blind client on the live model. Consequences to remember: the first
+  request after a name change pays the model load (measured 2026-11-18, warm
+  page cache: flash→q36 26 s, q36→flash 45 s; cold cache = minutes — the shim
+  waits `loaded:true` up to 25 min); a swap interrupts
+  the other model's in-flight streams (journal line `SWAP <id> -> <id>`);
+  name-blind traffic follows whichever model is live — llama-swap-era
+  semantics, back with exactly two entries and a Nix-built table
+  (`swapConfig`). `gpu-mode llm` restores the **primary** and stops
+  strata-second first (warning + prompt if a turn is in flight);
+  `gpu-mode sd|game` stop both LLM units; a reboot always comes back on
+  `ai.strataModel` (only `strata.service` has wantedBy). `strata-batch` still
+  means flash-next-batching; on the ownPath partner the batch2 config is
+  `parallel = 1`, a documented no-op.
 - **A long-context reply can collapse to one repeated token (or a thinking-only
   turn with no answer).** This is the **fp16-overflow #606 class**, not a model
   quality issue: a `q8_1` activation block stores its scale and 32-value sum as

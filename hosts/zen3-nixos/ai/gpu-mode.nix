@@ -25,6 +25,7 @@
         lib.makeBinPath [
           pkgs.coreutils
           pkgs.curl
+          pkgs.gnugrep
           pkgs.gnused
           pkgs.rocmPackages.amdsmi
           pkgs.systemd

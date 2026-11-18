@@ -43,11 +43,11 @@
 # nginx: owns the "/" location on the IP vhost (llama-swap's old root) and a
 # public strata.ai.chrisdell.info vhost.
 #
-# Two packs, one switch. `config.ai.strataModel` (default "iq3s", defined in
-# ./default.nix) picks which GGUF/pack pair and which per-model engine args this
-# unit uses; everything else (MTP runtime, expert profile, context, KV policy,
-# nginx, the config JSON) is shared. The second pack is Unsloth's UD-IQ4_XS -
-# 93.7 GB in three shards instead of 78 GB in two:
+# Two families, one switch. `config.ai.strataModel` (default "iq3s", defined in
+# ./default.nix) picks the GGUF/pack pair and the per-model engine args;
+# everything else (the R9700 lease, KV policy, nginx, the config JSON shape) is
+# shared. Family one is the Qwen3.8-Flash-Next pack pipeline (MTP runtime,
+# expert profile, PLE shard):
 #
 #   scripts/fetch-strata-udiq4xs.sh       # 3 shards, size + sha256 verified
 #   scripts/repack-strata-udiq4xs.sh      # iq_pack.py --compat-bf16 (REQUIRED here)
@@ -61,6 +61,13 @@
 # at 255K vs 41). 262144 ctx itself is unaffected - the int8 KV is 13.7 KB/token
 # and quant-independent. Switch only when that trade is wanted; the unit will not
 # start a pack that has not been prepared (ConditionPathExists).
+#
+# Family two is Qwen3.6-35B-A3B (models.qwen36-ud-q4-k-xl below): an
+# own-path engine (src/qwen35 in the tree, ggml arch qwen35moe) that reads ONE
+# GGUF in place - no pack, no expert profile, no PLE, and drafting from the
+# file's own MTP block (--mtp N is a draft COUNT on that path, not a folder).
+# Fetch/pack it with scripts/fetch-strata-qwen36-35b-a3b.sh +
+# scripts/repack-strata-qwen36-35b-a3b.sh (tokenizer only); the entry says why.
 
 let
   strata = pkgs.callPackage ./strata-package.nix { };
@@ -151,13 +158,126 @@ let
         "56"
       ];
     };
+
+    # Qwen3.6-35B-A3B ("the 35B a3b") - the SECOND FAMILY, live as an option
+    # since 2026-11-18 (engine 0.2.15).  Upstream's OWN_PATH_FAMILIES.qwen36
+    # (setup.py): 35B MoE, 3B active (256 experts, top-8), "a smaller cousin of
+    # Qwen3.8-Flash-Next with the same tokenizer", Apache 2.0.  GGML architecture
+    # `qwen35moe` - the family directory in the tree is src/qwen35/ and its engine
+    # file q36_engine.cu, which is why sources say both 3.5 and 3.6; the CATALOG
+    # NAME is Qwen3.6-35B-A3B (there is no Qwen3.5-35B-A3B entry), and serve's
+    # own_path_fit matches model_name on the exact prefix "qwen3.6-35b-a3b-".
+    #
+    # An OWN-PATH engine: `strata` switches to it by the GGUF's architecture
+    # (STRATA_HAVE_QWEN35, linked by our HIP build - cmake/strata_gpu_engine.cmake
+    # "the engine path for the same family").  ONE GGUF, read in place: NO pack,
+    # NO expert profile, NO PLE shard, NO RAM budget - the engine places the
+    # experts itself (every one in VRAM where they fit, else the hybrid mode:
+    # most-used in VRAM, the rest computed by the CPU pool, STRATA_Q36_CPU_POOL).
+    # Drafting is the MTP block INSIDE the GGUF: on this path `--mtp N` is a
+    # draft COUNT per step, not the Flash-Next draft-LAYER folder (doctor.py:
+    # "--mtp 2 is the draft depth, not a folder (#3298)"), so the shared mtpDir,
+    # the DFlash2 machinery (its _SUPPORTED_NAME regex is Qwen3.8-only, and
+    # serve's drafting.apply() deliberately skips other families), --expert-cache
+    # and --conversation-cache-* all do NOT apply.  The run line below mirrors
+    # setup.py's install_own_path step 7 verbatim; --max-context is NOT
+    # YaRN-extended (that path has no rope scaling yet; 262144 trained).
+    #
+    # Why 131072: strata_control/own_path_fit.py sizes the card as 8.55 GiB base
+    # + 1.31 GiB hybrid minimum + 47,104 B/token (fp32 KV of the 10 attention
+    # layers + the MTP block, PLUS the engine's full-context fp16 K/V for prompt
+    # attention - so `--kv int8` does not exist here) and defaults to 128K.
+    # On this 32 GiB R9700 with UD-Q4_K_XL (22.85 GB: experts ~21.2 + dense ~4.5)
+    # one 128K session is right at "every expert stays in VRAM": upstream's own
+    # measurement HERE - "a 32 GB R9700 at 128K: 4 slots left 15 of 256 experts
+    # per layer, decode 81 tok/s against ~180" - which is both why parallel
+    # slots are NOT offered on this card (own_path_parallel_recommend returns 0,
+    # mirrored in configFileBatch below) and the expected solo speed: ~180 tok/s
+    # decode, vastly more than Flash-Next's 60-78, at the cost of 128K not 384K
+    # context and a 4x smaller model.  262144 needs ~11.1 GiB of KV + the same
+    # weights - it fits on paper, but it crosses into "experts to CPU" territory
+    # upstream never measured on this card; raise only with fresh eyes open.
+    #
+    # model_name MUST keep the "qwen3.6-35b-a3b-" prefix + the size's lower-case
+    # form: own_path_fit.from_model_name parses the size back out of it for the
+    # startup context check, and FAMILY_MODEL_NAMES maps arch->name.
+    # `rec`: this entry builds nativeGguf/args/preconditions from its own
+    # ggufDir/packDir (the Flash-Next entries above repeat literal paths instead).
+    qwen36-ud-q4-k-xl = rec {
+      ownPath = true;
+      arch = "qwen35moe";
+      ggufDir = "/home/cjdell/Models/Qwen3.6-35B-A3B-MTP-GGUF";
+      packDir = "${modelDir}/pack/qwen36-ud-q4-k-xl"; # tokenizer ONLY (strata_tokenizer.py)
+      nativeGguf = "${ggufDir}/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf";
+      pleGguf = null;
+      # Unsloth's picture reader for this file (same qwen3vl_merger projector
+      # family as Flash-Next's, so OUR strata-vision build - the pinned
+      # llama.cpp's mtmd - reads it).  It lives in ggufDir: like every model
+      # file it stays OUT of the store (scripts/fetch-strata-qwen36-35b-a3b.sh).
+      mmproj = "${ggufDir}/mmproj-F16.gguf";
+      modelName = "qwen3.6-35b-a3b-ud-q4_k_xl";
+      context = 131072;
+      args = [
+        "--native"
+        nativeGguf
+        "--max-context"
+        (toString context)
+        "--prefill"
+        "auto"
+        # 2 drafts per step - setup.py's own pin, "measured best on the R9700".
+        "--mtp"
+        "2"
+      ];
+      # The engine reads the GGUF itself; the only hand-prepared parts are the
+      # tokenizer pack (scripts/repack-strata-qwen36-35b-a3b.sh) and the files.
+      preconditions = [
+        nativeGguf
+        mmproj
+        "${packDir}/tokenizer/vocab.json"
+      ];
+    };
   };
 
   model = config.ai.strataModel;
   m = models.${model};
 
+  # The Flash-Next pack pipeline vs the own-path engine (see the models map):
+  # ownPath entries carry their complete `args`, `mmproj`, `context` and
+  # `preconditions`; the shared run line below is Flash-Next-only.
+  ownPath = m.ownPath or false;
+
+  # ---- the swap pair (strata-swap, ./strata-swap.py) ------------------------
+  # One card cannot host both engines, but the OpenAI `model` field can still
+  # *choose* between them: strata-swap.service owns :8080 (every nginx location
+  # already points there) and behind it two serve processes live on loopback:
+  #
+  #   strata.service         config.ai.strataModel        127.0.0.1:8091  (wantedBy)
+  #   strata-second.service  the OTHER of the pair        127.0.0.1:8092  (shim-only)
+  #
+  # The pair is {flash-next v31, Qwen3.6-35B-A3B} whichever way ai.strataModel
+  # points; the partner never starts at boot (no wantedBy) and the shim only
+  # ever SWAPS between them while one is already live — it never starts an
+  # engine onto the off-lease card (./gpu-mode.nix owns that lease). A request
+  # whose `model` names neither (absent included) goes to the live engine
+  # untouched, which is how Recallium's name-blind calls keep working.
+  # Ports: 8081 llama-swap (disabled), 8085 sd, 8086 lfm3, 8090 recallium-shim
+  # are the neighbours; 8091/8092 are the loopback-only engine slots.
+  secondModel = if model == "qwen36-ud-q4-k-xl" then "ud-iq4-xs-v31" else "qwen36-ud-q4-k-xl";
+  m2 = models.${secondModel};
+  swapPort = 8080;
+  primaryPort = 8091;
+  secondPort = 8092;
+  # What VRAM must be free before each engine may start, per the shim's
+  # amd-smi gate: flash-next's cache auto-fill wants essentially the whole card
+  # (loaded, it leaves ~666 MiB), q36 needs its ~25.8 GiB of weights plus
+  # graphs at 128K. The gate is a safety margin against a not-yet-dead
+  # predecessor, not a sizing reservation; `before_load` (stop sd-server) is
+  # already in both configs.
+  vramMinFor = mm: if mm.ownPath or false then 25000 else 30000;
+
   # The profile ships in the repo; the copy in the store is fine (the engine
-  # only reads it).
+  # only reads it). Flash-Next only: the own-path engine places its experts
+  # itself and setup.py writes no --expert-profile for Qwen3.6.
   expertProfile = "${strata}/share/strata/data/expert-profile.bin";
 
   # ISTA's vision encoder for Flash-Next: a 27-layer ViT + the projector into
@@ -165,8 +285,12 @@ let
   # NOT in the store — scripts/fetch-strata-mmproj.sh puts it there and checks
   # it against upstream's pinned size + SHA-256. One file serves every
   # Flash-Next family (setup.py:388/403/413/422 all point at the ISTA GSQ-RCO
-  # repo), so switching `ai.strataModel` needs nothing extra.
-  mmproj = "/home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf";
+  # repo), so switching `ai.strataModel` needs nothing extra. An OWN-PATH
+  # family names its own (m.mmproj): Qwen3.6-35B-A3B's is Unsloth's
+  # mmproj-F16.gguf, the same qwen3vl_merger projector family, fetched by
+  # scripts/fetch-strata-qwen36-35b-a3b.sh.
+  mmprojDefault = "/home/cjdell/Models/mmproj-Qwen3.8-Flash-Next-BF16.gguf";
+  mmproj = m.mmproj or mmprojDefault;
 
   # 393216 = 1.5x the model's native 262144 window, raised from it on
   # 2026-10-15 because live traffic reached 211,459 tokens (81% of 256K).
@@ -195,90 +319,113 @@ let
   # ~870 t/s / ~7.4 min for a full fresh 384K prompt - unmeasured here, and it
   # only applies to prompts that actually go past 262144, never to the 60-210K
   # requests we actually serve. 524288 was rejected: 2x YaRN and ~11 min.
-  context = 393216;
+  # (Flash-Next; own-path entries carry their own context - the models map.)
+  flashContext = 393216;
+  context = m.context or flashContext;
 
   # Mirrors setup.py's args for the 2-shard native IQ3_XXS pack (setup.py:4224),
   # with --kv int8 and KV streaming (--kv-resident) for the long context.
   # --ple-gguf is the shard holding the per_layer_token_embd table (shard 2).
-  engineArgs = [
-    "--pack"
-    m.packDir
-    "--native"
-    m.nativeGguf
-  ]
-  ++ lib.optionals (m.pleGguf != null) [
-    "--ple-gguf"
-    m.pleGguf
-  ]
-  ++ [
-    "--expert-profile"
-    expertProfile
-    "--expert-cache"
-    "auto"
-    "--prefill"
-    "auto"
-    "--spec"
-    "4"
-    "--spec-min-p"
-    "0.5"
-    "--mtp"
-    mtpDir
-    "--max-context"
-    (toString context)
-    # Required by the 393216 above - see the comment there. The engine reads
-    # rope scaling from the model file first and this GGUF declares none, so
-    # without these two flags the extra 131072 tokens are pure extrapolation.
-    # Confirm it engaged in /var/lib/strata/strata.log:
-    #   "rope scaling yarn, factor 1.5 (freq_scale ..., mscale ...), --max-context 393216 against a trained context of 262144"
-    "--rope-scaling"
-    "yarn"
-    "--rope-scale"
-    "1.5"
-    "--kv"
-    "int8"
-    "--kv-resident"
-    "32768"
-    # ---- parked conversations (the multi-agent cache) --------------------
-    # A chat or an agent resends its whole conversation on every turn.  By
-    # default the engine keeps exactly ONE live session, so when an agent and
-    # its subagents alternate requests they throw each other's KV away and
-    # every turn re-reads the whole prompt from token 0.  Observed here before
-    # this change: a 92,571-token prompt read at ~1.6K tok/s = ~56 s for a turn
-    # that should have read a few hundred tokens, and the engine's own request
-    # log showed reused=0 on every request that followed a different
-    # conversation (consecutive turns of the same one reused 68-76K of ~75-85K).
-    # Parking keeps up to `slots` independent conversations in host RAM (their
-    # K/V pages + the ~118 MB/turn checkpoints) and restores the one a request
-    # continues.  Matching is by exact token/image prefix only - no client
-    # session id - so it is transparent to Pi and its subagents.  It costs host
-    # RAM, not VRAM, and the cache slot is a switch-time decision: it degrades
-    # to a fresh read, never a failure.
-    #
-    # Sizing for this box (94 GiB RAM, int8 KV 12,672 B/token, but a PARKED
-    # conversation costs ~15-18 KB/token - measured from two live
-    # "restored N tokens (live)" deltas, 1.2-1.4x the raw KV because it also
-    # carries the GDN/SSM state - PLUS a per-conversation snapshot term that
-    # peaked at 3.68 GiB.  So one FULL-LENGTH 393216 conversation is
-    # ~5.7 GiB + ~3.7 GiB = ~9.4 GiB, and the old 12288 budget (which live
-    # traffic had filled exactly: max bytes=12,852,981,612, evictions=100)
-    # would then hold one max-length conversation and nothing else - i.e. it
-    # stops working at the moment an agent and its subagent both need a slot.
-    # 16 GiB keeps two of them parkable.  Past the budget the
-    # least-recently-used conversation is evicted, so this is a cap, not a
-    # reservation.  `--conversation-cache-min-free-mib` (default 2560) is the
-    # RAM floor: parking is skipped when there is no room.
-    "--conversation-cache-mib"
-    "16384"
-    "--conversation-cache-slots"
-    "12"
-    # Only park conversations worth a slot; one-shot probes / titles /
-    # classification calls are cheap to re-read and must not evict a long
-    # agent conversation (the log line is "skip parking (N tokens, below the M
-    # minimum)").  2048 also skips the root-only checkpoint of a tiny request.
-    "--conversation-cache-min-tokens"
-    "2048"
-  ]
-  ++ m.extraArgs;
+  # For an OWN-PATH entry (Qwen3.6) the whole block below is Flash-Next-only:
+  # the entry's own `args` (setup.py's install_own_path step 7 verbatim) runs
+  # instead - the q36 engine reads the GGUF itself and setup.py calls --rope-
+  # scaling / --kv / --resident-budget-gib / --expert-profile "Flash-Next
+  # settings" the q36 model "does not use".
+  #
+  # Parameterised by model (strata-swap, ./strata-swap.py): whichever entry is
+  # the primary (config.ai.strataModel) and whichever is the swap partner are
+  # built through this same function, so the two units' engine lines cannot
+  # drift apart by construction.
+  engineArgsFor =
+    mm:
+    let
+      ctx = mm.context or flashContext;
+    in
+    if mm.ownPath or false then
+      mm.args
+    else
+      [
+        "--pack"
+        mm.packDir
+        "--native"
+        mm.nativeGguf
+      ]
+      ++ lib.optionals (mm.pleGguf != null) [
+        "--ple-gguf"
+        mm.pleGguf
+      ]
+      ++ [
+        "--expert-profile"
+        expertProfile
+        "--expert-cache"
+        "auto"
+        "--prefill"
+        "auto"
+        "--spec"
+        "4"
+        "--spec-min-p"
+        "0.5"
+        "--mtp"
+        mtpDir
+        "--max-context"
+        (toString ctx)
+        # Required by the 393216 above - see the comment there. The engine reads
+        # rope scaling from the model file first and this GGUF declares none, so
+        # without these two flags the extra 131072 tokens are pure extrapolation.
+        # Confirm it engaged in /var/lib/strata/strata.log:
+        #   "rope scaling yarn, factor 1.5 (freq_scale ..., mscale ...), --max-context 393216 against a trained context of 262144"
+        "--rope-scaling"
+        "yarn"
+        "--rope-scale"
+        "1.5"
+        "--kv"
+        "int8"
+        "--kv-resident"
+        "32768"
+        # ---- parked conversations (the multi-agent cache) --------------------
+        # A chat or an agent resends its whole conversation on every turn.  By
+        # default the engine keeps exactly ONE live session, so when an agent and
+        # its subagents alternate requests they throw each other's KV away and
+        # every turn re-reads the whole prompt from token 0.  Observed here before
+        # this change: a 92,571-token prompt read at ~1.6K tok/s = ~56 s for a turn
+        # that should have read a few hundred tokens, and the engine's own request
+        # log showed reused=0 on every request that followed a different
+        # conversation (consecutive turns of the same one reused 68-76K of ~75-85K).
+        # Parking keeps up to `slots` independent conversations in host RAM (their
+        # K/V pages + the ~118 MB/turn checkpoints) and restores the one a request
+        # continues.  Matching is by exact token/image prefix only - no client
+        # session id - so it is transparent to Pi and its subagents.  It costs host
+        # RAM, not VRAM, and the cache slot is a switch-time decision: it degrades
+        # to a fresh read, never a failure.
+        #
+        # Sizing for this box (94 GiB RAM, int8 KV 12,672 B/token, but a PARKED
+        # conversation costs ~15-18 KB/token - measured from two live
+        # "restored N tokens (live)" deltas, 1.2-1.4x the raw KV because it also
+        # carries the GDN/SSM state - PLUS a per-conversation snapshot term that
+        # peaked at 3.68 GiB.  So one FULL-LENGTH 393216 conversation is
+        # ~5.7 GiB + ~3.7 GiB = ~9.4 GiB, and the old 12288 budget (which live
+        # traffic had filled exactly: max bytes=12,852,981,612, evictions=100)
+        # would then hold one max-length conversation and nothing else - i.e. it
+        # stops working at the moment an agent and its subagent both need a slot.
+        # 16 GiB keeps two of them parkable.  Past the budget the
+        # least-recently-used conversation is evicted, so this is a cap, not a
+        # reservation.  `--conversation-cache-min-free-mib` (default 2560) is the
+        # RAM floor: parking is skipped when there is no room.
+        "--conversation-cache-mib"
+        "16384"
+        "--conversation-cache-slots"
+        "12"
+        # Only park conversations worth a slot; one-shot probes / titles /
+        # classification calls are cheap to re-read and must not evict a long
+        # agent conversation (the log line is "skip parking (N tokens, below the M
+        # minimum)").  2048 also skips the root-only checkpoint of a tiny request.
+        "--conversation-cache-min-tokens"
+        "2048"
+      ]
+      ++ (mm.extraArgs or [ ]);
+
+  # Primary shorthand (kept for the comment/history anchors below).
+  engineArgs = engineArgsFor m;
 
   # The run config serve/server.py reads: the engine binary (the Nix build),
   # its args, and the tokenizer. Kept read-only in the store for now; edit
@@ -288,9 +435,12 @@ let
   # Two store files come from this one attrset (see strata-batch below): the
   # solo config, and `configFileBatch` = the same with `"parallel": 2`, which
   # makes serve's parallel_args() append `--batch 2` (serve/server.py:3874).
-  runConfig = {
+  # Parameterised exactly like engineArgsFor (mm = the models map entry,
+  # stateDir = the unit's StateDirectory); the literals below are otherwise
+  # untouched from the single-model era.
+  runConfigBaseFor = mm: stateDir: {
     exe = "${strata}/bin/strata";
-    args = engineArgs;
+    args = engineArgsFor mm;
     # Drafting. 0.2.10 made DFlash2 (incoai's block drafter, packed under
     # /home/cjdell/Strata/dflash2/ by drafting_fetch.ensure() from pinned
     # safetensors - pack sha checked against upstream's PINNED bytes) the Auto
@@ -346,11 +496,12 @@ let
     #     invalid K/V extent" - the turn survives, the next request re-reads the
     #     prompt. grep /var/lib/strata/strata.log for it if conversation-cache
     #     reuse drops.
-    drafting = "dflash2";
-    cwd = "/var/lib/strata";
-    tokenizer = "${m.packDir}/tokenizer";
-    model_name = m.modelName;
-    log = "/var/lib/strata/strata.log";
+    # (The `drafting` KEY is appended below the literal, Flash-Next-only — the
+    # block above documents the drafter; finalize explains why the key moves.)
+    cwd = stateDir;
+    tokenizer = "${mm.packDir}/tokenizer";
+    model_name = mm.modelName;
+    log = "${stateDir}/strata.log";
     # nginx proxies with the client's original Host header, and the serve
     # layer refuses any name it was not told about (DNS-rebinding guard) -
     # without this the public vhosts 403. 192.168.49.50 already answers.
@@ -419,8 +570,8 @@ let
     # layer only touches a prompt that actually carries image parts.
     vision = {
       exe = "${strata}/bin/strata-vision";
-      mmproj = mmproj;
-      model = m.nativeGguf;
+      mmproj = mm.mmproj or mmprojDefault;
+      model = mm.nativeGguf;
       gpu = false;
       max_tokens = 1024;
     };
@@ -550,6 +701,39 @@ let
     before_load = "${pkgs.systemd}/bin/systemctl stop sd-server";
   };
 
+  # finalize: the per-family keys on top of the shared base.
+  #
+  #   * `drafting` — the key the block above documents — stays with
+  #     Flash-Next. The own-path family gets NO drafting key, exactly like
+  #     upstream's install_own_path config: its MTP block drafts (the count is
+  #     literal in its args), and serve's drafting layer is Qwen3.8-Flash-Next
+  #     by design (drafting.supported_model(): "another model: its drafting is
+  #     not this choice's business (DeepSeek, Swift, Coder, NVFP4, Qwen3.6...)").
+  #     A saved "drafting" for a name that fails the gate falls back to MTP and
+  #     reshapes the run line - on the q36 path --mtp is a COUNT, so a reshaped
+  #     line is broken. Absent cannot misfire; that is also what setup writes.
+  #   * `arch` — serve's family tag (FAMILY_MODEL_NAMES -> /v1/models naming +
+  #     the qwen35moe thinking defaults temperature 1.0 / top_p 0.95 / top_k 20
+  #     / presence_penalty 1.5, the model_arch card-defaults gate, the #5715
+  #     startup context check via own_path_fit). setup.py writes it for
+  #     own-path configs; Flash-Next configs have never carried it (serve
+  #     infers qwen4exp from the tokenizer), so it stays conditional.
+  finalize =
+    cfg: mm:
+    cfg
+    // lib.optionalAttrs (!(mm.ownPath or false)) {
+      drafting = "dflash2";
+    }
+    // lib.optionalAttrs (mm ? arch) {
+      arch = mm.arch;
+    };
+
+  # The two serve configs the swap pair runs: primary = config.ai.strataModel
+  # in /var/lib/strata (unchanged, byte-identical to the pre-swap era), the
+  # partner in its own state dir so the two never share strata.log.
+  runConfig = finalize (runConfigBaseFor m "/var/lib/strata") m;
+  runConfigSecond = finalize (runConfigBaseFor m2 "/var/lib/strata-second") m2;
+
   # `strata-batch on|off|status` (./strata-batch.sh, installed on PATH) picks
   # between these by writing /var/lib/strata/batch-mode; strataExec below reads
   # it at every service start, so the choice survives reboots AND rebuilds, and
@@ -573,13 +757,37 @@ let
   # each slot's whole-KV cache takes pinned RAM, ~4.9 GiB at our 393216 ctx,
   # and this box has a -cram OOM history. Analysis + measurements:
   # docs/strata-batching.md.
+  #
+  # OWN-PATH exception (Qwen3.6): `"parallel"` there means serve's own-path
+  # batch-slot config (setup.py writes cfg["parallel"], the engine carves slot
+  # sessions - own_path_parallel_*), and on THIS card upstream's own measured
+  # numbers say do not: "a 32 GB R9700 at 128K: 4 slots left 15 of 256 experts
+  # per layer, decode 81 tok/s against ~180" -> own_path_parallel_recommend()
+  # returns 0 ("not offered there"). So for an ownPath model the batch2 config
+  # carries parallel = 1 ("parallel requests: one at a time", upstream's own
+  # explicit-solo form): strata-batch on|off keeps working as a command and
+  # the journal still names the chosen config, but a q36 start can never be
+  # talked into slots by a stale batch-mode file - the solo line is the only
+  # one this card has ever been measured to want.
   configFile = pkgs.writeText "strata-${model}.json" (builtins.toJSON runConfig);
   configFileBatch = pkgs.writeText "strata-${model}-batch2.json" (
     builtins.toJSON (
       runConfig
       // {
         # parallel_args(): must be an int >= 2 (a bool is rejected by name).
-        parallel = 2;
+        # ownPath: 1 = the explicit one-at-a-time form, see the block above.
+        parallel = if ownPath then 1 else 2;
+      }
+    )
+  );
+
+  # The partner's two run configs (same finalize, m2, own state dir).
+  configFileSecond = pkgs.writeText "strata-${secondModel}.json" (builtins.toJSON runConfigSecond);
+  configFileSecondBatch = pkgs.writeText "strata-${secondModel}-batch2.json" (
+    builtins.toJSON (
+      runConfigSecond
+      // {
+        parallel = if (m2.ownPath or false) then 1 else 2; # see the OWN-PATH note above
       }
     )
   );
@@ -587,17 +795,50 @@ let
   # Unit entry point: pick the run config per service start from the mode file.
   # Anything but exactly "2" (absent file, garbage, "off") is the solo config,
   # so a broken mode file can never strand the LLM - worst case is today's
-  # behaviour. The choice is echoed into the journal.
-  strataExec = pkgs.writeShellScript "strata-exec" ''
-    mode=$(${pkgs.coreutils}/bin/cat /var/lib/strata/batch-mode 2>/dev/null || echo off)
-    cfg=${configFile}
-    if [ "$mode" = "2" ]; then cfg=${configFileBatch}; fi
-    echo "strata-exec: batch-mode=$mode -> ''${cfg##*/}"
-    exec ${strata}/bin/strata-server --engine strata --config "$cfg" --host 127.0.0.1 --port 8080
-  '';
+  # behaviour. The choice is echoed into the journal. Both engines read the
+  # same /var/lib/strata/batch-mode (strata-batch); on an ownPath model the
+  # batch2 config is parallel=1, so the toggle simply does nothing there.
+  execFor =
+    name: solo: batch: port:
+    pkgs.writeShellScript "strata-exec-${name}" ''
+      mode=$(${pkgs.coreutils}/bin/cat /var/lib/strata/batch-mode 2>/dev/null || echo off)
+      cfg=${solo}
+      if [ "$mode" = "2" ]; then cfg=${batch}; fi
+      echo "strata-exec-${name}: batch-mode=$mode -> ''${cfg##*/}"
+      exec ${strata}/bin/strata-server --engine strata --config "$cfg" --host 127.0.0.1 --port ${toString port}
+    '';
+  strataExec = execFor "primary" configFile configFileBatch primaryPort;
+  strataExecSecond = execFor "second" configFileSecond configFileSecondBatch secondPort;
+
+  # The shim's routing table (read at its ExecStart via SWAP_CONFIG): the two
+  # ids clients put in `"model"` are exactly the configs' model_name values,
+  # which serve's own /v1/models echoes - so what the shim advertises, the
+  # engines confirm.
+  swapConfig = pkgs.writeText "strata-swap.json" (
+    builtins.toJSON {
+      models = [
+        {
+          id = m.modelName;
+          unit = "strata";
+          port = primaryPort;
+          vram_min_mib = vramMinFor m;
+        }
+        {
+          id = m2.modelName;
+          unit = "strata-second";
+          port = secondPort;
+          vram_min_mib = vramMinFor m2;
+        }
+      ];
+    }
+  );
 
   strataRootLocation = {
-    proxyPass = "http://127.0.0.1:8080";
+    # :8080 is strata-swap now (./strata-swap.py), not the engine: it
+    # advertises both models and swaps the units behind itself on a `model`
+    # mismatch. The timeouts below already cover the swap (a switched-to
+    # engine may be mid-load when the forwarded request lands).
+    proxyPass = "http://127.0.0.1:${toString swapPort}";
     recommendedProxySettings = true;
     proxyWebsockets = true;
     extraConfig = ''
@@ -642,14 +883,20 @@ in
     # serve layer starts the encoder BEFORE the engine and a missing file takes
     # the whole service down (Restart=on-failure would loop), so the guard
     # covers it too — the unit then stays inactive instead of flapping.
-    unitConfig.ConditionPathExists = [
-      "${m.packDir}/index.txt"
-      mmproj
-    ];
+    # An ownPath entry names its own set (models.*.preconditions): the single
+    # GGUF + its mmproj + the tokenizer pack, where a Flash-Next pack's
+    # index.txt would be — the q36 engine reads the GGUF itself, so its files
+    # ARE the pack.
+    unitConfig.ConditionPathExists =
+      m.preconditions or [
+        "${m.packDir}/index.txt"
+        mmproj
+      ];
 
     serviceConfig = {
       # strataExec above: picks solo vs batch run config from
       # /var/lib/strata/batch-mode at every start (strata-batch, ./strata-batch.sh).
+      # Serves on 127.0.0.1:8091 — the public face is strata-swap on :8080.
       ExecStart = strataExec;
       # The engine log (config "log") is written here; StateDirectory creates it.
       StateDirectory = "strata";
@@ -665,6 +912,56 @@ in
       # Loading the model is a multi-minute, tens-of-GB operation.
       TimeoutStartSec = "infinity";
       TimeoutStopSec = 120;
+    };
+  };
+
+  # The swap partner: the other model of the pair, on 127.0.0.1:8092, its own
+  # state dir, and deliberately NO wantedBy — only strata-swap starts it (on a
+  # `model` mismatch), exactly like sd-server is gpu-mode-only. That keeps the
+  # boot story unchanged (a reboot always restores ai.strataModel) and makes
+  # `systemctl status strata-second` the whole audit trail of the last swap.
+  # The same strataExec batch-mode logic applies; on an ownPath entry the
+  # batch2 config is parallel=1, a documented no-op.
+  systemd.services."strata-second" = {
+    description = "Strata swap partner (${secondModel}: ${m2.modelName})";
+    after = [ "network.target" ];
+    unitConfig.ConditionPathExists =
+      m2.preconditions or [
+        "${m2.packDir}/index.txt"
+        (m2.mmproj or mmprojDefault)
+      ];
+    serviceConfig = {
+      ExecStart = strataExecSecond;
+      StateDirectory = "strata-second";
+      Restart = "on-failure";
+      RestartSec = 10;
+      LimitCORE = "0";
+      TimeoutStartSec = "infinity";
+      TimeoutStopSec = 120;
+    };
+  };
+
+  # strata-swap — the model-selecting front (see ./strata-swap.py's header for
+  # the whole contract: advertise both, exact-match routing, swap-with-
+  # rollback, never start onto an off-lease card). Runs as ROOT, unlike the
+  # DynamicUser shims: its job is systemctl stop/start of the two engine
+  # units, which needs PID-1 privileges; it is loopback-only, and the engines
+  # behind it keep their own user + Host allow-list.
+  systemd.services."strata-swap" = {
+    description = "Strata model-selection shim (both models on :8080, swap on mismatch)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" ];
+    wants = [ "strata.service" ];
+    environment.SWAP_CONFIG = toString swapConfig;
+    path = [
+      pkgs.coreutils
+      pkgs.rocmPackages.amdsmi
+      pkgs.systemd
+    ];
+    serviceConfig = {
+      ExecStart = "${pkgs.python3}/bin/python3 ${./strata-swap.py}";
+      Restart = "always";
+      RestartSec = 2;
     };
   };
 
