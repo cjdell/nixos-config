@@ -69,4 +69,5 @@
 [
   ./desktop.nix
   ./hardware-configuration.nix
+  ./power.nix
 ]
