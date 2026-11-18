@@ -160,6 +160,13 @@
       # authorized_keys so its nixos-install could use zen3 as a builder;
       # this line makes it survive zen3's next switch.
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ1dymjPguf/uFGmpITUMcf/riXQ78onZyvY2j/FuJZl root@hp-z240-xeon-1240v6-nixos (nix builder)"
+      # asus-x555la-nixos — the e-waste X555LA laptop (i3-4030U, 2c/4t),
+      # adopted 2026-11-18. Key generated on the box during adoption; without
+      # it its switches silently build on 2 cores (the build-client fallback).
+      # Its first switch could not use this anyway: the closure was streamed
+      # with `nix-store --export | zstd | ssh 'sudo nix-store --import'`
+      # because the laptop had no root key and no trusted-user path.
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgO0jk1JCGbVuaN4F3oOEnNsmfxpMBlemmRSp3AuN4W root@asus-x555la-nixos (nix builder)"
     ];
 
     boot.kernel.sysctl = {

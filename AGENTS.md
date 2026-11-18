@@ -255,8 +255,11 @@ sudo nixos-rebuild switch --flake .
   alderlake-thinkpad, macbook-pro-2009, grafton-router, N100/GEN8/N40L-NAS;
   2026-10-25: haswellatx-nixos + hp-z240-xeon-1240v6-nixos (now
   **asus-i7-6700-nixos**); 2026-11-03: kabylakeitx-nixos; 2026-11-14:
-  hp-z240-xeon-1240v6-nixos (second Z240, `.59`). **All of them are live since
-  the 2026-11-15 zen3 switch** (11 declared keys, all 11 present — check with
+  hp-z240-xeon-1240v6-nixos (second Z240, `.59`); 2026-11-18:
+  asus-x555la-nixos (the e-waste X555LA laptop — **live only on zen3's next
+  switch**, so its own switches build locally until then). **All the earlier
+  ones are live since the 2026-11-15 zen3 switch** (11 declared keys then, all
+  11 present — check with
   `sudo cut -d' ' -f2 /etc/ssh/authorized_keys.d/root`). Two traps when
   verifying this: NixOS writes `openssh.authorizedKeys.keys` to
   **`/etc/ssh/authorized_keys.d/<user>`**, not `~/.ssh/authorized_keys` (which
