@@ -132,6 +132,15 @@ in
         # pin the MAC in NetworkManager, otherwise it gets a dynamic address.
         "MacBookAir-NixOS                             ,192.168.49.69,1h"
 
+        # ASUS X555LA laptop (i3-4030U Haswell, 11 GiB, 120 GB SSD), adopted
+        # 2026-11-18 as hosts/asus-x555la-nixos; was dynamic .152 under its
+        # own hostname `asus-haswell`. Reserved on the **ath9k Wi-Fi MAC**,
+        # which is its only link: the r8169 gigabit port (f0:79:59:30:7b:42)
+        # reads carrier=0 — no cable. When it gets wired, REPLACE this line
+        # with that MAC rather than adding a second one: two reservations on
+        # the same IP collide the moment Wi-Fi and the cable are up together.
+        "40:e2:30:9e:9f:4a,asus-x555la-nixos          ,192.168.49.70,1h"
+
         "d4:f5:47:2f:76:93,Small-Bedroom-Speaker      ,192.168.49.71,1h"
         "e4:f0:42:08:e3:1e,Front-Bedroom-Speaker      ,192.168.49.72,1h"
         "a4:77:33:4f:17:5e,Kitchen-Speaker            ,192.168.49.73,1h"
