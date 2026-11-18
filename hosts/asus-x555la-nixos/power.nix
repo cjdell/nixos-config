@@ -4,17 +4,30 @@
 # there is no serial or remote-management handle. Someone has to press a
 # button. So sleep is removed from the system rather than discouraged.
 #
-# Why this is load-bearing and not paranoia (2026-11-18): during the adoption
-# switch the box stopped answering on L2 mid-activation — `ip neigh` FAILED, no
-# dnsmasq renewal, no ssh — 6 minutes in, and stayed down. Prime suspect: the
-# fresh GNOME session (users/cjdell/nix.nix enables autoLogin, so activating
-# the new system starts a new gsd-power) reading the dead pack — upower
-# reports `energy-full: 0 Wh`, `percentage: 0%`, `state: pending-charge` — and
-# GNOME's *critical battery* action firing on exactly that reading, on top of
-# `sleep-inactive-*-type` defaulting to suspend. The old session had lived
-# with the same reading for weeks; a clean state machine acted on it. Not
-# provable from here while the box is asleep — which is itself the lesson:
-# there is no way to find out remotely.
+# Why this is here, and what it is NOT (2026-11-18, corrected same day).
+#
+# What it IS: a guard for a real hazard. users/cjdell/nix.nix enables
+# autoLogin, so a graphical boot always starts a GNOME session, and upower
+# reports the dead pack as `energy-full: 0 Wh` / `percentage: 0%` — the exact
+# reading GNOME's critical-battery action and `sleep-inactive-*-type` act on.
+# For a box with no WoL, no cable, no serial and no BMC, one such action is an
+# outage that needs someone to walk over and press a button.
+#
+# What it is NOT is the explanation for the adoption-day failure — I asserted
+# that here first and the evidence says otherwise. Boot -3 did not end in a
+# suspend: its last entries are an ssh session from zen3 at 02:56:33 and then
+# *nothing* — no `suspend: Entering`, no OOM, no MCE, no shutdown sequence. A
+# log-less instant stop is not what logind/gsd suspend looks like. The new
+# generation then stopped ~4 s into boot, twice (boots -2 and -1), also with
+# nothing in the journal. Two silent stops, and pstore is unavailable on this
+# box (`Platform Persistent Storage Archival skipped`), so a kernel panic here
+# would leave no trace either. Candidate causes still open: power delivery
+# (SMART on the SSD reads healthy — 0 reallocated/pending/uncorrectable/CRC —
+# but Power_Cycle_Count 756 in 618 Power_On_Hours with Power-Off_Retract_Count
+# 44 says this machine has been cutting power abruptly all its life), thermal
+# trip (idle reads 34-37 °C; the soak to date has been too short to judge), or
+# the new kernel/systemd pair (6.18.57 + systemd 262 vs the working 6.18.52).
+# Diagnose the boot failure separately — ./power.nix does not fix it.
 #
 # Three layers, because the request arrives from three places:
 #   1. `systemd.suppressedSystemUnits` — gsd and logind both end up at
