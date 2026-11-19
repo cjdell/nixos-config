@@ -264,6 +264,49 @@ in
         chain output {
           type filter hook output priority 0; policy accept;
         }
+
+        # ----------------------------------------------------------------------------
+        # policy-routing marks — hackspace-session symmetry (added 2026-11-19)
+        # The v6 route 2001:8b0:1d14::/48 -> VM (networking/interface.nix) keys
+        # on DESTINATION, but the hackspace also SOURCES from that same /48 —
+        # their gateway 2001:8b0:1d14:225::1 pings/monitors us from it, over the
+        # internet (their tailnet has no v6 path into the house, so v6 sessions
+        # from them can ONLY arrive on the WAN). A destination lookup on our
+        # REPLY to one of those fresh requests hits the VM route anyway, and
+        # the answer vanishes into the tailnet — the bug that ate every
+        # hackspace->house v6 ping the same evening as the AAAA work (tcpdump
+        # proved their pings reach the WAN and never get answered). So stamp
+        # internet-arrived hackspace sessions on conntrack, re-apply the stamp
+        # as fwmark on replies, and an ip-rule on 100-lan (interface.nix)
+        # sends marked traffic to table 100 — a WAN-only default (pppoe.nix) —
+        # despite main's /48 route:
+        #   * hackspace-sourced session (arrives on the WAN): conntrack mark;
+        #     replies -> fwmark 0x202a -> table 100 -> out via Zen, like the
+        #     request. Each session is symmetric end to end, which matters
+        #     because their return path is a stateful firewall entitled to
+        #     discard answers seen on a different interface than the question.
+        #   * everything else is deliberately NOT stamped: fd99 ULA is
+        #     unreachable across the internet so its replies always belong on
+        #     the tailnet, and our own tailnet members' outbound-to-hackspace
+        #     sessions (iif tailscale0, SNATed by hackspace-v6-nat below) must
+        #     reply via the VM exactly like their request.
+        # `ct direction original` matters: WITHOUT it, reply-direction packets
+        # of an OUTBOUND-to-door session also carry ip6 saddr hackspace and
+        # would get stamped — and their way-back packets would then be fwmarked
+        # and rerouted by table 100 to the WAN. The second (output-hook) chain
+        # covers sessions terminating on the router itself: OUTPUT never sees
+        # prerouting, but the reply still needs the stamp.
+        # ----------------------------------------------------------------------------
+        chain mark-hackspace-replies {
+          type filter hook prerouting priority mangle; policy accept;
+          iifname ${c.WAN_INTERFACE} ip6 saddr ${c.HACKSPACE_IPV6_SUBNET} ct direction original ct mark set 0x202a comment "hackspace session arrived via the internet: remember it on the conntrack entry"
+          ct mark 0x202a ct direction reply meta mark set 0x202a comment "its replies follow the request out the WAN, not the VM route"
+        }
+
+        chain mark-hackspace-replies-output {
+          type filter hook output priority mangle; policy accept;
+          ct mark 0x202a ct direction reply meta mark set 0x202a comment "same, for sessions terminating on the router (OUTPUT skips prerouting)"
+        }
       '';
     };
 
@@ -302,7 +345,39 @@ in
 
         chain out {
           type nat hook output priority mangle; policy accept;
-          # we'll add rules for our 1:1 NAT here later
+          # we'll add v6 rules for our 1:1 NAT here later
+        }
+      '';
+    };
+
+    # v6 counterpart of line "NAT for Hackspace Tailnet traffic" above — that
+    # table is family "ip", so ip6 needs its own. Why MASQUERADE and not
+    # source-preserve like LAN-originated traffic: grafton-tailnet sources
+    # (fd7a:115c:a1e0::/48, and 100.64.0.0/10 v4) are the *same ranges*
+    # leighhack's own tailnet uses — every tailscale network defaults to them —
+    # so the VM can never route a de-NAT'd reply back to, say, fd7a::6: its
+    # table 52 claims the whole /48 for tailscale0 and the packet dies on
+    # their tailnet (measured 2026-11-19: `ping -6 -I fd7a:…::b` through the
+    # old path hung at 100 % loss while the LAN-sourced ping was 0 %).
+    # Masquerading to the LAN address happens BEFORE the VM sees the packet,
+    # the VM's nat6 then SNATs again to fd7a:115c:a1e0::13, and the hackspace
+    # sees exactly the one node its ACLs admit. v4 didn't need this because
+    # their headscale-approved 192.168.49.0/24 subnet route makes the
+    # masqueraded source routable back on their side.
+    # Added for the 2026-11-19 headscale advertisement of the hackspace /48s
+    # (services/tailscale.nix) so `ping6 gw.int…` works from tailnet members.
+    hackspace-v6-nat = {
+      family = "inet";
+      content = ''
+        chain postrouting {
+          type nat hook postrouting priority srcnat; policy accept;
+          # saddr match, not iifname "tailscale0": the constraint that
+          # matters is "came from our tailnet's range", and keying on the
+          # address makes the rule testable from the router itself
+          # (`ping -6 -I <our tailnet addr>`) and independent of which
+          # interface delivered it. No legitimate LAN/VM source ever owns
+          # fd7a:115c:a1e0::/48 — see the constant's comment.
+          oifname ${c.LAN_INTERFACE} ip6 saddr ${c.TAILNET_V6_SUBNET} ip6 daddr { ${c.HACKSPACE_IPV6_SUBNET}, ${c.HACKSPACE_ULA_SUBNET} } masquerade comment "our tailnet -> hackspace v6: SNAT to the LAN address before the VM sees it"
         }
       '';
     };

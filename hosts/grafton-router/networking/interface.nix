@@ -93,6 +93,22 @@ in
         ];
         dns = [ net.LAN_IPV4 ];
         domains = [ "grafton.lan" ];
+        # See the `mark-hackspace-replies` chain in networking/firewall.nix:
+        # reply-direction packets to the hackspace's public /48 are marked
+        # 0x202a, and this rule sends them to table 100 — whose only route is a
+        # WAN default declared on pppoe-zen in pppoe.nix — instead of to the
+        # VM route in main. Priority 100 beats the local/main defaults.
+        routingPolicyRules = [
+          {
+            # NixOS calls it FirewallMark; the module emits systemd's
+            # FwMark=. 8234 = 0x202a, the value mark-hackspace-replies
+            # stamps (networking/firewall.nix).
+            FirewallMark = 8234;
+            Table = 100;
+            Priority = 100;
+            Family = "ipv6";
+          }
+        ];
         routes = [
           {
             # Route into the leighhack tailnet via the grafton-hackspace-client

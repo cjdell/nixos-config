@@ -89,7 +89,18 @@ let
         # is down".
         V6_PROBE_URL=https://network-info.int.leighhack.org/healthz
         v6code=$(${pkgs.curl}/bin/curl -6 -sS -o /dev/null -m 15 -w '%{http_code}' "$V6_PROBE_URL" 2>/dev/null || true)
-        case "${"v6code:-000"}" in
+        # Beware the two-quote escape: this whole script is a Nix indented
+        # string, so an unescaped dollar-brace is interpolated by Nix itself
+        # first. The original source read two-quotes-escaped dollar-brace
+        # "v6code:-000" — Nix evaluated that as a STRING LITERAL and collapsed
+        # it to the bare text `v6code:-000` — bash then matched a CONSTANT,
+        # never the HTTP code, so every probe fell to `*)` and the healthcheck
+        # reported DOWN on perfect health: 39 consecutive false alarms, caught
+        # by eyeballing a literal "curl code '200'" inside the DOWN message
+        # (2026-11-19). After editing this file, check the GENERATED script,
+        # not the Nix:
+        #   grep -n case $(systemctl show hackspace-tunnel-check.service -p ExecStart | grep -oE '/nix/store/[^ ;"]+')
+        case "''${v6code:-000}" in
           403)              v6=blocked ;;
           000)              v6=unreachable ;;
           [0-9][0-9][0-9])  v6=ok ;;

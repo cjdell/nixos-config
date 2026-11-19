@@ -1,5 +1,8 @@
 { config, ... }:
 
+let
+  net = import ../networking/constants.nix;
+in
 {
   services.tailscale = {
     enable = true;
@@ -7,7 +10,33 @@
     useRoutingFeatures = "server";
     extraUpFlags = [
       "--login-server=https://tailscale.home.chrisdell.info"
-      "--advertise-routes=192.168.49.0/24"
+      # The LAN (both families) + the re-advertised hackspace LAN.
+      # The 10.3.0.0/16 entry documents/repairs drift: it had been
+      # advertised all along, but only by a manual `tailscale up` — a later
+      # config-driven `up` silently dropped it from the advertisement (and
+      # headscale keeps it Approved+Serving until re-offered), so it lives
+      # here now. The v6 /64 joined 2026-11-19 so tailnet members can reach
+      # LAN hosts over IPv6 via us (2a02:8010:6680:49::50 etc.) instead of
+      # depending on the ISP's delegation staying routable from the internet.
+      # It pins the delegation, so if Zen ever re-delegates (verify per
+      # networking/constants.nix!) this line follows LAN_IPV6_SUBNET and the
+      # approval must move too: `headscale nodes approve-routes` REPLACES the
+      # approved set — re-approve everything from `headscale nodes list-routes`
+      # plus the new /64 in one command. Rejected by policy?
+      # headscale.policy.path is /dev/null = allow-all, no ACL to edit.
+      # NB: nixpkgs' tailscaled-autoconnect is a boot-time one-shot that exits
+      # once the backend is Running — after editing this list, apply it with
+      # `sudo tailscale up --login-server=… <the flags>` (or restart BOTH
+      # tailscaled and tailscaled-autoconnect), or the running node keeps
+      # advertising the old set.
+      # The hackspace v6 /48s joined 2026-11-19 so tailnet members can reach
+      # gw/services there directly, symmetric through the VM: this router
+      # masquerades member sources into hackspace space (hackspace-v6-nat,
+      # networking/firewall.nix — needed because fd7a/100.64 collide with
+      # leighhack's own ranges), the VM's nat6 then presents the one node
+      # their ACLs admit. Unadvertised, a member's ping6 2001:8b0:… just
+      # rides the public internet and meets their WAN ingress policy instead.
+      "--advertise-routes=192.168.49.0/24,${net.HACKSPACE_SUBNET},${net.LAN_IPV6_SUBNET},${net.HACKSPACE_IPV6_SUBNET},${net.HACKSPACE_ULA_SUBNET}"
       "--advertise-exit-node"
       "--accept-dns=false"
       # Accept the tailnet's approved subnet routes so the LAN can reach them

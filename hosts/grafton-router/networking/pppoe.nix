@@ -17,6 +17,19 @@
       PrefixDelegationHint = "::/48";
       WithoutRA = "solicit";
     };
+    # WAN-only routing table for the mark set by `mark-hackspace-replies`
+    # (networking/firewall.nix) + the FwMark rule on 100-lan
+    # (networking/interface.nix): answers to hackspace-initiated v6 flows must
+    # leave via Zen even though the VM route owns 2001:8b0:1d14::/48 in main.
+    routes = [
+      {
+        # ::/0 spelled explicitly — the mark chain in networking/firewall.nix
+        # marks IPv6 replies only, and a bare "default" here could be parsed
+        # into the v4 family.
+        Destination = "::/0";
+        Table = "100";
+      }
+    ];
   };
 
   sops.templates."pppoe-credentials".content = ''

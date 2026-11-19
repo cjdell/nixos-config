@@ -47,6 +47,12 @@ rec {
   PODMAN_SUBNET = "192.168.100.0/24"; # podman containers
   WIREGUARD_SUBNET = "10.47.0.0/16"; # wg0 tunnel
   TAILSCALE_SUBNET = "100.64.0.0/10"; # headscale ip_prefixes (CGNAT)
+  # headscale ip_prefixes v6 — which is also tailscale's factory ULA, i.e.
+  # EVERY tailnet here (ours and leighhack's) uses this same range. That
+  # collision is load-bearing in networking/firewall.nix (hackspace-v6-nat):
+  # the VM can never route a de-NAT'd reply back to one of our fd7a::x
+  # nodes, because its tailscale claims the whole /48.
+  TAILNET_V6_SUBNET = "fd7a:115c:a1e0::/48";
   HACKSPACE_SUBNET = "10.3.0.0/16"; # via grafton-hackspace-client VM
   GATLING_SUBNET = "10.0.1.0/24"; # gatling-services' tailnet subnet route
   # Hackspace public IPv6 — trusted; full access to the LANs from the internet
@@ -54,6 +60,14 @@ rec {
   # ...and the ULA the same *.int names hand out with it. Also advertised by
   # gw-1 on the leighhack tailnet, so it, too, belongs on the VM route.
   HACKSPACE_ULA_SUBNET = "fd99:dead:beef::/48";
+  # Their gateway/OPNsense's own v4 — which is also their DNS resolver (the
+  # [/int.leighhack.org/] upstream). With the v6 below it is what their
+  # handover calls "gw".
+  HACKSPACE_GATEWAY = "10.3.1.1";
+  # ...and its v6: the source gw pings US from (tcpdump-verified 2026-11-19).
+  # Their DNS gives gw.int only an A record, so services/adguard.nix supplies
+  # the AAAA glue from these two constants.
+  HACKSPACE_GATEWAY_V6 = "2001:8b0:1d14:225::1";
   DELEGATED_PREFIX = "2a02:8010:6680::/48"; # IPv6 delegated by Zen (PPPoE); see LAN_IPV6_PREFIX
   DBTHR33_SUBNET = "2a0a:ef40:241::/48";
   # dbthr33-server's network — trusted

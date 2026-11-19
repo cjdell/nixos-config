@@ -582,6 +582,25 @@ hackspace's AAAAs no longer touch Zen on the way out:
   2026-11-01 bridge-flush incident. `--accept-routes` in the VM already carries
   both /48s (tailscale's table 52; its unconditional `from all lookup 52` rule
   serves forwarded traffic too), so these requests arrive on `tailscale0`.
+  **But a v6 route to the hackspace is a two-way street**: they also *source*
+  from `2001:8b0:1d14::/48` (their door `…:225::1`), and a destination-based
+  route cannot tell "our request to them" from "their request to us" — a
+  destination lookup on our *reply* to a hackspace-initiated flow hits the VM
+  route too, and the answer vanishes into the tailnet instead of going back out
+  the internet (same-evening discovery: their pings to `llm.ai…` reached our
+  WAN — tcpdump proved it — and never got answered). The fix is in
+  `networking/firewall.nix` + `interface.nix` + `pppoe.nix`: `ct direction
+  reply` packets to the public hackspace /48 get mark `0x202a`, an ip-rule
+  sends marked traffic to table 100, whose only route is a WAN default on
+  pppoe-zen. Conntrack is the only thing that knows the direction, so conntrack
+  it is. The ULA (`fd99:`) is deliberately not marked — it is unreachable
+  across the internet, so every reply there genuinely belongs on the tailnet.
+  The VM's advertisement into the **leighhack** tailnet stays **v4-only** by
+  contrast: their members reach house services over Zen's v6 fine (arriving on
+  the WAN, answered symmetrically by the mark chain), so adding our LAN /64 to
+  their tailnet buys nothing and costs a re-approval dependency on their admin
+  every time the VM re-registers. (Our own headscale *does* advertise the LAN
+  /64 — that side is ours to control; see the round-2 section below.)
 * **v6 gets one source-NAT point — in the VM — where v4 keeps none.** The
   v4 no-NAT design above still holds (their static route for our stable /24).
   v6 cannot preserve source and still survive an ACL chasing our ISP's prefix:
@@ -603,6 +622,63 @@ hackspace's AAAAs no longer touch Zen on the way out:
   source is not in their ACL", never as "tunnel down"**; connect failure = our
   v6 path. That is the alert that would have named 2026-11-19 at 14:26 instead
   of at 21:00, by a human, from a page that would not load.
+
+### Round 2, same evening: `ping6 gw.int.leighhack.org` from `airm5`
+
+With the LAN→hackspace v6 path live, the ask flipped: a house **tailnet**
+member should be able to reach the hackspace gateway directly, with or without
+Zen in the picture. Three independent faults were stacked under that one
+failing command:
+
+1. **`gw.int.leighhack.org` has no AAAA, anywhere.** Their DNS answers A
+   `10.3.1.1` and *nothing* on AAAA (contrast `switch.int`, which publishes
+   both `2001:8b0:1d14:225::1` and the ULA) — so `ping6 gw.int…` fails at
+   resolution before any routing question is even asked. The handover
+   documents the box as `10.3.1.1 / 2001:8b0:1d14:225::1`, and that v6 is
+   proven live: it is the address gw pings *us* from, and it answers our v6
+   echo 0 % loss via the VM route. `services/adguard.nix` now supplies the
+   missing glue as a `user_rules` rewrite (`HACKSPACE_GATEWAY_V6`,
+   `networking/constants.nix`) — **retire ours when leigh adds the real AAAA
+   upstream; a rewrite silently shadows the authoritative record forever.**
+2. **Tailnet members had no route to the hackspace /48s.** `services/tailscale.nix`
+   now advertises `2a02:8010:6680:49::/64` (the LAN, so members reach house
+   v6 hosts through us — the feature the earlier v4-only debate had parked),
+   plus `2001:8b0:1d14::/48` and `fd99:dead:beef::/48`, so member traffic to
+   the hackspace rides the router→VM path instead of the public internet (and
+   survives deletion of their Zen-prefix ACL row, which a public-internet
+   ping6 from our delegation would not). Gotchas, both hit live:
+   `headscale nodes approve-routes` **replaces** the approved set — pass the
+   full list (`0.0.0.0/0,10.3.0.0/16,192.168.49.0/24,::/0,2a02:…:49::/64,
+   2001:8b0:1d14::/48,fd99:dead:beef::/48`) — and nixpkgs'
+   `tailscaled-autoconnect` is a boot-time one-shot that exits once the
+   backend is Running, so after editing `extraUpFlags` the *running* node
+   keeps advertising the old set until `sudo tailscale up <flags>` is run by
+   hand. Verify: `headscale nodes list-routes -i 11` shows Approved =
+   Available = Serving.
+3. **A grafton-tailnet source cannot cross the VM un-NATed.** Both tailnets
+   default to `100.64.0.0/10` + `fd7a:115c:a1e0::/48` — the *same* ranges —
+   so when the VM de-NATs a hackspace reply destined `fd7a:115c:a1e0::6`,
+   its own tailscale table (52, served unconditionally per the bullet above)
+   claims that address for `tailscale0` and the reply dies on **leighhack's**
+   tailnet, possibly at some unrelated node. Demonstrated precisely:
+   `ping -6 -I fd7a:…::b 2001:8b0:…::1` = 100 % loss, LAN-sourced = 0 %, same
+   route, same minute. The fix is the `hackspace-v6-nat` inet table in
+   `networking/firewall.nix`: member→hackspace traffic gets masqueraded to
+   the LAN address **before** the VM sees it, so the VM's return path is
+   plain `dev lan` main-table routing. v4 needed no new rule —
+   `firewall.nat` has masqueraded `tailscale0 → 10.3.0.0/16` for a while, and
+   their approved `192.168.49.0/24` subnet route makes that source routable
+   back.
+
+Measured afterwards, from the router: `dig AAAA gw.int…` answers
+`2001:8b0:1d14:225::1`; the `fd7a`-sourced ping that used to hang now returns
+0 % loss through the full masq→VM→nat6 chain. Two honest limits from their
+side: `10.3.1.1:443` (their OPNsense UI) filters tailnet-adjacent sources —
+`ping`/DNS answer, `https://10.3.1.1` times out, so test with ICMP, not the
+browser — and whether their ACL admits `fd7a:115c:a1e0::13` to the gateway
+itself (not just the door) is their policy; if pings to `gw` ever go dark
+while `switch.int` stays 302, that is their row to widen, not our route to
+fix.
 
 ## Related
 
