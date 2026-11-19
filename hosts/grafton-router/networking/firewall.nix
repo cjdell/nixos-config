@@ -196,6 +196,22 @@ in
           # enables TCP/UDP (e.g. SSH) which otherwise fell through to the drop.
           iifname ${c.LAN_INTERFACE} ip daddr ${c.HACKSPACE_SUBNET} accept comment "LAN to Hackspace"
 
+          # IPv6 counterparts, added 2026-11-19 — the "LAN to Hackspace" rule above
+          # is `ip daddr`, so it never matched a single AAAA. The networkd routes
+          # in networking/interface.nix steer both hackspace /48s into the VM;
+          # these are their filter counterparts. Deliberately NO v6 masquerade
+          # counterpart: the whole point of the IPv6 path is to arrive with a
+          # source the hackspace ACL trusts *permanently*, and that source is the
+          # VM's tailnet address — which only the VM can originate, so its single
+          # masquerade rule lives in
+          # virtual-machines/grafton-hackspace-client.nix. Masquerading here
+          # instead would rewrite to this router's lan address — i.e. back onto
+          # the rotation schedule of a delegated prefix we do not own, the
+          # fragility that produced the 794 403s of 2026-11-19
+          # (docs/leighhack-tailscale.md).
+          iifname ${c.LAN_INTERFACE} ip6 daddr ${c.HACKSPACE_IPV6_SUBNET} accept comment "LAN to Hackspace (IPv6)"
+          iifname ${c.LAN_INTERFACE} ip6 daddr ${c.HACKSPACE_ULA_SUBNET} accept comment "LAN to Hackspace (ULA)"
+
           # gatling-services' tailnet subnet (10.0.1.0/24) — an approved subnet
           # route accepted on tailscale0 via --accept-routes. The generic "LAN to
           # VPN" rule below already forwards this; it is stated explicitly so

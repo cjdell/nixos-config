@@ -80,7 +80,7 @@ in
 
         "grafton-hackspace-client                     ,${constants.GRAFTON_HACKSPACE_CLIENT_IP},1h"
 
-        "e4:11:5b:12:c2:ab,N40L-NAS                   ,192.168.49.21,[2a02:8010:6680:49::21],1h"
+        "e4:11:5b:12:c2:ab,N40L-NAS                   ,192.168.49.21,[${net.LAN_IPV6_PREFIX}21],1h"
         "00:e0:4d:02:cd:56,N100-NAS                   ,192.168.49.22,1h"
         "3c:a8:2a:a0:1e:4c,GEN8-NAS                   ,192.168.49.23,1h"
         "24:05:0f:6d:be:4e,experiments                ,192.168.49.25,1h"
@@ -99,7 +99,7 @@ in
         "70:03:9f:68:b5:bd,plug-03                    ,192.168.49.43,1h"
         "c4:dd:57:21:12:28,plug-04                    ,192.168.49.44,1h"
 
-        "zen3-nixos                                   ,192.168.49.50,[2a02:8010:6680:49::50],1h"
+        "zen3-nixos                                   ,192.168.49.50,[${net.LAN_IPV6_PREFIX}50],1h"
         "zen1-nixos                                   ,192.168.49.51,1h"
         "haswellmatx-nixos                            ,192.168.49.53,1h"
         "haswellatx-nixos                             ,192.168.49.54,1h"

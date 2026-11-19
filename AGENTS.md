@@ -86,7 +86,7 @@ All in `hosts/<name>` (directory name == host name == flake attribute), on the
 
 | Host | LAN IP | Role | What it actually runs | Deploy notes |
 | --- | --- | --- | --- | --- |
-| **grafton-router** | `.1` (`2a02:8010:6680:49::1`) | Edge router **and** the main homelab app host | PPPoE WAN (`pppoe-zen`), `lan` bridge + VLAN10, nftables, dnsmasq DHCP+DNS, AdGuard, WireGuard `10.47.0.0/16`, headscale + Tailscale, **kanidm** IdP (`kanidm.home.chrisdell.info`), nginx public edge `*.home.chrisdell.info` (ACME DNS-01 Route 53 + route53 dynamic DNS) proxying to itself *and* to N100-NAS (`grafana…`→`:3000`, `filebrowser…`→`:8002`), Home Assistant + InfluxDB + Mosquitto + zigbee2mqtt, Frigate (+`frigate-whisper`/`frigate-monitor`), Jellyfin, Immich, qBittorrent, Ghost, 2fauth, Beszel, Postgres, **meter-relay** (`:8484`), container-ui, TFTP/iPXE netboot, a microVM host (`grafton-hackspace-client`, `.15`), dsh-harness `:3080` | **autoRollback ON** → `sudo nixos-confirm`. 15 GiB RAM + 8 GiB `/swapfile`. No Rust toolchain. Config is `hosts/grafton-router/` (imports its own flake inputs). |
+| **grafton-router** | `.1` (`2a02:8010:6680:49::1`; Zen's **delegated** /48 — everything pinned to it is a self-expiring credential, verify per `hosts/grafton-router/networking/constants.nix` before re-pinning anything) | Edge router **and** the main homelab app host | PPPoE WAN (`pppoe-zen`), `lan` bridge + VLAN10, nftables, dnsmasq DHCP+DNS, AdGuard, WireGuard `10.47.0.0/16`, headscale + Tailscale, **kanidm** IdP (`kanidm.home.chrisdell.info`), nginx public edge `*.home.chrisdell.info` (ACME DNS-01 Route 53 + route53 dynamic DNS) proxying to itself *and* to N100-NAS (`grafana…`→`:3000`, `filebrowser…`→`:8002`), Home Assistant + InfluxDB + Mosquitto + zigbee2mqtt, Frigate (+`frigate-whisper`/`frigate-monitor`), Jellyfin, Immich, qBittorrent, Ghost, 2fauth, Beszel, Postgres, **meter-relay** (`:8484`), container-ui, TFTP/iPXE netboot, a microVM host (`grafton-hackspace-client`, `.15`), dsh-harness `:3080` | **autoRollback ON** → `sudo nixos-confirm`. 15 GiB RAM + 8 GiB `/swapfile`. No Rust toolchain. Config is `hosts/grafton-router/` (imports its own flake inputs). |
 | **zen3-nixos** | `.50` (`…:49::50`) | AI workstation + primary build box | Avalon `:8080` (Qwen3.8-Flash-Next, R9700 32 GB; llama-swap `:8081` is **disabled**, and Strata `:8080` was **disabled 2026-11-04** in favour of Avalon — see the Avalon section), sd-server + Flux-schnell (only when `gpu-mode sd` holds the card — see the GPU-modes section), Recallium (its LLM = Avalon via `/recallium-llm`), diamcp, llama-log-viewer, gpu-panel, nginx `*.ai.chrisdell.info`, Pi 5 netboot (TFTP `/etc/tftp`, NFS store snapshot `/exports/nix-store`) | autoRollback **commented out** → no `nixos-confirm`. zram swap. Dispatches aarch64 builds to the MacBookAir; is itself the builder for alderlake-thinkpad and macbook-pro-2009. |
 | **N100-NAS** | `.22` | Media/app NAS (ZFS pool `samsung-4tb`: `ds-media`, `ds-photos`) | Jellyfin, Immich (podman: server/ml/redis/postgres), qBittorrent, Postgres + postgresqlBackup, filebrowser, Grafana `:3000` (kanidm OIDC, `grafana.home.chrisdell.info`), container-ui `:8091`, Samba + NFS, sanoid + syncoid → N40L-NAS and dbthr33, Scrutiny, Prometheus exporters, Tailscale | **autoRollback ON** → `sudo nixos-confirm`. Repo checkout lives here too. `common/folding-at-home.nix` (the linuxserver container) is imported — it was crash-looping on every host over an unqualified image name, fixed 2026-10-20, so it will start CPU-folding on the next switch of every host that imports it. |
 | **GEN8-NAS** | `.23` | Bulk file + snapshot host (ZFS `sas-24tb`: `ds-public`, `ds-cjdell`, `ds-backup`) | Samba + NFS shares, sanoid snapshots, syncoid → N40L-NAS, `backup-host` receiver (`backup` user, `/var/lib/backup`), Scrutiny, Prometheus exporters, Tailscale, `lsiutil`/`sasutils` (HBA) | no autoRollback. ZFS via disko. |
@@ -365,7 +365,11 @@ The repo lives here (`192.168.49.50`) as on other hosts (e.g. N100-NAS) — chec
     they were added after the Recallium `/api/` catch-all shadowed the
     llama-swap UI's `/api/events` SSE stream.
   - **Public HTTPS: `*.ai.chrisdell.info`** (DNS wildcard → this box's IPv6
-    `2a02:8010:6680:49::50`). The wildcard fallback vhost in
+    `2a02:8010:6680:49::50` — an address in Zen's *delegated* /48, mirrored by
+    a Route 53 AAAA record: if the delegation ever really changes (verify per
+    `hosts/grafton-router/networking/constants.nix` — a WAN SLAAC /64 is NOT a
+    delegation signal), this external record is part of the sweep list). The
+    wildcard fallback vhost in
     `hosts/zen3-nixos/tls.nix` serves the exact same locations as the
     `192.168.49.50` vhost (it references them via `config`) with `forceSSL`
     (80→443 redirect) for the apex and any name without a dedicated subdomain.
@@ -1626,6 +1630,15 @@ Full write-up: **`docs/leighhack-tailscale.md`**. Diagnose with
 `sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh` (walks route → VM →
 tailscale session → tunnel → DNS and names the failing layer). `hackspace-tunnel-check.service`
 probes it every 2 min and pushes to the phone via `notifications.gateway`.
+Since 2026-11-19 there is also an **IPv6** path through this VM: `networking/interface.nix`
+routes the hackspace's `2001:8b0:1d14::/48` + `fd99:dead:beef::/48` via the VM's
+link-local, the VM masquerades only that v6 to its tailnet address (v4 stays
+source-preserving on purpose), and the health check has a 4th layer that reports
+HTTP 403 on `*.int` as "our source is not in their ACL" — its own failure
+class, learned the hard way when the hackspace's ACL row for our v6 broke and
+794 requests died while every reachability layer stayed green (the delegation
+had NOT changed — `docs/leighhack-tailscale.md` before you re-pin anything
+pinned to it).
 
 The 2026-10 outage, in one paragraph: the VM had **no disk**, so
 `/var/lib/tailscale` was RAM-only and every restart had to re-register; nixpkgs'

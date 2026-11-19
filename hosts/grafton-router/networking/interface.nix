@@ -109,6 +109,42 @@ in
             # installing the route must not depend on the gateway answering.
             GatewayOnLink = true;
           }
+          {
+            # The IPv6 counterparts, added 2026-11-19: every
+            # *.int.leighhack.org name answers with the two hackspace AAAAs
+            # (AAISP + ULA), and without these routes each one left the house
+            # over Zen and arrived at the hackspace door as a WAN client,
+            # admitted only by a hand-written ACL row pinned to a prefix the
+            # hackspace has to keep chasing — when that row broke on
+            # 2026-11-19, 794 requests got 403 while every reachability layer
+            # stayed green (docs/leighhack-tailscale.md; note it blamed a Zen
+            # re-delegation — it had NOT happened, which is exactly why the
+            # tailnet path with its own stable source is the fix).
+            # Both /48s are advertised by gw-1 and live in the VM's tailscale
+            # routing table (verified: `ip -6 route show table all` ->
+            # table 52; the unconditional `from all lookup 52` rule serves
+            # forwarded traffic too).
+            #
+            # The gateway is the VM's link-local: derived by EUI-64 from the
+            # tap MAC 02:00:00:00:00:15 that
+            # virtual-machines/grafton-hackspace-client.nix pins, so it is as
+            # stable as that MAC (change one, change the other). It must carry
+            # NO %scope suffix — [Route] Gateway= is inet_pton(3)-format and
+            # systemd-networkd (v262) rejects "fe80::…%lan" outright; the
+            # link-local next-hop is implicitly bound to the lan link this
+            # .network file configures.
+            # The v6 source is the VM's tailnet address by the time it
+            # reaches the hackspace — masqueraded in that file, NOT here;
+            # networking/firewall.nix says why the router cannot do it.
+            Destination = "${net.HACKSPACE_IPV6_SUBNET}";
+            Gateway = "fe80::ff:fe00:15";
+            GatewayOnLink = true;
+          }
+          {
+            Destination = "${net.HACKSPACE_ULA_SUBNET}";
+            Gateway = "fe80::ff:fe00:15";
+            GatewayOnLink = true;
+          }
         ];
       };
 

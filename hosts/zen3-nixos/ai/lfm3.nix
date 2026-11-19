@@ -196,7 +196,10 @@ in
         allow 192.168.10.0/24;    # VLAN10
         allow 10.47.0.0/16;       # WireGuard
         allow 100.64.0.0/10;      # tailnet (headscale CGNAT range)
-        allow 2a02:8010:6680:49::/64; # LAN's /64
+        allow 2a02:8010:6680:49::/64; # LAN's /64 — inside Zen's delegated /48,
+                                       # a self-expiring row: if the delegation
+                                       # ever really changes (verify first!), sweep
+                                       # with hosts/grafton-router/networking/constants.nix
         allow 2001:8b0:1d14::/48; # leighhack's IPv6 /48 (HACKSPACE_IPV6_SUBNET)
         deny all;
       '';

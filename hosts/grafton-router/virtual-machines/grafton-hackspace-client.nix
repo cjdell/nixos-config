@@ -6,6 +6,10 @@
 }:
 
 let
+  # Hackspace v6 prefixes (the nat6 masquerade scope below) — same source of
+  # truth as networking/interface.nix and networking/firewall.nix.
+  net = import ../networking/constants.nix;
+
   # The VM's secrets share, and the only host secrets it gets. `vmSecretNames`
   # must match the guest's references (it reads them at the host's sops paths,
   # which the guest sees through this share's mountPoint), and the share is a
@@ -414,11 +418,41 @@ in
             '';
           };
 
-          # No masquerade (NAT) on br-host -> tailscale0: traffic must keep its
+          # v4: no masquerade (NAT) on br-host -> tailscale0: traffic must keep its
           # original source address so replies from grafton LAN hosts come back
           # end-to-end. The hackspace side (services1 + OPNsense static route)
           # knows how to reach 192.168.49.0/24 back through this VM, so replies
           # routed to the grafton LAN are delivered directly without NAT state.
+          # The grafton /24 is stable, so a source-based ACL on their side can
+          # trust it forever — see the "IPv6 counterparts" comment in
+          # networking/firewall.nix for why v6 must be the opposite.
+          #
+          # v6: ONE masquerade rule, scoped to the two hackspace /48s. The
+          # house's v6 source is Zen's delegated /48, which rotates whenever Zen
+          # re-delegates — source-preserving v6 therefore forces the hackspace
+          # ACL to chase a prefix we do not own, and on 2026-11-19 that chase
+          # failed for 794 requests (docs/leighhack-tailscale.md). This VM's
+          # tailnet ULA (fd7a:115c:a1e0::13) is the stable source their ACL
+          # already admits — proven same-day: a curl from this VM to the door's
+          # v6 returned HTTP 302. SNATing there also removes the v6 return path
+          # from their routing table entirely (replies ride the tailnet back to
+          # this node), so the one-way-after-fresh-registration failure mode is
+          # structurally gone for v6. It is deliberately NOT done for v4: the
+          # end-to-end design above works and their side depends on it.
+          # tailscale's own MagicNAT is not the fix — its masquerade chains are
+          # mark-gated to tailscaled-originated traffic and never touch
+          # forwarded packets (measured on 1.104.1: the ip6 rule's counter sat
+          # at zero while LAN traffic crossed this VM).
+          nat6 = {
+            family = "ip6";
+            content = ''
+              chain post {
+                type nat hook postrouting priority srcnat; policy accept;
+                iifname br-host oifname tailscale0 ip6 daddr { ${net.HACKSPACE_IPV6_SUBNET}, ${net.HACKSPACE_ULA_SUBNET} } \
+                  masquerade comment "stable v6 source for house -> hackspace (2026-11-19)"
+              }
+            '';
+          };
         };
 
         system.stateVersion = "26.05";

@@ -532,6 +532,78 @@ undocumented kernel state; anything that recreates its link silently owns its
 life.** Anything else this host installs by `ip route add` at boot deserves the
 same audit.
 
+## 2026-11-19: what `*.int` answers with over IPv6, the 794 403s, and a misdiagnosis
+
+Every `*.int.leighhack.org` name answers with **three** addresses: `10.3.1.1`
+(their LAN, reached *through this tailnet*), `2001:8b0:1d14:225::1` (the
+hackspace's public AAISP half) and `fd99:dead:beef:225d::1` (their ULA). Until
+today the route from the house into the hackspace was IPv4-only, so both AAAAs
+meant the same thing: **leave the house over Zen and arrive at the hackspace
+door as a WAN client** — waved through by a hand-written
+`allow <our delegated /48>;` row in the hackspace's own config, i.e. an ACL row
+chasing a prefix we do not own. On 2026-11-19 that row stopped matching what we
+send: last allowed request `13:48:58`, first 403 `14:26:55`, 794 more after it,
+all over IPv6, while every layer of `hackspace-tunnel-check` stayed green.
+
+**The handover note that started this work diagnosed a Zen re-delegation
+(`2a02:8010:6680::/48` → `2a02:8011:d000::/48`). It was wrong, and acting on it
+briefly cost the house its working IPv6.** Measured the same evening: a fresh
+DHCPv6 re-solicit (`journalctl -u systemd-networkd | grep 'received delegated
+prefix'`) still returned `2a02:8010:6680::/48`; the "new" /48 is Zen's
+**access-link** space — the WAN interface holds `2a02:8011:d000:672::/64` via
+RA and has for weeks (it predates today in the `headscale.nix` DERP dial
+hint); and source-bound pings (`ping -6 -I <addr> 2606:4700:4700::1111`)
+showed nothing routes for the candidate /48 while the old /48 still worked
+end to end. Re-pinning `LAN_IPV6_PREFIX`/`DELEGATED_PREFIX` to the guessed /48
+black-holes the house v6 twice over — `networking/firewall.nix` forwards only
+`ip6 saddr DELEGATED_PREFIX`, and the RA stops advertising the real one — which
+is exactly what happened; it was reverted the same evening. Durable rules:
+**a WAN SLAAC address is not a delegation signal; before re-pinning anything
+pinned to the delegation, verify it three ways (DHCPv6 journal, the ISP's own
+statement/dashboard, and a source-bound ping proving both directions).** The
+sweep list for a *real* future re-delegation is annotated in
+`networking/constants.nix`: the constants there, `dns.nix` statics, both
+postgres pg_hba rows, `hosts/zen3-nixos/ai/lfm3.nix`, the `FRIEND_V6_*` slices
+(and the friend's wg config), and the Route 53 AAAA records — external, this
+repo cannot move them. Note also the DHCPv6-PD client does not re-solicit while
+the PPP session lives, so a real rotation only shows up after
+`networkctl renew pppoe-zen` or a pppd bounce.
+
+What fixes the actual fragility, independent of any prefix story, is that the
+hackspace's AAAAs no longer touch Zen on the way out:
+
+* **v6 routes into the VM.** `networking/interface.nix` declares routes for
+  `2001:8b0:1d14::/48` and `fd99:dead:beef::/48` via the VM's link-local
+  (`fe80::ff:fe00:15` — EUI-64 of the pinned tap MAC `02:00:00:00:00:15`;
+  change one, change the other; and **no `%lan` scope suffix** — networkd v262
+  rejects that form and silently drops the route, verify with
+  `journalctl -u systemd-networkd | grep -i 'failed to parse'`), the same
+  networkd-ownership pattern that protects the `10.3.0.0/16` route since the
+  2026-11-01 bridge-flush incident. `--accept-routes` in the VM already carries
+  both /48s (tailscale's table 52; its unconditional `from all lookup 52` rule
+  serves forwarded traffic too), so these requests arrive on `tailscale0`.
+* **v6 gets one source-NAT point — in the VM — where v4 keeps none.** The
+  v4 no-NAT design above still holds (their static route for our stable /24).
+  v6 cannot preserve source and still survive an ACL chasing our ISP's prefix:
+  the one permanently-admissible source is the VM's tailnet ULA
+  (`fd7a:115c:a1e0::13` — proven admitted: HTTP 302 from the VM), so
+  `virtual-machines/grafton-hackspace-client.nix` masquerades
+  `br-host → tailscale0` traffic **scoped to the two hackspace /48s**. Side
+  benefit: the v6 return path is pure tailnet, immune to the
+  one-way-after-fresh-registration failure this doc is full of. Measured for
+  the next reader: tailscale 1.104.1's MagicNAT is **not** a substitute — its
+  masq chains are mark-gated to tailscaled's own traffic and never
+  forward-SNAT (ip6 counter sat at zero under live LAN traffic). This is also
+  what makes the hackspace's ACL row deletable — the whole point of the
+  exercise: with their Zen-prefix row gone their door still admits us, because
+  it now only ever sees `fd7a:115c:a1e0::13`.
+* `hackspace-tunnel-check` gained a **fourth layer** to name this fault class
+  by itself: `curl -6 https://network-info.int.leighhack.org/healthz`. Any
+  HTTP status = the v6 path and their ACL both admit us; **403 pages as "our
+  source is not in their ACL", never as "tunnel down"**; connect failure = our
+  v6 path. That is the alert that would have named 2026-11-19 at 14:26 instead
+  of at 21:00, by a human, from a page that would not load.
+
 ## Related
 
 * `hosts/grafton-router/virtual-machines/grafton-hackspace-client.nix` — the VM,

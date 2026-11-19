@@ -19,7 +19,22 @@ rec {
   LAN_IPV4 = "192.168.49.1"; # router on lan (192.168.49.1/24)
   VLAN10_IPV4 = "192.168.10.1"; # router on vlan10 (192.168.10.1/24)
 
-  # LAN's /64 slice of the delegated prefix (subnet-id 0x49)
+  # LAN's /64 slice of the delegated prefix (subnet-id 0x49).
+  # ⚠️ Self-expiring credential — the ISP owns this prefix. Before ever
+  # re-pinning it, verify the LIVE delegation from THREE sources, because a
+  # WAN SLAAC address is NOT one: `journalctl -u systemd-networkd | grep
+  # 'received delegated prefix'` (authoritative — ours was still
+  # 2a02:8010:6680::/48 at the 2026-11-19 re-solicit even while a handover
+  # note was certain Zen had moved us to 2a02:8011:d000::/48; that /48 was
+  # actually read off Zen's access-link /64 2a02:8011:d000:672::, which the
+  # WAN interface has had for weeks), the ISP's own account/dashboard, and a
+  # source-bound ping (`ping -6 -I <addr-in-candidate-prefix> 2606:4700:4700::1111`)
+  # proving it routes BOTH ways. Getting this wrong black-holes the house v6:
+  # firewall.nix forwards only `ip6 saddr DELEGATED_PREFIX`. Sweep the pin
+  # list together: the static v6 reservations in dns.nix, the pg_hba lines
+  # (this host + N100-NAS), lfm3's nginx allow row in hosts/zen3-nixos/, the
+  # FRIEND_V6_* slices (the friend's wg config embeds the /64), and the
+  # Route 53 AAAA records (external — nothing in this repo moves them).
   LAN_IPV6_PREFIX = "2a02:8010:6680:49::";
   LAN_IPV6_SUBNET = "${LAN_IPV6_PREFIX}/64"; # what LAN clients present as their source
   LAN_IPV6_ADDRESS = "${LAN_IPV6_PREFIX}1"; # router on lan (…:49::1/64)
@@ -36,7 +51,10 @@ rec {
   GATLING_SUBNET = "10.0.1.0/24"; # gatling-services' tailnet subnet route
   # Hackspace public IPv6 — trusted; full access to the LANs from the internet
   HACKSPACE_IPV6_SUBNET = "2001:8b0:1d14::/48";
-  DELEGATED_PREFIX = "2a02:8010:6680::/48"; # IPv6 delegated by Zen (PPPoE)
+  # ...and the ULA the same *.int names hand out with it. Also advertised by
+  # gw-1 on the leighhack tailnet, so it, too, belongs on the VM route.
+  HACKSPACE_ULA_SUBNET = "fd99:dead:beef::/48";
+  DELEGATED_PREFIX = "2a02:8010:6680::/48"; # IPv6 delegated by Zen (PPPoE); see LAN_IPV6_PREFIX
   DBTHR33_SUBNET = "2a0a:ef40:241::/48";
   # dbthr33-server's network — trusted
   # so its direct WireGuard/NAS traffic
@@ -88,6 +106,10 @@ rec {
   # Subnet id 0x8472 of Zen's /48; :49: is the LAN, :10: is VLAN10 (PD). Any
   # /64 inside the /48 works — Zen routes the whole /48 to this session and the
   # router blackholes it on lo, so a new slice needs no upstream change.
+  # They pin the delegation, so if it ever *really* changes (verify per the
+  # LAN_IPV6_PREFIX comment) these move with it — and the friend's wg config
+  # embeds the old slice, so he needs the new /64 too
+  # (docs/friend-ipv6-over-websocket.md).
   FRIEND_V6_SUBNET = "2a02:8010:6680:8472::/64"; # the shared /64 from our /48
   FRIEND_V6_ROUTER = "2a02:8010:6680:8472::1"; # wg-friend on the router
   FRIEND_V6_VM = "2a02:8010:6680:8472::2"; # wg-friend on the friend VM

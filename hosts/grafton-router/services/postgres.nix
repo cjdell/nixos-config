@@ -12,6 +12,10 @@ let
     host    sameuser  all     192.168.0.0/16        scram-sha-256
     host    sameuser  all     10.47.0.0/16          scram-sha-256
     host    sameuser  all     2001:8b0:1d14::0/48   scram-sha-256
+    # 2a02:... is Zen's delegated /48 — a self-expiring credential in someone
+    # else's hands. If it ever changes (verify per the three checks in
+    # hosts/grafton-router/networking/constants.nix before re-pinning ANY of
+    # them), sweep that file's comment list together with this line.
     host    sameuser  all     2a02:8010:6680::0/48  scram-sha-256
     host    sameuser  all     2a00:23c8:b0ac::0/48  scram-sha-256
   '';
