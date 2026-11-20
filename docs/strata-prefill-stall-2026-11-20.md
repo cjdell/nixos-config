@@ -202,9 +202,9 @@ the copy ring is a *symptom*, not the owner.
 >    prompt path (or `--expert-cache` guidance) would be worth a line in
 >    docs/AMD_HIP.md.
 >
-> Engine 0.1.59.1 (0.2.13.1+main-13eedf55) has not reproduced it in 6 months of
-> our logs (2026-11-13 → 11-18 at the same workload), which is why we are back
-> on it.
+> Engine 0.1.59.1 (0.2.13.1+main-13eedf55) has not reproduced it: our engine log
+> shows zero `no progress` episodes from 2026-10-20 through 2026-11-17 under the
+> same traffic, which is why we are back on it.
 
 ## Related upstream notes (0.2.15 "Known problems", for context)
 
