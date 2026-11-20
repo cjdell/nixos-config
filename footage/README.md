@@ -504,6 +504,95 @@ VRAM free with the LLM resident).
 * Stage 1's intermediate is `libx264 crf 12` (visually lossless for
   this pipeline's purposes).
 
+## Merging two digitisations of one tape (Dell Family Tape 12, 2026-11-20)
+
+A tape digitised twice — once long ago (2004: `NVECapture.*.mpg`,
+MPEG2 PS + mp2, 720x576 25i **tt**) and again recently (2026: PCTV raw
+masters, high quality but the *degraded now* tape made them dropout-ridden
+and the operator scrubbed the deck, so parts are passes, not tape order) —
+merges into one watch copy differently than a single-source tape:
+
+* **The old digitisation is the map, not (necessarily) the content.** Its
+  concat gives the physical tape timeline; the damage census (strict-blue
+  per-second) on the old files decides nothing quality-wise if it's clean
+  (it was: 0 blue frames in 5425 s — the tape deteriorated *after* 2004).
+* **Prefer the newer capture only where a *content-verified* pass covers the
+  tape moment** (it deinterlaces to materially better video). Verified here:
+  60% of the final cut is 2026 footage (the fjord/mountain-road block, the
+  634 s mountain-coat block, the whole Niagara boat section 3394-5425, the
+  gondola, the lake cruise, harbor), 40% — everything whose 2026 chain failed
+  verification or was dropout-blanketed — is 2004. Start from the assumption
+  *unverified chains are wrong* (below), not right.
+* **Align by audio envelope, not by timecode or stamps.** 2 kHz mono
+  loudness vectors (50 ms), 0.4 s-decimated **global** coarse NCC per 40 s
+  block + full-rate refine, then **best-weight chains of consecutive blocks
+  with Δold ≈ +40 s** = real-time passes; seeks between them break chains.
+  Global per-block peaks without the chain step are useless (tape audio is
+  repetitive — a 40 s window NCC-matches 0.6 everywhere); with it, real
+  anchors hit 0.8-0.98 and outliers die for want of a neighbour. FFT-tiled
+  sliding NCC OOM-killed the box (28 GB); `np.correlate` is the right tool
+  at this size. Beware the vectors-vs-samples unit trap (×100 label bugs).
+* **Audio chains produce convincing FALSE anchors on featureless audio.**
+  Stationary broadband sound (waterfall roar, sea, traffic wash) NCC-matches
+  anything at any offset: chains scored 0.7-0.9 and placed the Niagara park
+  at the Boston-dusk-observation-deck slot, a pond in a subway slot, and a
+  167 s Niagara-locomotive block into the pond→Customs-House→steamboat→
+  redcoat-parade stretch — i.e. whole *wrong scenes* at plausible positions.
+  **Scores cannot detect this; only frames can.** The gate that catches it:
+  for every multi-second NEW block, extract one frame at the block start and
+  end from the 2026 part AND from the 2004 file at the same tape moment and
+  *look* at the 2×2 grid (`b12verify.sh`, one PNG per block). A real chain
+  matches scene-for-scene at both ends; 9 of 16 blocks here passed, 7 failed
+  and were re-based onto 2004 — no amount of re-planning fixes a false chain,
+  and nothing short of this check finds one.
+* **Old-capture file continuity is free ground truth.** `NVECapture.NNNN.mpg`
+  names are deck-run order and the runs are back-to-back: file-length sums
+  equal the tape timeline (verified at 0007→0009 by landmark, 0012→0013 by
+  the convoy scene, 0001→0002 by duration arithmetic, and end-to-end by the
+  5425 s total). So the 2004 digitisation covers ~the whole tape with one
+  ~0-2 s gap at the renamed 0008 boundary, tape→file mapping is
+  `t − Σ lengths-before(file)` — a *content gap* the planner "found" in the
+  old material is almost certainly an alignment artifact; check continuity
+  before ever filling a region with 2026 footage. (The "lost 0008" story was
+  exactly that artifact: back-to-back lengths leave no hole, the tape position
+  is covered — in 2026 by a solid blue band, which is why it *looked* lost.)
+* **A second detector is needed for full-frame washes.** The strict detector
+  (U−V>80 ∧ YAVG<120) misses deep dropouts whose frame means sit at U−V≈75,
+  and any *pixel*-mask relaxation false-fires on natural sky. What works:
+  plain `signalstats` per-frame means (cheap — same pass as the census) and
+  a run of ≥6 frames of `(u>165 ∧ u−v>45 ∧ y<150)` or `(y>228 ∧ |u−v|<18)`
+  — full-frame washes are saturated in frame *means*; natural content is not.
+  Run it over the **rendered segments** (`b12means2.sh`, 13 min local) so it
+  inspects exactly what ships; every wash surviving to output shows up there
+  even when both the source census and the seam sweep missed it.
+* **Excise on the plan, not the render**: map each part's per-second damage
+  census through its chain, cut bands (≥4 s of blue/s≥3 runs, −0.9/+1.4
+  shoulders, merged ≤1.5 s), keep the rest as clean sub-segments, let OLD
+  fill the excised windows mid-pass. Minimum new sub-segment 8 s.
+* **MPEG2 PS presplit traps**: stream-copying mp2-in-PS into MKV fails
+  ("unknown timestamp" — the PS head); copy-based PS *and* MPEG-TS presplits
+  inherit a ~15 s audio-DTS overrun (duration asserts caught it); reading
+  `.ts` also gave lsmash a bogus fps. The fix that works: presplit with a
+  **fast re-encode** (`-c:v mpeg2video -q:v 2 -c:a mp2`) — 50 Mbit/s on a
+  6-9 Mbit/s source is an invisible extra generation before crf-16 HEVC.
+  Segment audio is then normalized (`-c:a pcm_s16le`, video copy) so the
+  usual `-c copy` concat stays uniform across PCM masters and mp2 old files.
+  `--source-color` writes no colour tags for either class, and both are
+  SAR 1:1 50p — verified on a 2-segment test before the full run.
+* Tooling for this class (all in `footage/batch/`): `b12dp.py` (chain
+  alignment) → `b12verify.sh` (**block content verification — run this
+  before believing any chain**) → `b12plan.py` (excision + assembly) →
+  `tape12-render.sh` (mixed-source EDL driver: per-seg kit render, presplit
+  for OLD, per-seg duration assert, uniform concat, F@H lease; `read -u 9`
+  — the kit's internal ffmpeg otherwise steals your loop's stdin mid-line)
+  → `b12means2.sh` + `b12wash.py` (per-frame means over rendered segs, wash
+  runs) → `tape-final.sh` unchanged for the seam sweep (it derives seams
+  from rendered segment durations, so source mixing is invisible to it) →
+  `b12audit.sh` + `b12audchk.py` (independent census of the output + EDL
+  cross-check). Sweep TEAR flags of 2-4/60 at source scene cuts, deck
+  tracking wobbles and intentional excision cuts are expected — adjudicate
+  with frame strips, don't chase them.
+
 ## Files
 
 | file                | role                                                          |
