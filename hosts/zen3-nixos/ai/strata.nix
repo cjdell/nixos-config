@@ -417,16 +417,14 @@ let
         # least-recently-used conversation is evicted, so this is a cap, not a
         # reservation.  `--conversation-cache-min-free-mib` (default 2560) is the
         # RAM floor: parking is skipped when there is no room.
-        # 0 = off, 2026-11-20: every stall on this box is preceded by a
-        # conversation-cache park (a 3-5 GB host-side copy of the previous
-        # 269K-token conversation: "parked 148641 tokens ... 3158053940 bytes"
-        # immediately before "no progress for 60 s ... layer 22"), and the
-        # failing requests always start with cache_n=0 - i.e. the cache was
-        # missing anyway, so parking bought nothing and its copy overlapped the
-        # next prompt read.  Off until the engine's park/prefill overlap is
-        # fixed upstream.
+        # 2026-11-20: briefly set to 0 while testing the park-overlap theory -
+        # that was REFUTED (a stall still happened at 53,909 of a 158K prompt),
+        # and off costs exactly what the cache exists for: every turn then
+        # re-reads its whole prompt ("prompt 160036 tokens = 0 reused + 160036
+        # read"), i.e. no reuse across turns and no parked conversations, and a
+        # full re-read is the very shape that hits the stall. Restored.
         "--conversation-cache-mib"
-        "0"
+        "16384"
         "--conversation-cache-slots"
         "12"
         # Only park conversations worth a slot; one-shot probes / titles /
