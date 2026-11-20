@@ -284,7 +284,7 @@ let
   # profile (196 KB, 24576 ranked pairs) is carried in the model-data area
   # beside the pack and GGUFs - verified accepted by 0.1.63 at startup - and
   # regenerated later from our own traffic with --expert-profile-save P (#477).
-  expertProfile = "/home/cjdell/Strata/expert-profile.bin";
+  expertProfile = "${strata}/share/strata/data/expert-profile.bin";
 
   # ISTA's vision encoder for Flash-Next: a 27-layer ViT + the projector into
   # the language model (0.85 GiB). Model data, so it lives beside the GGUFs and
@@ -417,8 +417,16 @@ let
         # least-recently-used conversation is evicted, so this is a cap, not a
         # reservation.  `--conversation-cache-min-free-mib` (default 2560) is the
         # RAM floor: parking is skipped when there is no room.
+        # 0 = off, 2026-11-20: every stall on this box is preceded by a
+        # conversation-cache park (a 3-5 GB host-side copy of the previous
+        # 269K-token conversation: "parked 148641 tokens ... 3158053940 bytes"
+        # immediately before "no progress for 60 s ... layer 22"), and the
+        # failing requests always start with cache_n=0 - i.e. the cache was
+        # missing anyway, so parking bought nothing and its copy overlapped the
+        # next prompt read.  Off until the engine's park/prefill overlap is
+        # fixed upstream.
         "--conversation-cache-mib"
-        "16384"
+        "0"
         "--conversation-cache-slots"
         "12"
         # Only park conversations worth a slot; one-shot probes / titles /
@@ -596,6 +604,28 @@ let
     # the poisoned window emits nothing, the caches are dropped and the prompt is read
     # again from token 0, so this only observes - it never changes an answer.
     env.STRATA_KERNEL_AUDIT = "1";
+    # 2026-11-20 long-prompt stall: every failure (269-289K-token prompts, three
+    # engine builds, two boots) hangs inside a prompt chunk at layers 18-22 with
+    # the GPU holding work, the host idle and NO amdgpu error (no ring timeout,
+    # no reset, no overdrive failure).  The one kernel that only runs in the
+    # failing range is the matrix-core QSA block scorer - it engages above
+    # 28,672 tokens ("the matrix-core QSA block scorer is on once a prompt is
+    # past 28,672 tokens", STRATA_SELECT_WMMA) - and STRATA_PREFILL_TIMING puts
+    # it at 16.3% of prompt GPU time here.  Reverting it is the documented
+    # switch (upstream: "STRATA_SELECT_WMMA=0 ... turns it off", first-token KL
+    # 0.002 above 30K, so answers barely move); cost is ~5% prompt speed at
+    # 98K. This is the causal probe - if the stalls stop, it is that kernel.
+    # REFUTED as the cause on 2026-11-20 16:14 (same stall with it off). Left at
+    # the default: the matrix-core QSA block scorer on above 28,672 tokens.
+    # ALSO REFUTED (16:19): with STRATA_PREFILL_ISSUER=0 there is no
+    # strata-issue thread any more, and the request still stalls at 79,491 of a
+    # 150K prompt with the GPU at 100% busy / 60 W - so the copy ring is not the
+    # owner either. Left at the default (threaded issue on).
+    # Safety net while the above is on trial: the default watchdog (60 s) turns a
+    # stall that would have finished into a failed turn.  Widen it so a slow
+    # chunk completes instead of erroring (the trade: a truly stuck request now
+    # holds the single slot for up to 3 minutes).
+    env.STRATA_WATCHDOG_S = "180";
     # NOT set, measured here 2026-11-10 (see the STRATA_PF_FUSED_Q50 bullet in the
     # 0.2.12/13 block below for the A/B): enabling the fused Q5_0 prompt kernel is
     # a ~12 % prefill saving on paper and 0.08 s per request in practice on this

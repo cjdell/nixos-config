@@ -1223,27 +1223,33 @@ flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
 procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.17** (tag `12d491da4a6904eb49aaa6f2f63ec4b1a17582e3`, released 2026-11-20, live
-2026-11-20) — **engine 0.1.63**. It replaced 0.2.15 (engine 0.1.61 on this box;
-upstream notes there is no engine 0.1.61 *release* — 0.2.15 ships the 0.2.14 engines as
-0.1.60, so that pin was a main snapshot, not a shipped engine) after the **2026-11-20
-prefill stalls**. The signature: `exit -6` from Strata's own 60 s no-progress watchdog
-(issue #29) during a multi-chunk prefill, always at **layers 18–21**, while the stall
-report says `the prompt's GPU work (GPU 0) was still running`, the host thread is idle,
-the 15 CPU-pool workers are parked and 0 of 80 threads wait on disk — with **no** amdgpu
-error (no ring timeout, no reset, no overdrive failure). The card sits at ~80 W with
-`gpu_busy 100` and `mem_busy 0` because the GPU is *waiting*, not computing, so the
-`mclk 96 MHz` seen during a stall (and DPM's drop to it) is a **symptom**: the fault
-reproduced with `power_dpm_force_performance_level=high` (`mclk` pinned at 1258) and
-survived a reboot, and synthetic repetitive prompts (99.8 % expert-cache hit) never trip
-it while real agent traffic (85–97 %) does. 0.2.15's own release notes list our hardware
-as KNOWN problems — *"Radeon gfx1201: DFlash2 chosen by hand can stall on the prompt"*
-and *"Radeon R9700 on Linux: one engine start stalled on its first prompt … stopped
-itself after 60 seconds without progress"* — and 0.2.17 fixes that area: HIP keeps the
-kernel's NUMA balancing off the engine's memory (it made KFD evict the GPU queues,
-#4866/#4867), a first prompt over two chunks no longer ends the engine with exit -6 on
-0.1.62 (#5104 #5354 #5966 #6018 #6134), and "a watchdog beat in the PLE reader" (#4682)
-is among 21 crash fixes.
+**0.2.13.1+main-13eedf55** (tag `628f7495` + main `13eedf55`, engine **0.1.59.1**) —
+**reverted back to it on 2026-11-20 16:24** after the **2026-11-20 prefill stalls**
+hit 0.2.15 (engine 0.1.61) and 0.2.17 (engine 0.1.63). Full evidence pack, the
+ruled-out table and a ready-to-file upstream report:
+**`docs/strata-prefill-stall-2026-11-20.md`**.
+The signature: `exit -6` from Strata's own 60 s no-progress watchdog (issue #29)
+during a full re-read of a 148–289 K-token prompt, always at **layers 18–22**, while
+the stall report says `the prompt's GPU work (GPU 0) was still running`, the host
+thread is idle, the 15 CPU-pool workers are parked and 0 of 80 threads wait on disk —
+with **no** amdgpu error (no ring timeout, no reset, no VM fault, no overdrive
+failure). Sampled live during two hangs: **60–80 W, `gpu_busy 100`, `mem_busy 0`,
+`mclk 1258`** (perf level `high` in one capture), i.e. a GPU kernel spinning with no
+memory traffic — so the `mclk 96 MHz`/80 W state seen under `auto` is a *symptom* of
+the spin, not a clock fault: it reproduced with `power_dpm_force_performance_level=high`
+and survived a reboot. Synthetic repetitive prompts (99.8 % cache hit) never trip it;
+real agent traffic does. Refuted one by one (all with a control run):
+`STRATA_SELECT_WMMA=0`, `STRATA_PREFILL_ISSUER=0`, `--prompt-cache-every 0`,
+`--conversation-cache-mib 0`, and the engine bump itself. 0.2.15's own release notes
+list our hardware as KNOWN problems — *"Radeon gfx1201: DFlash2 chosen by hand can
+stall on the prompt"* and *"Radeon R9700 on Linux: one engine start stalled on its
+first prompt … stopped itself after 60 seconds without progress"*. Mitigations left in
+place: **`STRATA_WATCHDOG_S=180`** (a stall that would have finished is not failed;
+a truly stuck request holds the single slot 3 min) and the conversation cache **off**
+(`--conversation-cache-mib 0`, since the failing requests were cache misses anyway).
+**The 0.2.17 port exists and built** (commit `c905142`, engine 0.1.63, store
+`ny7zm62zxg32s2psahv14cvyjdk6cp97-strata-0.2.17`) — keep the notes below if it is
+re-tried:
 **0.2.16 moved the tree into `engine/ app/ terminal/ tools/`, so the package differs
 from the 0.2.13.1-era one:** `cmakeDir = "../engine"` (nixpkgs' cmake hook `cd`s into
 `build/` first, so the path is relative to `build/`), the picture reader builds from
@@ -1276,16 +1282,17 @@ is `project(strata VERSION …)`). 0.2.0 split the repo into
 `-DSTRATA_GGML_DIR` (verified with `diff -r`: every common source of llama.cpp
 `3cf03257`'s `ggml/` is byte-identical there — only the two CMakeLists are trimmed,
 plus Strata's own `ggml-cuda-tq/` folder; the `VERSION.txt` pin is the same commit).
-Since v0.2.17 the picture reader is `terminal/tools/vision`, built from Strata's own
-tower (`own/`) — "no llama.cpp source, STRATA_GGML_DIR does not reach it" — so the
-`llama` flake input is no longer used to build `strata-vision` at all (verified:
-`strata-vision` builds + links from that tree, `strata --families` → `qwen4exp
+Since v0.2.15 the picture reader builds from the vendored `tools/vision` (0.2.17
+moved it to `terminal/tools/vision`, built from Strata's own tower — keep that note
+for the port; on the current 0.2.13.1 build it is the `llama`-based `tools/vision`
+again, so `strata-vision` is built with `LLAMA_DIR`, `strata --families` → `qwen4exp
 qwen35moe`).
 0.2.0's split also means `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-11-20 (0.2.17)** — `ExecStart` names `/nix/store/<hash>-strata-0.2.17`
-and `/v1/status` reports `"engine": "0.1.63"`):
+2026-11-20 16:24 (0.2.13.1+main-13eedf55)** — `ExecStart` names
+`/nix/store/<hash>-strata-0.2.13.1+main-13eedf55` and `/v1/status` reports
+`"engine": "0.1.59.1"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
