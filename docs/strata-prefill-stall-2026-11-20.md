@@ -38,10 +38,13 @@ thousand) never fail. Typical failing request:
 [strata] done: 0 tokens in 103 s (no speed) (error, cancel=False)
 ```
 
-All failure positions observed on 2026-11-20: **0, 13 134, 52 540, 53 909, 79 491,
-123 754, 152 932, 182 126, 189 720, 211 296, 234 572** tokens; layers **18, 19,
-20, 21, 22, 24, 26, 35, 43** (18–22 dominate). Hang rate today ≈ 50 % of big
-reads; the same workload was clean 2026-11-13 → 11-18.
+**20 watchdog aborts on 2026-11-20** (`journalctl -u strata | grep -c 'no
+progress for'`), at token/layer: **0 L20, 0 L26, 36 205 L22, 52 540 L24,
+85 548 L31, 86 682 L30, 123 754 L18, 152 932 L20, 167 732 L21, 182 126 L22,
+189 720 L21, 211 296 L21, 234 572 L20** (unique pairs; the engine log adds a few
+more in the 13 K range). Layers seen: **18, 20, 21, 22, 24, 26, 30, 31** — 18–22
+dominate, and no failure is tied to one position or one layer. Hang rate today
+≈ 50 % of big reads; the same workload was clean 2026-10-20 → 11-17.
 
 ## The stall report says the GPU is holding work and the host is idle
 
@@ -141,6 +144,31 @@ the copy ring is a *symptom*, not the owner.
   back to the one 0.2.13.1 ships, mid-prompt checkpoints back on.
 - The 0.2.17 port is in git history (`c905142`) and stashed in
   `/tmp/opencode/strata-package-0.2.17.nix` if we want it back.
+- **`drafting = "dflash2"` is still set** (`hosts/zen3-nixos/ai/strata.nix:761`)
+  — that is upstream's warned-about configuration for this card, see the next
+  section.
+
+## Next steps (not yet tried)
+
+1. **DFlash2 → MTP. This is upstream's own documented remedy for gfx1201 prompt
+   stalls and the one thing we have not tested.** 0.2.15's Known problems:
+   *"Radeon gfx1201: DFlash2 chosen by hand can stall on the prompt (11 of 50
+   engines on 0.2.11). Auto picks MTP on these cards."* We override Auto
+   deliberately — `drafting = "dflash2";` at `hosts/zen3-nixos/ai/strata.nix:761`,
+   kept for +2–2.5 % decode at 72–78 % draft acceptance (see the DFlash2 bullet
+   in AGENTS.md). Cost of the test: one line, ~1 min reload, no engine rebuild;
+   revert is the same line. Honest caveat: DFlash2 is a decode-side drafter and
+   our hard stalls land mid-prefill at layer ~20, so it may well be coincidence —
+   but upstream's note is written about *prompt* stalls on this exact arch, and
+   their count (11 of 50 engine starts) is the rate we see.
+2. **Cap `--expert-cache`** (currently `auto`, which fills the card and leaves
+   **760 MiB** free — the exact number in every stall report). A fixed value
+   leaving 3–4 GiB free would test the driver-side eviction/retry deadlock
+   hypothesis at the cost of decode hit rate.
+3. **File the upstream report** below (it asks upstream for the two things we
+   cannot determine locally: whether the 60 s heartbeat is meant to cover
+   *inside* a prompt chunk, and whether 760 MiB free is an expected headroom for
+   the prompt path).
 
 ---
 
@@ -157,10 +185,12 @@ the copy ring is a *symptom*, not the owner.
 > Long prompt reads intermittently hang. The engine's #29 watchdog fires after
 > 60 s: `no progress for 60 s during a request (reading the prompt (batched):
 > layer 22 of the prompt chunk from token 182126)`, then `exit -6` and
-> `done: 0 tokens … (error)`. Positions we have hit: 0, 13 134, 52 540, 53 909,
-> 79 491, 123 754, 152 932, 182 126, 189 720, 211 296, 234 572; layers 18–22
-> dominate. Warm/incremental reads never fail; a full re-read of 148–289 K
-> tokens fails about half the time on our box today.
+> `done: 0 tokens … (error)`. Twenty aborts in one day, at token/layer 0 L20,
+> 0 L26, 36 205 L22, 52 540 L24, 85 548 L31, 86 682 L30, 123 754 L18, 152 932 L20,
+> 167 732 L21, 182 126 L22, 189 720 L21, 211 296 L21, 234 572 L20 (unique pairs;
+> layers 18, 20, 21, 22, 24, 26, 30, 31 — 18–22 dominate, no position or layer is
+> special). Warm/incremental reads never fail; a full re-read of 148–289 K tokens
+> fails about half the time on our box today.
 >
 > The stall report on both engines says:
 >
@@ -206,16 +236,29 @@ the copy ring is a *symptom*, not the owner.
 > shows zero `no progress` episodes from 2026-10-20 through 2026-11-17 under the
 > same traffic, which is why we are back on it.
 
-## Related upstream notes (0.2.15 "Known problems", for context)
+## What upstream has already seen (0.2.15 "Known problems", verbatim)
+
+> **Radeon R9700 on Linux: one engine start stalled** on its first prompt and the
+> driver reset the card (IQ3_S, 4 KiB memory pages). The engine stopped itself
+> after 60 seconds without progress. It happened once on 11-14, and we have not
+> found the cause.
 
 > **Radeon gfx1201: DFlash2 chosen by hand can stall on the prompt** (11 of 50
 > engines on 0.2.11). Auto picks MTP on these cards.
->
-> **Radeon R9700 on Linux: one engine start stalled** on its first prompt and the
-> driver reset the card (IQ3_S, 4 KiB memory pages). The engine stopped itself
-> after 60 seconds without progress.
 
-0.2.17 fixes that came closest to this class (none of them fixed our case):
-HIP keeps the kernel's NUMA balancing off the engine's memory (#4866/#4867), a
-first prompt over two chunks no longer ends the engine with `exit -6` (#5104
-#5354 #5966 #6018 #6134), and a watchdog beat in the PLE reader (#4682).
+How each one lines up with ours:
+
+| | upstream | us |
+|---|---|---|
+| R9700 / first prompt / "stopped itself after 60 seconds without progress" | **once**, on **IQ3_S**, and **the driver reset the card**, cause not found | **20 aborts on 2026-11-20**, on UD-IQ4_XS v31, and **no reset / ring timeout / VM fault** in any of them |
+| gfx1201 / "DFlash2 chosen by hand can stall on the prompt" | **11 of 50 engine starts** on 0.2.11; remedy is to let Auto pick **MTP** | same architecture, ~50 % of big reads today, and we **do** choose DFlash2 by hand — the untested remedy, see next steps above |
+
+So upstream has seen this class twice: once without a cause, and once with a
+*trigger they can name* (`DFlash2` chosen by hand on gfx1201) plus a workaround
+that does not involve a patch.
+
+0.2.17 fixes that came closest to this class, none of which fixed our case (all
+tried, see the ruled-out table): HIP keeps the kernel's NUMA balancing off the
+engine's memory (#4866/#4867), a first prompt over two chunks no longer ends the
+engine with `exit -6` (#5104 #5354 #5966 #6018 #6134), and a watchdog beat in the
+PLE reader (#4682).
