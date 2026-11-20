@@ -1223,22 +1223,48 @@ flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
 procedure plus the incident history.
 
 The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
-**0.2.15** (tag `c77572806996349b49995e4f98d41b5294d36a21`, released 2026-11-16, live
-2026-11-18) — the first release pin since the 0.2.13.1 era: upstream cut v0.2.14,
-v0.2.14.1 and v0.2.15 while we were on main-13eedf55. **Real engine bump: 0.1.59.1 →
-0.1.60/0.1.61** (source `project()` reads 0.1.61; the release feed still ships the
-0.2.14 binaries as 0.1.60, so this is 0.2.14's engine + main since — the same posture
-as the old bleeding-edge pins). The headline: **the prompt path now runs Strata's own
-kernels, not llama.cpp's MMQ** — upstream says "answers can differ from 0.2.13 in some
-words" and it is a big short-prompt prefill win on the R9700 (256-tok prompt
-396→255 ms); our cmakeFlags already matched the release shape (`PREFILL_MMQ=ON`,
-new `STRATA_MMQ` default OFF — no flag changes). `strata-kernel-audit.diff` re-based
-onto c7757280 (19 hunks, 280 additions, byte-identical added lines, one hand-place:
-upstream's new `native_expert_i8*` block landed inside iq_kernels.cu hunk #1; zero
-fuzz, zero offsets, `git apply --check` clean — notes in `strata-package.nix`).
+**0.2.17** (tag `12d491da4a6904eb49aaa6f2f63ec4b1a17582e3`, released 2026-11-20, live
+2026-11-20) — **engine 0.1.63**. It replaced 0.2.15 (engine 0.1.61 on this box;
+upstream notes there is no engine 0.1.61 *release* — 0.2.15 ships the 0.2.14 engines as
+0.1.60, so that pin was a main snapshot, not a shipped engine) after the **2026-11-20
+prefill stalls**. The signature: `exit -6` from Strata's own 60 s no-progress watchdog
+(issue #29) during a multi-chunk prefill, always at **layers 18–21**, while the stall
+report says `the prompt's GPU work (GPU 0) was still running`, the host thread is idle,
+the 15 CPU-pool workers are parked and 0 of 80 threads wait on disk — with **no** amdgpu
+error (no ring timeout, no reset, no overdrive failure). The card sits at ~80 W with
+`gpu_busy 100` and `mem_busy 0` because the GPU is *waiting*, not computing, so the
+`mclk 96 MHz` seen during a stall (and DPM's drop to it) is a **symptom**: the fault
+reproduced with `power_dpm_force_performance_level=high` (`mclk` pinned at 1258) and
+survived a reboot, and synthetic repetitive prompts (99.8 % expert-cache hit) never trip
+it while real agent traffic (85–97 %) does. 0.2.15's own release notes list our hardware
+as KNOWN problems — *"Radeon gfx1201: DFlash2 chosen by hand can stall on the prompt"*
+and *"Radeon R9700 on Linux: one engine start stalled on its first prompt … stopped
+itself after 60 seconds without progress"* — and 0.2.17 fixes that area: HIP keeps the
+kernel's NUMA balancing off the engine's memory (it made KFD evict the GPU queues,
+#4866/#4867), a first prompt over two chunks no longer ends the engine with exit -6 on
+0.1.62 (#5104 #5354 #5966 #6018 #6134), and "a watchdog beat in the PLE reader" (#4682)
+is among 21 crash fixes.
+**0.2.16 moved the tree into `engine/ app/ terminal/ tools/`, so the package differs
+from the 0.2.13.1-era one:** `cmakeDir = "../engine"` (nixpkgs' cmake hook `cd`s into
+`build/` first, so the path is relative to `build/`), the picture reader builds from
+`terminal/tools/vision`, `serve/ data/ strata_cli/ strata_control/ tools/` are copied
+from `terminal/` into `share/strata`, and **`-DSTRATA_PREFILL_MMQ` is gone** (upstream
+ships `tools/check_no_mmq.py`; the prompt path is Strata's own kernels). Three
+consequences: **`strata-kernel-audit.diff` is NOT applied** — it must be re-based onto
+`engine/src/...` (audit only, everything behind `STRATA_KERNEL_AUDIT`; re-base before the
+next #879 capture); **`--expert-profile` now names
+`/home/cjdell/Strata/expert-profile.bin`** — 0.2.17 ships no profile in `terminal/data`,
+but 0.1.63 still *hard-requires* a static one for the resident CPU-expert tier
+(`--resident-budget-gib` asks for it; without one the engine exits 2 with
+`--resident-cpu-experts requires --mmap-experts and a static --expert-profile`), so the
+0.2.15 file (196 KB, 24576 ranked pairs — verified accepted) lives beside the pack;
+regenerate it from our own traffic with `--expert-profile-save` (#477); and
+**`STRATA_ROUTE_TAIL_SKIP=7` is still ON by default** on this path despite the 0.2.17
+note ("off by default"), checked in the engine log — so answers did not move.
 Second family live on the same engine: **Qwen3.6-35B-A3B** — see the
-`qwen36-ud-q4-k-xl` bullet below. Previous pins: main-13eedf55 (2026-11-13 → 11-18,
-engine 0.1.59.1) and the v0.2.13.1 release `628f7495` (2026-11-10; from 0.2.11
+`qwen36-ud-q4-k-xl` bullet below. Previous pins: 0.2.15 (`c7757280`, 2026-11-16 →
+11-20), main-13eedf55 (2026-11-13 → 11-18, engine 0.1.59.1) and the v0.2.13.1
+release `628f7495` (2026-11-10; from 0.2.11
 `c3b3f503` via 0.2.12 `146df3c4` — the engine went 0.1.57 → 0.1.58 → **0.1.59.1**
 across those two, so that was a real engine bump, not a docs tag; the
 `.1` tag itself is a Control-only Intel-Arc hotfix whose sole build-relevant line
@@ -1250,14 +1276,16 @@ is `project(strata VERSION …)`). 0.2.0 split the repo into
 `-DSTRATA_GGML_DIR` (verified with `diff -r`: every common source of llama.cpp
 `3cf03257`'s `ggml/` is byte-identical there — only the two CMakeLists are trimmed,
 plus Strata's own `ggml-cuda-tq/` folder; the `VERSION.txt` pin is the same commit).
-Since v0.2.15 there is **no `llama` fetch either**: `tools/vision` builds from the
-`third_party/strata-llama` vendored in the source at the same 3cf03257 pin (verified:
-`strata-vision` builds + links from it, `strata --families` → `qwen4exp qwen35moe`).
+Since v0.2.17 the picture reader is `terminal/tools/vision`, built from Strata's own
+tower (`own/`) — "no llama.cpp source, STRATA_GGML_DIR does not reach it" — so the
+`llama` flake input is no longer used to build `strata-vision` at all (verified:
+`strata-vision` builds + links from that tree, `strata --families` → `qwen4exp
+qwen35moe`).
 0.2.0's split also means `serve/server.py` imports the
 Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
 therefore ships too (without them the service dies at import). Built and **live since
-2026-11-18 (0.2.15)** — `ExecStart` names `/nix/store/<hash>-strata-0.2.15`
-and `/v1/status` reports `"engine": "0.1.61"`):
+2026-11-20 (0.2.17)** — `ExecStart` names `/nix/store/<hash>-strata-0.2.17`
+and `/v1/status` reports `"engine": "0.1.63"`):
 `hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
 `hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
 `strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model

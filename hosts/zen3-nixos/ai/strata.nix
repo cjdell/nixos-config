@@ -275,10 +275,16 @@ let
   # already in both configs.
   vramMinFor = mm: if mm.ownPath or false then 25000 else 30000;
 
-  # The profile ships in the repo; the copy in the store is fine (the engine
-  # only reads it). Flash-Next only: the own-path engine places its experts
-  # itself and setup.py writes no --expert-profile for Qwen3.6.
-  expertProfile = "${strata}/share/strata/data/expert-profile.bin";
+  # 0.2.17 no longer ships expert-profile.bin in terminal/data (profiles come
+  # from the model feed now; setup.py names e.g. expert-profile-coder.bin per
+  # model), but 0.1.63 still REQUIRES a static profile whenever the run line
+  # asks for the resident CPU-expert tier ("--resident-cpu-experts requires
+  # --mmap-experts and a static --expert-profile" - it exits 2 without one, and
+  # --resident-budget-gib is what asks for that tier here). So the 0.2.15
+  # profile (196 KB, 24576 ranked pairs) is carried in the model-data area
+  # beside the pack and GGUFs - verified accepted by 0.1.63 at startup - and
+  # regenerated later from our own traffic with --expert-profile-save P (#477).
+  expertProfile = "/home/cjdell/Strata/expert-profile.bin";
 
   # ISTA's vision encoder for Flash-Next: a 27-layer ViT + the projector into
   # the language model (0.85 GiB). Model data, so it lives beside the GGUFs and

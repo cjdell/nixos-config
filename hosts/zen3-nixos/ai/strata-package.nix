@@ -60,7 +60,33 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "strata";
-  version = "0.2.15";
+  version = "0.2.17";
+
+  # v0.2.17 (2026-11-20, tag 12d491da, engine 0.1.63) - was v0.2.15 (tag c7757280, engine 0.1.61 on this
+  # box; upstream notes there is no engine 0.1.61 RELEASE - 0.2.15 ships the 0.2.14 engines as 0.1.60, so
+  # the old pin was a main snapshot). WHY THE BUMP: the 2026-11-20 prefill stalls. 0.2.15's own release
+  # notes list our exact hardware and symptom as KNOWN problems ("Radeon gfx1201: DFlash2 chosen by hand
+  # can stall on the prompt"; "Radeon R9700 on Linux: one engine start stalled on its first prompt ... the
+  # engine stopped itself after 60 seconds without progress"), and 0.2.17 fixes that area: HIP now keeps
+  # kernel NUMA balancing off the engine's memory (it made KFD evict the GPU queues, #4866/#4867), a first
+  # prompt over two chunks no longer ends the engine with exit -6 on 0.1.62 (#5104 #5354 #5966 #6018
+  # #6134), and "a watchdog beat in the PLE reader" (#4682) is among 21 crash fixes. Our failure was
+  # exactly exit -6 on a multi-chunk prompt, always at layers 18-21, with the host idle.
+  #
+  # PORT NOTES - 0.2.16 moved the tree into engine/ app/ terminal/ tools/:
+  #   * `cmakeDir = "engine"`; there is no top-level CMakeLists any more.
+  #   * -DSTRATA_PREFILL_MMQ is GONE (upstream ships tools/check_no_mmq.py) - flag dropped.
+  #   * serve/ data/ strata_cli/ strata_control/ all live under terminal/ now.
+  #   * the picture reader is terminal/tools/vision (was tools/vision).
+  #   * strata-kernel-audit.diff is NOT applied yet: it must be re-based onto engine/src/... paths. It is
+  #     audit-only and gated by STRATA_KERNEL_AUDIT, so the build is valid without it; re-base before the
+  #     next #879 capture.
+  #   * terminal/data ships no expert-profile.bin any more (profiles come from the model feed), so
+  #     ./strata.nix must stop passing --expert-profile.
+  #   * ANSWER-AFFECTING: 0.2.17 turns STRATA_ROUTE_TAIL_SKIP off by default on gfx12 (0.2.15-0.1.61 had
+  #     it on) - ./strata.nix sets it explicitly if we want the old behaviour.
+  #   * the two server.py error-message substituteInPlace anchors from the 0.2.15 package no longer exist
+  #     upstream (the lines were rewritten), so those local tweaks are dropped with this port.
 
   # v0.2.15 (2026-11-16, tag c7757280, live 2026-11-18) - first release pin since the 0.2.13.1 era;
   # upstream cut v0.2.14 (09b60388, 11-15), v0.2.14.1 (3af562d5, Control-only, 11-15) and v0.2.15 (11-16)
@@ -430,9 +456,15 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "Niko1221";
     repo = "Strata";
-    rev = "c77572806996349b49995e4f98d41b5294d36a21"; # v0.2.15
-    hash = "sha256-ehbQHpljUeclywp0ubGcrGG+xQ35SppRoosVWZLJiDY=";
+    rev = "12d491da4a6904eb49aaa6f2f63ec4b1a17582e3"; # v0.2.17
+    hash = "sha256-P6V8EDElMtohpT60Ya94Hb2ebUz1ZjzJbb8O/L12ybE=";
   };
+
+  # 0.2.16 moved the engine to its own subtree; the cmake hook now configures
+  # engine/ instead of the (no longer existing) top-level CMakeLists.
+  # NB: the nixpkgs cmake hook cd's into build/ before configuring, so this is
+  # relative to build/ (it defaults to ".." for exactly that reason).
+  cmakeDir = "../engine";
 
   nativeBuildInputs = [
     cmake
@@ -458,9 +490,11 @@ stdenv.mkDerivation (finalAttrs: {
     "-DSTRATA_ENABLE_CUDA=OFF"
     "-DSTRATA_ENABLE_HIP=ON"
     "-DSTRATA_BUILD_TESTS=OFF"
-    # ggml's MMQ prompt kernels (gfx1201 has them; upstream's R9700 page
-    # builds with this on). Built as HIP, so no CUDA toolkit is needed.
-    "-DSTRATA_PREFILL_MMQ=ON"
+    # -DSTRATA_PREFILL_MMQ is gone in 0.2.17: the engine no longer has ggml's
+    # MMQ prompt library (upstream ships tools/check_no_mmq.py, and passing an
+    # option CMake does not declare is at best a warning).
+    # No -DSTRATA_GGML_DIR since 0.2.13: the engine builds the ggml vendored in
+    # engine/third_party/strata-ggml.
     # No -DSTRATA_GGML_DIR since 0.2.13: the engine builds the ggml vendored in
     # third_party/strata-ggml, which `diff -r` proves byte-identical to our
     # pinned llama.cpp's ggml at every common file (see the src comment). The
@@ -516,7 +550,11 @@ stdenv.mkDerivation (finalAttrs: {
   #   * a dump in Verifier::run that prints those flags - every fire, not just the first -
   #     triggered by upstream's own nf_mask_, so it costs nothing on a healthy window and
   #     nothing at all with STRATA_KERNEL_AUDIT=0 (the flags are never allocated).
-  patches = [ ./strata-kernel-audit.diff ];
+  # NOT applied on the 0.2.17 port: the 19-hunk diff is written against the old
+  # top-level src/ tree and must be re-based onto engine/src/... (it is audit
+  # only - everything sits behind STRATA_KERNEL_AUDIT - so the engine is still
+  # valid without it; re-base before the next #879 capture).
+  # patches = [ ./strata-kernel-audit.diff ];
 
   # Activation quantizers must keep their fp16 scale and sum finite: a value past
   # fp16's 65504 rounds to +inf, the dequantised dot product then reads inf * 0 =
@@ -574,13 +612,13 @@ stdenv.mkDerivation (finalAttrs: {
     # amax / 127 is stored fp16, so it saturates to inf past amax = 8.3M and the
     # gather's q * inf = NaN poisons attention for every later token. Decode
     # append here; the prompt append is in prefill/kernels.cu (patched below).
-    substituteInPlace src/kernels/cuda/kv_q8.cu \
+    substituteInPlace engine/src/kernels/cuda/kv_q8.cu \
       --replace-fail 'const uint16_t sbits = f16_from_f32(amax / 127.0f);' \
                      'const uint16_t sbits = f16_from_f32(fabsf(amax / 127.0f) > 65504.0f ? (amax < 0.0f ? -65504.0f : 65504.0f) : amax / 127.0f);'
 
     # (3) the prompt path's int8 KV append, which uses this file's own hf().
     # hf_sat is the saturating form already used for the SwiGLU products.
-    substituteInPlace src/prefill/kernels.cu \
+    substituteInPlace engine/src/prefill/kernels.cu \
       --replace-fail 'const uint16_t sb = hf(amax / 127.0f);' \
                      'const uint16_t sb = hf_sat(amax / 127.0f);'
 
@@ -638,7 +676,7 @@ stdenv.mkDerivation (finalAttrs: {
   # unit and keeps AVX-512 off, which is exactly the "AVX2 (as released)" row of
   # docs/DETAILS.md's own benchmark table, and it stays reproducible.
   postBuild = ''
-    cmake -S ${finalAttrs.src}/tools/vision -B build-vision \
+    cmake -S ${finalAttrs.src}/terminal/tools/vision -B build-vision \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \
       -DSTRATA_VISION_CUDA=OFF \
@@ -653,7 +691,11 @@ stdenv.mkDerivation (finalAttrs: {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin $out/share/strata
-    install -Dm755 strata $out/bin/strata
+    # The 0.2.16 layout moved the engine to engine/, so an out-of-source build
+    # leaves the binary in build/. Accept both spellings so a future layout
+    # tweak fails loudly at the cp instead of silently installing nothing.
+    strata_bin=strata; [ -x "$strata_bin" ] || strata_bin=build/strata
+    install -Dm755 "$strata_bin" $out/bin/strata
     install -Dm755 build-vision/bin/strata-vision $out/bin/strata-vision
     # 0.2.0 split the repo into app/Terminal/engine, and serve/server.py now imports the
     # Terminal's Python packages at module scope (`from strata_control import engine_component,
@@ -663,24 +705,20 @@ stdenv.mkDerivation (finalAttrs: {
     # monitor/Terminal-only and stay out); strata_tokenizer is tools/strata_tokenizer.py,
     # reachable via server.py's own `sys.path.insert(0, ROOT/"tools")`.  Verified:
     # `import serve.server` succeeds against exactly these five dirs + serverPython.
-    cp -r ${finalAttrs.src}/serve ${finalAttrs.src}/tools ${finalAttrs.src}/data ${finalAttrs.src}/strata_control ${finalAttrs.src}/strata_cli $out/share/strata/
+    # 0.2.16 moved all of these under terminal/.  serve/server.py inserts
+    # ROOT/"tools" on sys.path (strata_tokenizer.py lives there), so tools comes
+    # along too.  Both Python packages are stdlib-only on that path.
+    cp -r ${finalAttrs.src}/terminal/serve ${finalAttrs.src}/terminal/tools \
+          ${finalAttrs.src}/terminal/data ${finalAttrs.src}/terminal/strata_control \
+          ${finalAttrs.src}/terminal/strata_cli $out/share/strata/
 
-    # (4, cont.) the retryable-guard rewrite, on the installed copy (see the
-    # postPatch comment). substituteInPlace only uses sed, so it is safe here.
-    # 0.2.11 moved the EngineDied mid-stream message into died_note(e)
-    # (server.py:437 on 0.2.11, :436 on 0.2.13.1, :440 on main-13eedf55, :443 on v0.2.15); the rewrite wraps its
-    # result - at :8816 on 13eedf55, :8716 on c7757280 (:8633 on 0.2.13.1, :8658 on 0.2.11) - and the ValueError at
-    # :8728 on c7757280 (:8828 on 13eedf55, :8645 on 0.2.13.1) - both re-checked UNIQUE and byte-identical on
-    # c7757280. The EngineDied 503 paths
-    # also call died_note but were never rewritten ("headers are sent" cases
-    # are the ones the client can only read as text).
+    # (4, cont.) the retryable-guard rewrite, on the installed copy. 0.2.17
+    # funnels every post-stream failure through _chat_failed(), so one anchor
+    # covers EngineDied, the ValueError ERR and the stream-crash path; the
+    # 0.2.15 anchors (`err = {...}`) no longer exist upstream.
     substituteInPlace $out/share/strata/serve/server.py \
-      --replace-fail \
-        'err = {"error": {"type": "server_error", "message": died_note(e)}}' \
-        'err = {"error": {"type": "server_error", "message": "server error: " + died_note(e)}}' \
-      --replace-fail \
-        'err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now' \
-        'err = {"error": {"type": "server_error", "message": "server error: " + str(e)}}   # headers are sent, so no 400 now'
+      --replace-fail '            error = {"type": kind, **({"code": code} if code else {}), "message": message}' \
+                     '            error = {"type": kind, **({"code": code} if code else {}), "message": message if str(message).startswith("server error") else "server error: " + str(message)}'
 
     makeWrapper ${serverPython}/bin/python3 $out/bin/strata-server \
       --add-flags "-m serve.server" \
