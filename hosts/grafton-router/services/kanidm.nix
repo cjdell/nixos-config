@@ -213,23 +213,24 @@ in
           # Kanidm OIDC sign-in for Silo (silo-plugin-auth-oidc on N100-NAS,
           # hosts/N100-NAS/silo.nix).
           # ⚠ originUrl MUST match Silo's callback URI exactly:
-          #   https://silo.home.chrisdell.info/api/v2/auth/oauth/<installation id>/callback
-          # The <installation id> exists only after the plugin is installed and
-          # enabled (Silo UI: Settings > Plugins > OpenID Connect — the URL is
-          # printed on its Sign-in settings page). Replace PLACEHOLDER with it
-          # and rebuild this router; logins fail with a redirect_uri mismatch
-          # until then. Kanidm refuses plain-http redirect URIs, which is why
+          #   https://silo.home.chrisdell.info/api/v2/auth/oauth/5/callback
+          # The `5` is Silo's OIDC installation id, minted when the plugin was
+          # first enabled (2026-11-21; shown on Silo's Sign-in settings page).
+          # Reinstalling the plugin mints a NEW id — update this line then, or
+          # logins fail with a redirect_uri mismatch. Kanidm refuses
+          # plain-http redirect URIs, which is why
           # Silo is reached through the router's silo.home.chrisdell.info vhost
           # (http.nix) instead of http://192.168.49.22:8090.
           # In the plugin: issuer https://kanidm.home.chrisdell.info/oauth2/openid/silo,
-          # client id silo, groups scope ON, admin groups = admins (groups
-          # arrive as name@domain; the plugin matches the short name). Leave
-          # offline access off — see the plugin's Kanidm note.
+          # client id silo, secret from /run/secrets/silo_oidc_client_secret
+          # (sops: silo_oidc_client_secret), groups scope ON, admin groups =
+          # admins (groups arrive as name@domain; the plugin matches the short
+          # name). Leave offline access off — see the plugin's Kanidm note.
           "silo" = {
             present = true;
             public = false;
             displayName = "Silo";
-            originUrl = "https://silo.home.chrisdell.info/api/v2/auth/oauth/PLACEHOLDER/callback";
+            originUrl = "https://silo.home.chrisdell.info/api/v2/auth/oauth/5/callback";
             originLanding = "https://silo.home.chrisdell.info";
             basicSecretFile = config.sops.secrets.silo_oidc_client_secret.path;
             preferShortUsername = true;
