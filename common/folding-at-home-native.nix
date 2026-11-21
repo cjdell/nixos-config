@@ -278,6 +278,19 @@ in
         ];
         StateDirectory = "fah-client";
         WorkingDirectory = "/var/lib/fah-client";
+        # WITH GPU FOLDING OFF: this is the wall. The env guard alone does not
+        # work — FAH enumerates NVIDIA GPUs via NVML (libnvidia-ml), which
+        # ignores CUDA_VISIBLE_DEVICES entirely, and it caches what it found in
+        # gpus.json, so a GPU slot came back within 15 s of a start even with
+        # CUDA_VISIBLE_DEVICES="" and OCL_ICD_VENDORS=/var/empty (verified
+        # 2026-11-21 19:00 on hp-z240: FahCore_28 again). A private /dev with
+        # DevicePolicy=closed means /dev/nvidiactl, /dev/nvidia0 and /dev/dri
+        # simply do not exist for this unit and its children, so NVML cannot
+        # init, no GPU is detected, and no GPU core can be spawned at all —
+        # independent of client.db, gpus.json, or what the WU queue holds.
+        # Only applied when GPU folding is off, so the AMD hosts (which need
+        # /dev/dri and /dev/kfd) and every folding GPU host are untouched.
+        PrivateDevices = !cfg.enableGpu;
         ExecStartPre = [
           "+${installConfig}"
         ]

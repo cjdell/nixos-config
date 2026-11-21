@@ -231,6 +231,27 @@
 #      depending on this box fetching one, and (c) get one clean control kill
 #      plus one surviving knob row out of gpu-probe-fahcore-repro — budgeting a
 #      manual reboot per crash, since the ladder no longer reboots anything.
+#   11. 2026-11-21 18:53: enableGpu=false DID NOT STOP THE FIRST WU — THE CARD
+#      DIED AGAIN, 2 MIN AFTER THE SWITCH. The activation started the client and
+#      it immediately ran a queued OpenMM WU on CUDA ("Using CUDA on CUDA
+#      Platform and gpu 0") → Xid 79, off the bus, core wedged at 99 % CPU.
+#      Two lessons, both now encoded:
+#      (a) --no-gpus is WEAK: it is spoken over the websocket API after the
+#          client is up and has re-armed slots + queued WUs from client.db
+#          (v8 keeps the WUs IN THE DATABASE — there is no work/ dir to clean).
+#      (b) THE ENV TRICK IS ALSO WEAK: CUDA_VISIBLE_DEVICES="" +
+#          OCL_ICD_VENDORS=/var/empty did NOT prevent a GPU slot — FahCore_28
+#          came back within 15 s, because FAH enumerates NVIDIA GPUs through
+#          NVML, which ignores CUDA_VISIBLE_DEVICES, and caches the answer in
+#          gpus.json.
+#      THE WALL that works: PrivateDevices=yes on fah-client whenever
+#          enableGpu=false (now in common/folding-at-home-native.nix). With a
+#          private /dev and DevicePolicy=closed there is no /dev/nvidiactl,
+#          /dev/nvidia0 or /dev/dri for the unit or its children, so NVML
+#          cannot initialise and no GPU core exists to spawn — no dependence
+#          on ordering, the DB, or the cache. The env vars stay as a second
+#          belt. Verify after any change: `ps` must show only FahCore_a*, never
+#          FahCore_2*, while the client folds.
 #   The cap therefore lives in fah-client's OWN ExecStartPre (mkAfter —
 #   runs after the module's install-config + startDelay-sleep, so seconds
 #   before ExecStart, with nothing able to revert it in between). The
