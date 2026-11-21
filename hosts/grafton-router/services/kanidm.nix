@@ -17,6 +17,11 @@ in
 
   # OAuth2 client secret for Silo; kanidm-provision (runs as kanidm) reads it,
   # same shape as container_ui_oidc_client_secret in container-ui.nix.
+  # ⚠ kanidm-provision only pushes _basic_secret when kanidm.service starts,
+  # and the unit references the secret by PATH — editing the sops value does
+  # NOT restart kanidm. After any rotation: `sudo systemctl restart kanidm`
+  # (learned the hard way 2026-11-21: /run/secrets showed the new value, the
+  # token endpoint still 401'd the old one because the provisioner hadn't run).
   sops.secrets.silo_oidc_client_secret = {
     owner = "kanidm";
   };
