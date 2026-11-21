@@ -198,17 +198,39 @@
 #      libOpenMMCPU.so by plain soname — the client puts the core dir on the
 #      child's LD_LIBRARY_PATH and you must too, or the core dies in the
 #      loader with 127 and never touches the GPU.
-#      (f) NEXT: steps/corebisect.tsv — same WU, one knob per step across
-#      reboots (CUDA_MODULE_LOADING=EAGER, CUDA_LAUNCH_BLOCKING=1, core 27
-#      = OpenMM 8.2.1, OpenCL instead of CUDA, no CPU load, and resume-from-
-#      checkpoint as the shape that ran 4.4 h). Step 1 is a positive control
-#      that MUST kill the card; read it before believing any PASS. The
-#      12 V adapter wiring from #8 is still unproven and still suspect: the
-#      operating point of tonight's kill is UNKNOWN (the 2 s power/util CSV
-#      was added to the repro right after it, and /run ate the evidence),
-#      while production's was caught at 29 W and 1 % util — so "it is only a
-#      heavy transient" is untested here, not disproved. The bisect runs
-#      with telemetry now, and so does the answer.
+#      (f) THE BISECT RAN (2026-11-21, steps/corebisect.tsv, telemetry on).
+#      Three real kills, each with a different knob pointed at it: core 27 =
+#      OpenMM 8.2.1 died in 16 s (gpu-busy 0 s; the 2 s sampler never saw more
+#      than 28.8 W), the GPU ALONE with no CPU threads died in 71 s after 58 s
+#      at 98 % util peaking 123.8 W, and RESUMING R1ttHC75's own 1 125 000-step
+#      checkpoint died in 21 s. So the core build, the CPU co-load and cold
+#      start-of-integration are each NOT necessary conditions. And no row
+#      survived: the pass produced no PASS, so no mitigation is measured.
+#      The CUDA_MODULE_LOADING / CUDA_LAUNCH_BLOCKING / OpenMM-on-OpenCL rows
+#      NEVER RAN — a `--setenv=K=V` quoting mismatch exited 2 in 8 s and the
+#      ladder scored that as a verdict-looking line (fixed: both parsers take
+#      both forms; rc 2/3/4 is now SETUP-ERROR, which halts WITHOUT advancing
+#      the step counter). The no-knob control row never executed on a live card
+#      either — its attempt started on a bus that was already dead (now scored
+#      NO-GPU-ON-BUS and not counted). So the software hypotheses are untested,
+#      not disproved: the 580 CUDA path against OpenMM's allocation pattern, the
+#      service env (LD_PRELOAD + the core's bundled CUDA 11.8) for OpenMM
+#      specifically, the display stack sharing the card, ASPM/DVFS. First among
+#      the hardware ones, still, is #8's adapter-fed 6-pin — which fits BOTH a
+#      16 s kill under 29 W sampled (a transient between samples) and a 71 s
+#      kill at 123.8 W.
+#   10. 2026-11-21: GPU FOLDING RETIRED FOR GOOD — CPU-ONLY from here
+#      (enableGpu=false, so fah-provision passes --no-gpus every boot). This
+#      1060 is the CONSOLE GPU, so every kill takes the display with it and
+#      leaves the box up headless with a zombie card until a reboot; the fault
+#      reproduces in seconds on every OpenMM attempt; and the card passes every
+#      stress that is not OpenMM. That is a bad trade for PPD. The NVIDIA
+#      driver, the console output and the cap pair below all STAY — the card is
+#      still the display. Before re-enabling: (a) rewire the two aux 6-pins to
+#      native PSU cables, (b) copy a GPU work unit from asus-i7-6700 rather than
+#      depending on this box fetching one, and (c) get one clean control kill
+#      plus one surviving knob row out of gpu-probe-fahcore-repro — budgeting a
+#      manual reboot per crash, since the ladder no longer reboots anything.
 #   The cap therefore lives in fah-client's OWN ExecStartPre (mkAfter —
 #   runs after the module's install-config + startDelay-sleep, so seconds
 #   before ExecStart, with nothing able to revert it in between). The
@@ -275,13 +297,22 @@ in
     enable = true;
     userName = "cjdell";
     teamNumber = 236565;
-    # GPU folding BACK ON 2026-11-19 (power history #6): two fresh used
-    # cards — GTX 1060 6GB (slot 1) + a second GTX 970 (slot 2) — fold at
-    # quiet caps 75 W / 100 W via the ExecStartPre pair below. fah-provision
-    # passes neither --no-gpus now, so detected GPUs are enabled every boot.
-    # startDelay=90 keeps the fold start out of the boot race and guarantees
-    # the desktop (the thing that reverts caps) is up before we set them.
-    enableGpu = true;
+    # GPU FOLDING OFF PERMANENTLY (power history #10, 2026-11-21). The 1060 dies
+    # under OpenMM GPU work in seconds — Xid 79, off the bus, reboot to reclaim —
+    # reproducibly, with the client stopped and the card otherwise passing every
+    # non-OpenMM stress (see scripts/gpu-probe/README.md "corebisect" for the
+    # bisect and what it rules out). It is also the CONSOLE GPU, so a kill takes
+    # the display too. fah-provision therefore passes --no-gpus every boot, which
+    # clears the default group's GPU list over the client's own websocket API.
+    # VERIFY AFTER ANY CHANGE HERE, don't trust the seed: the client keeps prior
+    # settings in its SQLite DB and config.xml only seeds, so check `ps` shows no
+    # FahCore_28 and nvidia-smi stays at idle watts while the client folds.
+    # The NVIDIA driver, the console output and the cap pair below all STAY — the
+    # card is still the display; with GPU folding off those caps merely bound the
+    # console card's power (quiet), and their "-"/"+" prefixes remain load-bearing.
+    # Do NOT set this back to true before the aux 6-pin wiring and one clean
+    # control-kill + surviving-knob-row repro described in #10.
+    enableGpu = false;
     cpus = 8;
     gpuUsage = 50;
     startDelay = "90";
@@ -394,7 +425,10 @@ in
     description = "Keep the compute-dead slot-2 GM204 off the NVIDIA driver (folding-heater.nix #7)";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-modules-load.service" ];
-    before = [ "nvidia-power-limit.service" "fah-client.service" ];
+    before = [
+      "nvidia-power-limit.service"
+      "fah-client.service"
+    ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
