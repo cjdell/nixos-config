@@ -64,9 +64,10 @@ in
       # The N100 iGPU (QSV/VA-API) — same render node the Jellyfin container uses.
       "--device=/dev/dri/renderD128"
       "--group-add=${RENDER_GID}"
+      # Upstream's stop_grace_period: 2m, so in-flight playback drains.
+      # (oci-containers has no stopTimeout option at this pin.)
+      "--stop-timeout=120"
     ];
-    # Upstream's stop_grace_period: 2m, so in-flight playback drains.
-    stopTimeout = 120;
   };
 
   users.users.silo = {
