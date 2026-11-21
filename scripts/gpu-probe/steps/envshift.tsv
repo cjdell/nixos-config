@@ -1,0 +1,17 @@
+# gpu-probe ENV+COLD ladder — the two axes every other table here left untested.
+#
+#  upshift  = release the CUDA context, stay silent until the card parks and its
+#             PCIe link falls to its idle speed, then bring it back and do ONE
+#             kernel. Every death on this fleet happened seconds after exactly
+#             that; no other mode reproduces it because they all keep one warm
+#             context and one loaded link for their whole life.
+#  envtest  = run a probe mode inside ANOTHER UNIT's Environment/User/sandbox,
+#             read live from that unit, so a healthy workload meets the same
+#             userspace the deployed service gives it.
+#
+# name<TAB>seconds<TAB>command<TAB>hypothesis<TAB>requires
+upshift_me	260	$PROBE upshift --cycles 12 --idle-secs 15	baseline: cold bring-up as your own user — 12 context releases, fresh PTX JIT, one kernel each	
+upshift_me_slow	320	$PROBE upshift --cycles 10 --idle-secs 25 --slow-ms 800	longer silences, tighter slowness budget: catches a bring-up that merely crawls rather than dying	
+env_continuous	300	gpu-probe-envtest --unit fah-client --seconds 240 -- continuous --seconds 240	the CUDA workload that passed 11 times, run inside fah-client Environment/User/PrivateTmp/ProtectHome	gpu-probe-envtest
+env_upshift	360	gpu-probe-envtest --unit fah-client --seconds 300 -- upshift --cycles 12 --idle-secs 15	cold bring-up inside fah-client environment: the deployed userspace, not yours	gpu-probe-envtest
+env_corelibs	300	gpu-probe-envtest --unit fah-client --extra-ld auto --seconds 240 -- mixed --seconds 240	same, with the OpenMM core own CUDA 11.8-era libCUFFT/libnvrtc/libOpenMMCUDA first on LD_LIBRARY_PATH against the CUDA 13 driver	gpu-probe-envtest

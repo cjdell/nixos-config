@@ -1,0 +1,25 @@
+# gpu-probe TRADITIONAL ladder - the industry-standard stress tools, one per step.
+# Same harness, same telemetry, same verdicts as steps/xid79.tsv, so a PASS here
+# means the same thing it meant there.  NO Folding@home anywhere in this table:
+# it exists to answer 'is the card sick, or is this box sick?' with tools whose
+# behaviour is well known - if the standard suite is clean and only folding kills
+# it, the fault is in the folding path, not in the silicon.
+#
+# name<TAB>seconds<TAB>command<TAB>hypothesis<TAB>requires
+# 'requires' is checked with command -v: a missing tool is SKIP-TOOL, not a result.
+# Run it through the bundle that provides the tools, e.g.
+#   nix build .#gpu-probe-traditional
+#   ./result/bin/gpu-probe-arm arm --steps traditional --power-limit 120
+# GL steps need the console session: arm.sh passes DISPLAY/WAYLAND_DISPLAY through.
+gl_glmark2	360	glmark2-wayland -s 1280x720	OpenGL raster/composite: the FurMark class of test, on this card's own console output	glmark2-wayland
+gl_glmark2_1080	300	glmark2-wayland -s 1920x1080 -b build=off -b effect=shadowmap -b effect=shadowmap -b effect=shadowmap	sustained fragment-shader fill at native console resolution: max clocks, no memory traffic	glmark2-wayland
+vram_memtest_vulkan	420	memtest_vulkan --device=1 --test=240	GPU VRAM + copy path at ~150 GB/s with data verification (the traditional memtest-of-vram)	memtest_vulkan
+ocl_clpeak	300	clpeak --max-time 200	OpenCL bandwidth + FP32/FP64 kernels through the vendor ICD, on the GPU device	clpeak
+ocl_hashcat_full	900	hashcat -b -d 1 --quiet	full OpenCL kernel sweep with an honest budget (the 330 s run was cut mid-benchmark, card alive)	hashcat
+cpu_stressng_all	600	stress-ng --cpu 8 --cpu-method all --timeout 540 --quiet	CPU: every ALU/FPU method in turn, each result verified by stress-ng itself	stress-ng
+cpu_stressng_vm	420	stress-ng --vm 2 --vm-bytes 1G --vm-keep --timeout 360 --quiet	memory subsystem: 2 writers hammering 2 GiB, page + DRAM traffic	stress-ng
+ram_stressapptest	420	stressapptest -s 300 -M 1536 -W	RAM + cache with data verification (Google); -M 1536 MiB on a 7.7 GiB box	stressapptest
+ram_memtester	420	memtester 1G	classic userspace RAM pattern march over 1 GiB of live memory	memtester
+cpu_sysbench	300	sysbench cpu --threads=8 --time=240 run	independent CPU implementation to cross-check stress-ng	sysbench
+combined_cpu_vram	420	(stress-ng --cpu 8 --timeout 360 --quiet &); sleep 5; memtest_vulkan --device=1 --test=180	combined load: 8 CPU threads while the GPU verifies its VRAM (the classic PSU/VRM test)	stress-ng
+recheck_clpeak	300	clpeak --max-time 200	re-run the most sensitive GPU probe last: healthy-before AND healthy-after is the proof	clpeak
