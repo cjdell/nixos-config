@@ -252,6 +252,17 @@
 #          on ordering, the DB, or the cache. The env vars stay as a second
 #          belt. Verify after any change: `ps` must show only FahCore_a*, never
 #          FahCore_2*, while the client folds.
+#      WHO STARTED IT matters for reading the above: it was not the switch. The
+#      activation re-armed fah-pause-window.timer, its OnCalendar edge fired
+#      immediately, and that script's else-branch runs `systemctl start
+#      fah-client` (it is how the heater comes back after the 10:00-14:00 pause).
+#      So anything that re-activates units can start folding within seconds —
+#      another reason the guard has to be structural, not a post-hoc API call.
+#      AFTER THE WALL (verified 19:15): the unit's namespace has 0 /dev/nvidia*
+#      and no /dev/dri (host has 7), gpus.json loads but the client marks the
+#      1060 "supported": false, and with the client folding on 8 threads
+#      (FahCore_a8 ~665 % CPU) no FahCore_2* exists. Re-verify after the reboot
+#      that reclaims the card — that is the first test with a live GPU present.
 #   The cap therefore lives in fah-client's OWN ExecStartPre (mkAfter —
 #   runs after the module's install-config + startDelay-sleep, so seconds
 #   before ExecStart, with nothing able to revert it in between). The
