@@ -185,6 +185,20 @@ in
         };
       };
 
+      # Silo media server on N100-NAS (hosts/N100-NAS/silo.nix). HTTPS here is
+      # load-bearing, not cosmetic: Kanidm refuses plain-http redirect URIs,
+      # so the OIDC sign-in plugin only works via this vhost.
+      "silo.home.chrisdell.info" = {
+        useACMEHost = "chrisdell.info";
+        forceSSL = true;
+
+        locations."/" = {
+          proxyPass = "http://192.168.49.22:8090";
+          recommendedProxySettings = true;
+          proxyWebsockets = true;
+        };
+      };
+
       # christcentralpreston.co.uk — Concrete CMS site on N100-NAS
       # (hosts/N100-NAS/christcentralpreston.nix). The N100 vhost 301s the
       # bare domain to www and honours X-Forwarded-Proto (set below via
