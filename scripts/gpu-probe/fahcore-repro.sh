@@ -66,6 +66,9 @@ while [ $# -gt 0 ]; do
     --attempts) ATTEMPTS=$2; shift 2;;
     --platform) PLATFORM=$2; shift 2;;
     --from-scratch) SCRATCH_FRESH=1; shift;;
+    # Both forms: a step table is written with the space form and this script forwards
+    # the `=` form to gpu-probe-envtest, so both parsers must accept both.
+    --setenv=*) EXTRA_ENV="$EXTRA_ENV $1"; shift;;
     --setenv) EXTRA_ENV="$EXTRA_ENV --setenv=$2"; shift 2;;
     --dry-run) DRY=1; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -132,11 +135,33 @@ echo "repro: argv=$ARGV"
 [ "$DRY" = 1 ] && { echo "(dry run — nothing copied, nothing executed)"; exit 0; }
 
 # --- keep the deployed client out of the way ---------------------------------
-timeout 20 systemctl is-active --quiet "$UNIT" && {
-  sudo -n systemctl stop "$UNIT"
-  echo "repro: $UNIT stopped (runtime-masked; the flake re-enables it at the next boot)"
-}
+# MASK BEFORE STOP, and verify. A `systemctl stop` on a unit with Restart= queues a
+# restart, and masking afterwards (same second) does not catch it — seen on this box
+# 2026-11-21: the ladder stopped+masked at 01:31:03, systemd restarted the client in
+# that same second, FahCore_28 spawned at 01:32:39 and the card was off the bus at
+# 01:32:40. A repro that races the production client for the GPU measures nothing, so
+# this asserts `inactive` and refuses to continue otherwise.
 sudo -n systemctl mask --runtime "$UNIT" >/dev/null 2>&1 || true
+sudo -n systemctl stop "$UNIT" >/dev/null 2>&1 || true
+sudo -n systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+# the peak-hours pause timer would otherwise pause/resume folding underneath the run
+sudo -n systemctl stop fah-pause-window.timer fah-pause-window.service >/dev/null 2>&1 || true
+FAH_ST=unknown
+for HOLD in 1 2 3 4 5 6 7 8; do
+  # `|| true`: is-active exits 3 when the unit is NOT active — i.e. exactly the state
+  # we want — and under `set -e` a bare VAR=$(...) of that would abort the repro on
+  # success. (Same class of bug as the nvidia-smi poll below.)
+  FAH_ST=$(timeout 15 systemctl is-active "$UNIT" 2>/dev/null || true)
+  [ "$FAH_ST" = inactive ] && break
+  sudo -n systemctl stop "$UNIT" >/dev/null 2>&1 || true
+  sleep 2
+done
+if [ "$FAH_ST" != inactive ]; then
+  echo "REPRO-ERROR: $UNIT is '$FAH_ST' — it still holds the card. Refusing to run: a" \
+       "verdict produced while the real client is folding is not a verdict." >&2
+  exit 7
+fi
+echo "repro: $UNIT masked (mask-before-stop) + inactive; pause-window timer stopped"
 sleep 3
 
 # --- one attempt: fresh copy, run, watch the bus, read the instrument ----------

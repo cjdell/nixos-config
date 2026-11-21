@@ -76,6 +76,23 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     "--prefix PATH : $out/bin"
   ];
 
+  # Syntax gate, added 2026-11-21 after a hand edit left arm.sh unparseable and the
+  # build happily produced an arming script that dies at `arm`. The ladder runs from a
+  # user unit at boot on a box whose console may be gone, so a shell error must fail the
+  # BUILD, not the campaign. py_compile covers probe.py for the same reason.
+  doCheck = true;
+  checkPhase = ''
+    runHook preCheck
+    cd $src
+    for f in *.sh; do
+      ${bash}/bin/bash -n "$f" || { echo "bash syntax error in $f" >&2; exit 1; }
+    done
+    # compile() not py_compile: $src is a read-only store path and py_compile would
+    # try to write __pycache__ next to it.
+    ${python3}/bin/python3 -c "compile(open('probe.py').read(), 'probe.py', 'exec')"
+    runHook postCheck
+  '';
+
   installPhase = ''
     runHook preInstall
 

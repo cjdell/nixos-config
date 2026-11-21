@@ -18,10 +18,20 @@
 # `WU=` variable: the step reader has no concept of one, and a tab-less line in
 # this file would be read as a step.
 #
-# A kill costs a reboot (the ladder's job), so this is a slow unattended grind —
-# which is what a fault this specific deserves. Run it as its own campaign:
-#   GPU_PROBE_STATE_DIR=~/.local/state/gpu-probe-core nix .../gpu-probe-arm \
-#     arm --steps corebisect --power-limit 120 --max-reboots 8
+# A kill needs a reboot to reclaim the bus, and the ladder will NOT reboot the box on
+# its own (see README: --reboot-on-kill + GPU_PROBE_I_CONSENT_TO_REBOOT=1). So run it in
+# the foreground and reboot by hand between the rows that kill:
+#   GPU_PROBE_STATE_DIR=~/.local/state/gpu-probe-core \
+#     ./result/bin/gpu-probe-ladder --steps corebisect --power-limit 120
+# It halts after a kill, and re-running resumes at the next step.
+#
+# WARNING: rows 4, 6 and 7 each killed the card on hp-z240 within 16-71 s, and row 1 —
+# the positive control — has never validly run there (its first attempt started on a card
+# that was already off the bus, which the ladder now scores NO-GPU-ON-BUS instead of
+# counting it). Rows 2, 3 and 5 never ran at all until the --setenv= parser fix.
+# Running this table is a decision to crash the GPU repeatedly, so it needs the
+# operator's explicit go-ahead every time, with the console reachable — and a saved
+# OpenMM work unit, because without one the control row has no input to run.
 #
 # name<TAB>seconds<TAB>command<TAB>hypothesis<TAB>requires
 ctrl_scratch	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --from-scratch --cpu-load 8 --seconds 360 --attempts 1	POSITIVE CONTROL: no knob at all. Must reproduce (Xid 79). If it does not, stop and re-read this file — the fault has gone quiet and no PASS below it means anything	gpu-probe-fahcore-repro

@@ -40,10 +40,19 @@ device name and PCI bus id on the first line — check it stresses what you thin
 Modes whose runtime is absent exit 18 (`SKIP: ...`) instead of failing, so the
 same table runs on AMD hosts (OpenCL via Rusticl / the amdgpu ICD).
 
-## The ladder (survives the reboots a kill requires)
+## The ladder (each kill costs a reboot — you decide when)
 
-A card that falls off the bus cannot be reclaimed without a reboot, so the
-runner is a per-boot state machine: verdict → `results.log` → reboot → next step.
+A card that falls off the bus cannot be reclaimed without a reboot, so the runner is a
+per-boot state machine: verdict → `results.log` → **halt** → you reboot → re-run → next
+step. It does **not** reboot the machine on its own:
+
+> **Why that is the default, in one sentence.** On hp-z240 on 2026-11-21 a campaign ran
+> with auto-reboot on: the kill takes the console (the dying card is the only display),
+> the ladder rebooted seconds later, and the next boot started the next step before
+> anyone could log in — so the box cycled *reboot → kill → reboot* and the operator
+> could not stop it. Rebooting a machine you cannot reach, on a timer you do not
+> control, is a worse failure than the fault. `--reboot-on-kill` opts back in, and even
+> then it counts down `--reboot-grace` seconds (default 120) and re-checks `ABORT`.
 
 ```sh
 ./result/bin/gpu-probe-arm arm --steps default --link gen3 --power-limit 120
@@ -52,9 +61,12 @@ runner is a per-boot state machine: verdict → `results.log` → reboot → nex
 ./result/bin/gpu-probe-arm reset           # clear step + reboot counters
 ```
 
+The manual loop is deliberately boring: arm (or run `gpu-probe-ladder` in the
+foreground), read the verdict, reboot when it logs `HALT`, run the same command again.
+
 It installs a **user** unit with linger (`/etc` is read-only on NixOS, so system
-units must come from the flake) and uses `sudo -n` only for the privileged bits:
-power limit, PCIe retrain, `systemctl stop/mask`, and the recovery reboot.
+units must come from the flake) and uses `sudo -n` for the privileged bits: power
+limit, PCIe retrain, `systemctl stop/mask` — and the reboot, only if opted in.
 
 | option | meaning |
 | --- | --- |
@@ -63,9 +75,11 @@ power limit, PCIe retrain, `systemctl stop/mask`, and the recovery reboot.
 | `--link gen3\|gen1\|keep` | force the root-port target speed (retrain ×3) and log what it holds |
 | `--power-limit W` | set it, **then verify it held** — stale units love to revert caps |
 | `--gpu N` | device index for every step |
-| `--no-reboot` | never reboot: halt on the first kill (use when you want to inspect) |
+| `--no-reboot` | accepted, and now the **default** — kept so old muscle memory does not fail |
+| `--reboot-on-kill` | opt in to rebooting the box itself after a kill — **and it still will not reboot unless `GPU_PROBE_I_CONSENT_TO_REBOOT=1` is in the environment**, checked at the moment of reboot. Two independent yeses, never one |
+| `--reboot-grace N` | with the above: seconds to wait before rebooting, so `touch ABORT` can still cancel (default 120) |
+| `--max-reboots N` | only meaningful with `--reboot-on-kill`: give up after N reboots (default 14). Passing it alone prints a warning instead of implying self-healing |
 | `--state-dir DIR` | default `~/.local/state/gpu-probe` (never in git). `gpu-probe-arm` passes its own `GPU_PROBE_STATE_DIR` through, so two campaigns can run side by side without overwriting each other's evidence |
-| `--max-reboots N` | give up after N reboots (default 14) |
 
 ## `traditional.tsv` — separating "the card is sick" from "this box is sick"
 
@@ -188,23 +202,87 @@ Because a reproduced kill always ends in a reboot, and `/run` is tmpfs, evidence
 ## `corebisect.tsv` — one env knob per step, once the fault reproduces
 
 Run it as its own campaign so its `state`/`results.log` do not mix with another
-ladder's:
+ladder's, and drive it by hand — every kill needs a reboot you have to perform anyway:
 
 ```sh
-GPU_PROBE_STATE_DIR=~/.local/state/gpu-probe-core ./result/bin/gpu-probe-arm \
-    arm --steps corebisect --power-limit 120 --max-reboots 8
+GPU_PROBE_STATE_DIR=~/.local/state/gpu-probe-core ./result/bin/gpu-probe-ladder \
+    --steps corebisect --power-limit 120
+# on a kill it logs HALT and exits 1 → reboot → run the same line again, next step
 ```
 
-`ctrl_scratch` is a **positive control and must reproduce the kill**; every PASS
-below it is meaningless if it does not, because then the fault simply went quiet.
-The rest are single variables: `CUDA_MODULE_LOADING=EAGER`, `CUDA_LAUNCH_BLOCKING=1`,
-core 27 (OpenMM 8.2.1) instead of 28, `--platform opencl` (hides the CUDA device so
-OpenMM falls back to the ICD), no CPU load, and resume-from-checkpoint — the shape
-that ran 4.4 h in production. Each step costs a reboot when it kills, which is what
-the per-boot state machine is for.
+`ctrl_scratch` is a **positive control and must reproduce the kill**; every PASS below
+it is meaningless if it does not, because then the fault simply went quiet. The rest are
+single variables: `CUDA_MODULE_LOADING=EAGER`, `CUDA_LAUNCH_BLOCKING=1`, core 27 (OpenMM
+8.2.1) instead of 28, `--platform opencl` (hides the CUDA device so OpenMM falls back to
+the ICD), no CPU load, and resume-from-checkpoint.
+
+**A control row that cannot run is the most dangerous row in the table.** `ctrl_scratch`
+is required to reproduce; if it exits early, or runs on a card that is already off the
+bus, every row under it silently loses its meaning. So read the row's own rc and telemetry
+before believing any PASS, and on NixOS query the journal rather than `dmesg`
+(`printk.devkmsg=ratelimit` empties the ring): `journalctl -k -b 0 | grep -i E 'NVRM|Xid'`.
+
+hp-z240's first full pass (2026-11-21, GTX 1060 6GB, 120 W cap verified, one pinned WU in
+every row):
+
+| row | knob | verdict | what the row's own log says |
+| --- | --- | --- | --- |
+| `ctrl_scratch` | none | **invalid** (rc=5, 0 s) | the card was already dead at that boot (`gpu=0000:02:00.0 Unknown x63` in the `BOOT` line) → scored `NO-GPU-ON-BUS`, which does not advance `state`. **The positive control has never validly reproduced in this campaign.** |
+| `eager_modules` | `CUDA_MODULE_LOADING=EAGER` | **never ran** (rc=2, 8 s) | `envtest` rejected the `--setenv=K=V` form the repro forwards → `unknown arg`, exit 2, in 8 s |
+| `launch_blocking` | `CUDA_LAUNCH_BLOCKING=1` | **never ran** (rc=2, 8 s) | same |
+| `core27_scratch` | OpenMM **8.2.1** instead of 8.3.1 | **killed at 16 s** | `gpu-busy-secs=0 util-max=4 % peak-w=28.8`, journal `NVRM: Xid ... 79` — died within seconds of the core starting, before the sampler ever saw load |
+| `opencl_scratch` | OpenCL ICD instead of the CUDA driver API | **never ran** (rc=2, 8 s) | same parser bug |
+| `no_cpuload_scratch` | without `--cpu-load 8` | **killed at 71 s** | `gpu-busy-secs=58 util-max=98 % peak-w=123.8` — the GPU alone, at 124 W, is sufficient |
+| `ctrl_resume` | resume from the WU's own 1 125 000-step checkpoint | **killed at 21 s** | `steps=1125000 gpu-busy-secs=2 util-max=96 % peak-w=95.5` — the checkpoint is accepted and it dies anyway |
+
+Exonerated as *necessary* conditions by those three kills: the core build (8.2.1 is as
+lethal as 8.3.1), CPU load alongside the GPU, and cold start-of-integration (a resumed
+1.1 M-step checkpoint dies just as fast). **Not** tested, because of the parser bug:
+`CUDA_MODULE_LOADING=EAGER`, `CUDA_LAUNCH_BLOCKING=1`, and OpenMM-on-OpenCL. Note what
+this campaign does *not* say: it produced no PASS at all, so there is no evidence for any
+mitigation — the three faults are real, and the control that would frame them is still
+missing.
+
+What is left standing as the shape of the fault: an OpenMM core starts and the card is off
+the bus 16-71 s later, in every variant tried — both core builds, with and without CPU
+load, cold and resumed — while `probe.py`'s own CUDA/OpenCL kernels ran 120 W and ~2.9 TB
+of verified traffic on the same card minutes earlier without an Xid. `peak-w=28.8` on a
+2 s sampler is not evidence of low current: a transient spike lives between samples.
+
+Three fixes before the next pass:
+
+1. **Save the work unit.** There is no OpenMM WU on the box now (the client finished the
+   one it held), so the repro exits 2 and now correctly reports `SETUP-ERROR`. A WU is a
+   consumable: copy one into the campaign's state dir, and pass `--work <uuid>`, or the
+   control depends on the client happening to be holding a GPU unit at the wrong moment.
+2. **`rc=2`/3/4 is `SETUP-ERROR`**, which halts without advancing the step counter. The
+   `=`-form `--setenv` is accepted by both parsers, and `gpu-probe-ladder` now halts the
+   campaign on the first such row instead of scoring the rest of the table on sand.
+3. **One valid `ctrl_scratch` on a live card**, before any knob row is read at all.
 
 ## Traps learned while building this
 
+- **Never let the harness reboot a box you cannot reach.** On 2026-11-21 a campaign on
+  hp-z240 ran with auto-reboot enabled and locked its operator out: the kill takes the
+  console (the dying card is the only display output), the ladder rebooted seconds
+  later, and each new boot started the next step before login — an unbreakable
+  *reboot → kill → reboot* cycle. Auto-reboot is now off by default **and** gated behind
+  a second explicit consent variable, checked at the moment of reboot, not at arm time.
+  A diagnostic tool must not be able to take a machine away from its owner.
+- **`stop` then `mask` is a race you lose.** On a unit with `Restart=`, `systemctl stop`
+  queues a restart, and masking in the same second does not catch it: the deployed
+  folding client came back after the ladder had "stopped and masked" it, spawned
+  `FahCore_28` ninety seconds later, and killed the card mid-campaign — contaminating
+  every verdict after it. Mask **first**, then stop, then `reset-failed`, then
+  *verify* `is-active` is `inactive` and refuse to continue otherwise. (On NixOS you
+  cannot pre-empt this with a persistent mask or a drop-in either:
+  `/etc/systemd/system` is a read-only bind and NixOS owns the unit symlink. Re-apply
+  the runtime mask early from the ladder unit's own `ExecStartPre`.)
+- **Accept both `--flag VALUE` and `--flag=VALUE`.** A step table written with
+  `--setenv CUDA_MODULE_LOADING=EAGER` was forwarded internally as
+  `--setenv=CUDA_MODULE_LOADING=EAGER`, the downstream parser rejected it, and three of
+  seven bisect steps "completed" in 8 s with exit 2 — which the ladder reported as a
+  verdict-looking line. Any argument one script builds for another must round-trip.
 - **`rc=124` is not a fault, it is a budget.** A `hashcat -b` step on 2026-11-20 was
   called `TIMEOUT-STALL`, rebooted the box, and was written up as a second kill —
   but the card was `alive=yes`, its CSV held no bad samples, and the log was full

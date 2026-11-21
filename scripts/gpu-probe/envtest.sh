@@ -44,9 +44,13 @@ while [ $# -gt 0 ]; do
     --unit) UNIT=$2; shift 2;;
     --seconds) SECS=$2; shift 2;;
     --extra-ld) EXTRA_LD=$2; shift 2;;
+    # Both forms, because the repro hands us the `=` form after parsing the space form
+    # from a step table — and rejecting it silently turned three corebisect steps into
+    # RC-2 "the core could not be run" on 2026-11-21, which is a wasted boot each.
+    --setenv=*) EXTRA_ENV="$EXTRA_ENV $1"; shift;;
+    --setenv) EXTRA_ENV="$EXTRA_ENV --setenv=$2"; shift 2;;
     --run) RUN=$2; shift 2;;
     --cwd) CWD=$2; shift 2;;
-    --setenv) EXTRA_ENV="$EXTRA_ENV --setenv=$2"; shift 2;;
     --dry-run) DRY=1; shift;;
     --) shift; break;;
     *) echo "unknown arg: $1" >&2; exit 2;;
