@@ -367,8 +367,30 @@ in
 
   # Swap the module's ROCm OpenCL ICD (useless here — no AMD GPU) for the
   # NVIDIA driver's, and give the core the driver's own libraries.
+  #
+  # WITH GPU FOLDING OFF (history #10) THE ENVIRONMENT IS THE LOAD-BEARING
+  # GUARD, and it exists because enableGpu=false alone was NOT enough: on
+  # 2026-11-21 18:53 a boot with enableGpu=false still ran a queued OpenMM WU
+  # on CUDA ("Using CUDA on CUDA Platform and gpu 0") and put the card off the
+  # bus ~2 min in, before any knob could be turned. Reason: --no-gpus is only
+  # spoken to the client over its websocket API AFTER the client is up and has
+  # re-armed its slots from its own state, and v8 keeps BOTH the queued work
+  # units and the slot config inside client.db — there is no work/ directory on
+  # disk to clean, so nothing in the closure can stop that first WU launching.
+  # Hiding the devices from the process does not depend on ordering:
+  #   CUDA_VISIBLE_DEVICES=""     → the CUDA driver API enumerates 0 devices
+  #   OCL_ICD_VENDORS=/var/empty  → ocl-icd finds no ICD, so no OpenCL devices
+  # Detection yields no GPU at all, no GPU slot can run, and a queued GPU WU
+  # simply cannot start. The console and fah-panel are unaffected (other
+  # processes). Flip enableGpu back to true to restore the NVIDIA ICD.
   systemd.services.fah-client.environment = lib.mkIf config.services.folding-at-home-native.enable {
-    OCL_ICD_VENDORS = lib.mkForce "${config.hardware.nvidia.package}/etc/OpenCL/vendors";
+    OCL_ICD_VENDORS = lib.mkForce (
+      if config.services.folding-at-home-native.enableGpu then
+        "${config.hardware.nvidia.package}/etc/OpenCL/vendors"
+      else
+        "/var/empty"
+    );
+    CUDA_VISIBLE_DEVICES = lib.mkIf (!config.services.folding-at-home-native.enableGpu) "";
     LD_LIBRARY_PATH = lib.mkForce (
       lib.makeLibraryPath [
         pkgs.ocl-icd

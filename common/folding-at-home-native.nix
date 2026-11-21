@@ -139,13 +139,25 @@ in
       description = ''
         Whether the boot-time configure oneshot enables the detected GPUs
         (the fah-provision default) or explicitly clears the group's GPU
-        list (`--no-gpus`) so the box folds CPU-only. Set false on a host
-        whose power supply cannot take GPU fold load — hp-z240-xeon-1240v6
-        had 240 W SFF brown-outs until its GPU fold was fixed with an
-        enforced 100 W cap (see that host's folding-heater.nix power
-        history: a NVML power cap only counts if it is applied after the
-        display stack is up, with persistence mode on, and verified under
-        load via power.draw + clocks_throttle_reasons).
+        list (`--no-gpus`) so the box folds CPU-only.
+
+        ⚠ CLEARING THE LIST IS A WEAK GUARANTEE, not a wall. It happens over
+        the client's websocket API, i.e. only after fah-client is already
+        running and has re-armed its slots and its queued work units from
+        client.db (v8 stores BOTH in the database — there is no work/
+        directory to clean), so a GPU WU can launch in the window before the
+        provisioner connects. hp-z240-xeon-1240v6 proved this on 2026-11-21:
+        with enableGpu=false, a boot ran a queued OpenMM WU on CUDA and killed
+        the card ~2 min in. A host that must NEVER touch its GPU therefore has
+        to hide the device from the process as well — `CUDA_VISIBLE_DEVICES=""`
+        plus `OCL_ICD_VENDORS=/var/empty` on systemd.services.fah-client — which
+        is what that host's folding-heater.nix now does; copy it from there.
+
+        Set false on a host whose power supply cannot take GPU fold load: the
+        240 W SFF brown-outs described in that host's power history were fixed
+        by an enforced cap applied AFTER the display stack is up, with
+        persistence mode on, and verified under load via power.draw +
+        clocks_throttle_reasons — a reported power.limit is not a limit.
       '';
     };
 
