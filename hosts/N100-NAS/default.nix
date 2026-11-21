@@ -27,6 +27,7 @@
   ./qbittorrent.nix
   ./samba.nix
   ./scrutiny.nix
+  ./silo.nix
   ./tailscale.nix
 
   ({ config, ... }: {
