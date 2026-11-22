@@ -1,4 +1,9 @@
-{ lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 # `gpu-mode` — one command that hands the R9700 to exactly one thing:
 #
@@ -31,6 +36,12 @@
           pkgs.systemd
         ]
       }:/run/setuid-programs
+      # The LLM engine units, straight from the Nix list that generates them
+      # (./strata.nix: ai.strataEngineUnits, primary first). The swap shim can
+      # run one engine per selectable model, so the lease has to stop ALL of
+      # them — hardcoding "strata strata-second" here is how a third model
+      # would silently survive 'gpu-mode sd|game' and re-grab the card.
+      export GPU_MODE_LLM_UNITS="${lib.concatStringsSep " " config.ai.strataEngineUnits}"
       exec ${pkgs.bash}/bin/bash ${./gpu-mode.sh} "$@"
     '')
   ];

@@ -21,10 +21,13 @@ STATUS=http://127.0.0.1:8080/v1/status
 CHAT=http://127.0.0.1:8080/v1/chat/completions
 SD_HEALTH=http://127.0.0.1:8085/v1/models
 TOTAL_VRAM_MB=32624
-# The two LLM units behind the strata-swap shim on :8080 (./strata.nix):
-# strata = config.ai.strataModel (the boot model), strata-second = the swap
-# partner (Qwen3.6-35B-A3B when the primary is Flash-Next, and vice versa).
-LLM_UNITS=(strata strata-second)
+# The LLM units behind the strata-swap shim on :8080 (./strata.nix): the
+# primary (config.ai.strataModel) first, then one per other selectable model
+# (Qwen3.6-35B-A3B, the Coder IQ1_M, ...). ./gpu-mode.nix bakes the list in
+# from the same Nix list that builds the units, so a model added to the swap
+# table is stopped on a lease switch without touching this script; the
+# fallback covers running the script bare.
+read -r -a LLM_UNITS <<< "${GPU_MODE_LLM_UNITS:-strata}"
 
 usage() {
   cat <<'EOF'
@@ -33,12 +36,12 @@ gpu-mode — give the R9700 to exactly one thing at a time
   gpu-mode            who holds the card right now (default)
   gpu-mode llm        Strata (boot default: Pi sessions, Recallium,
                       strata.ai / llm.ai / 192.168.49.50 endpoints). Starts the
-                      PRIMARY model (config.ai.strataModel); the other model of
-                      the pair (Qwen3.6-35B-A3B, or Flash-Next if the primary
-                      IS q36) is picked per-request through :8080 — a request
-                      naming it swaps the engines (./strata-swap.py), costing a
-                      multi-minute model load, and 'gpu-mode llm' puts the
-                      primary back.
+                      PRIMARY model (config.ai.strataModel); every other
+                      selectable model in the strata-swap table (the Coder
+                      IQ1_M, Qwen3.6-35B-A3B) is picked per-request through
+                      :8080 — a request naming it swaps the engines
+                      (./strata-swap.py), costing a multi-minute model load,
+                      and 'gpu-mode llm' puts the primary back.
   gpu-mode sd         FLUX.1-schnell on stable-diffusion.cpp (./sd-server.nix)
                       web UI http://192.168.49.50/sd/  (https://sd.ai.chrisdell.info)
   gpu-mode game       free the GPU for gaming  (aliases: free, off)
@@ -119,25 +122,28 @@ warn_llm_inflight() {
 }
 
 mode_status() {
-  local sa sb se f lease
-  sa=$(systemctl is-active strata 2>/dev/null) || true
-  sb=$(systemctl is-active strata-second 2>/dev/null) || true
+  local se f lease u s states="" llm_active=0
   se=$(systemctl is-active sd-server 2>/dev/null) || true
+  for u in "${LLM_UNITS[@]}"; do
+    s=$(systemctl is-active "$u" 2>/dev/null) || true
+    states+="$u=$s "
+    [ "$s" = active ] && llm_active=1
+  done
   f=$(free_mib)
   lease="game — nothing holds the card (take it back: gpu-mode llm)"
-  [ "$se" = active ] && [ "$sa" != active ] && [ "$sb" != active ] && lease="sd (Flux-schnell)"
-  { [ "$sa" = active ] || [ "$sb" = active ]; } && lease="llm (Strata)"
+  [ "$se" = active ] && [ "$llm_active" = 0 ] && lease="sd (Flux-schnell)"
+  [ "$llm_active" = 1 ] && lease="llm (Strata)"
   echo "R9700 lease : $lease"
-  if [ "$sa" = active ] || [ "$sb" = active ]; then
+  if [ "$llm_active" = 1 ]; then
     local ld fl md
     ld=$(json_field loaded)
     fl=$(json_field in_flight)
     md=$(json_field model)
     echo "  llm       : active via strata-swap (:8080) — model: ${md:-not answering}"
     echo "             loaded: ${ld:-?}, in flight: ${fl:-?}"
-    echo "             units : strata=$sa, strata-second=$sb (swap on request; gpu-mode llm = primary)"
+    echo "             units : ${states}(swap on request; gpu-mode llm = primary)"
   else
-    echo "  llm       : strata=$sa, strata-second=$sb"
+    echo "  llm       : $states"
   fi
   if [ "$se" = active ]; then
     if sd_ready; then
@@ -152,16 +158,19 @@ mode_status() {
 }
 
 mode_llm() {
-  local was waited=0
+  local was u waited=0
   was=$(systemctl is-active strata 2>/dev/null) || true
-  # The llm lease is one engine, and strata-swap holds the choice: if the
-  # partner is live, "llm" means the PRIMARY back, so stop it (like any other
-  # mode switch — an in-flight q36 generation is interrupted, warning first).
-  if is_on strata-second; then
-    warn_llm_inflight
-    echo "handing the LLM lease back to the primary model (stopping strata-second)..."
-    $SUDO systemctl stop strata-second
-  fi
+  # The llm lease is one engine, and strata-swap holds the choice: if a
+  # partner model is live, "llm" means the PRIMARY back, so stop whichever
+  # partners are running (like any other mode switch — an in-flight partner
+  # generation is interrupted, warning first).
+  for u in "${LLM_UNITS[@]:1}"; do
+    if is_on "$u"; then
+      warn_llm_inflight
+      echo "handing the LLM lease back to the primary model (stopping $u)..."
+      $SUDO systemctl stop "$u"
+    fi
+  done
   echo "handing the R9700 to Strata (stopping sd-server)..."
   $SUDO systemctl stop sd-server
   $SUDO systemctl start strata

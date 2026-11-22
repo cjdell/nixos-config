@@ -53,6 +53,8 @@
 #   scripts/repack-strata-udiq4xs.sh      # iq_pack.py --compat-bf16 (REQUIRED here)
 #   scripts/fetch-strata-udiq4xs-v31.sh   # "Dynamic v3.1" re-cut: 4 shards
 #   scripts/repack-strata-udiq4xs-v31.sh  # same recipe, pack/ud-iq4-xs-v31
+#   scripts/fetch-strata-coder-iq1m.sh    # the Coder (ISTA expert-pruned variant)
+#   scripts/repack-strata-coder-iq1m.sh   # plain iq_pack, NO --compat-bf16
 #
 # Its experts are 59.5 GB (55.4 GiB) against IQ3_S's 51.05 GB, so it needs
 # --resident-budget-gib (see models.ud-iq4-xs below) and it costs GPU expert
@@ -61,6 +63,11 @@
 # at 255K vs 41). 262144 ctx itself is unaffected - the int8 KV is 13.7 KB/token
 # and quant-independent. Switch only when that trade is wanted; the unit will not
 # start a pack that has not been prepared (ConditionPathExists).
+#
+# Inside family one, models.coder-iq1m is the third Flash-Next pack this box
+# can serve: same qwen4exp engine line, but half the experts (ISTA's Coder),
+# its own expert profile, no --resident-budget-gib and no DFlash2 — the entry
+# says why.
 #
 # Family two is Qwen3.6-35B-A3B (models.qwen36-ud-q4-k-xl below): an
 # own-path engine (src/qwen35 in the tree, ggml arch qwen35moe) that reads ONE
@@ -146,6 +153,7 @@ let
     # PR #5531); read that line as "RAM is short on this box", not "the pack is
     # broken", and check before raising the budget further.
     ud-iq4-xs-v31 = {
+      selectable = true; # in the strata-swap table (see the swap block below)
       ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-v31-GGUF";
       packDir = "${modelDir}/pack/ud-iq4-xs-v31";
       nativeGguf = "/home/cjdell/Models/Qwen3.8-Flash-Next-UD-IQ4_XS-v31-GGUF/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00004.gguf";
@@ -157,6 +165,57 @@ let
         "--resident-budget-gib"
         "56"
       ];
+    };
+
+    # ISTA-DASLab's Qwen3.8-Flash-Next **Coder** (GSQ-RCO-Coder-GGUF, IQ1_M),
+    # selectable in strata-swap since 2026-11-22.  setup.py's FAMILY entry:
+    # "half the experts (code, tools, images kept): needs ~32 GB of RAM,
+    # faster; weaker outside coding" — 256 of the 512 experts per layer
+    # survive, stored like IQ3_S at 3.5 bpw.  The "IQ1_M" in the name is the
+    # FILE's average bpw, not a tensor type (repo card: "No individual weight
+    # is stored at 1.89 bits"), so no new kernels and no engine floor beyond
+    # MIN_ENGINE — the pinned 0.1.59.1 reads it today.  Same qwen4exp
+    # architecture, same tokenizer, and its shard 2 (the PLE table) is
+    # byte-identical to the old GSQ-RCO set's — CODER_FILES pins it at the
+    # very sha 316b46f3… this file's header names — and it reads pictures
+    # through the SAME mmproj we already hold.
+    #
+    # 58.4 GB download, arena 23.4 GB (setup.py MODELS["IQ1_M"], no "budget"
+    # flag): every expert is RAM-resident without --resident-budget-gib, and
+    # the same 24-ish GiB GPU expert cache now holds twice the experts per GiB
+    # — "faster" is the point of this pack, at "weaker outside coding", which
+    # is why it is a swap option and not the boot default.
+    #
+    # Two things make it NOT just another set of literals:
+    #   * `profile` — the family entry names its OWN expert profile
+    #     (expert-profile-coder.bin, 12,288 ranked pairs vs the full model's
+    #     24,576 — the pruned experts are gone from the ranking). The shipped
+    #     file is in the package; see expertProfileFor.
+    #   * `dflash2 = false` — drafting.py SUPPORTED_FAMILIES is qwen/gyro/
+    #     unsloth only: "Not Swift (UkisAI's fine-tune), Coder (ISTA-DASLab's
+    #     coding version) or NVFP4: no DFlash2 acceptance numbers for them,
+    #     they start the MTP", and _SUPPORTED_NAME does not match "…-coder-…"
+    #     either. The shared MTP runtime (mtpDir — the 31 mtp.* tensors from
+    #     the BF16 original, which the GSQ-RCO files never shipped) drafts
+    #     for it exactly as it did in the IQ3_S era, so engineArgsFor keeps
+    #     --mtp/--spec/--spec-min-p untouched.
+    # Fetch/pack: scripts/fetch-strata-coder-iq1m.sh +
+    # scripts/repack-strata-coder-iq1m.sh (plain iq_pack, NO --compat-bf16 —
+    # that flag is for Unsloth files' Q8_0 dense side, not this recipe).
+    coder-iq1m = rec {
+      selectable = true;
+      ggufDir = "/home/cjdell/Models/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF";
+      packDir = "${modelDir}/pack/coder-iq1m";
+      nativeGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf";
+      pleGguf = "${ggufDir}/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf";
+      # Upstream's own model_name form is qwen3.8-flash-next-coder-iq1_m
+      # (drafting.py's docstring); the underscore is NOT parsed by anything
+      # (own_path_fit only matches "qwen3.6-35b-a3b-", and DFlash2 rejects
+      # both spellings alike), so this keeps the string clients type.
+      modelName = "qwen3.8-flash-next-coder-iq1m";
+      profile = "expert-profile-coder.bin";
+      dflash2 = false;
+      extraArgs = [ ];
     };
 
     # Qwen3.6-35B-A3B ("the 35B a3b") - the SECOND FAMILY, live as an option
@@ -204,6 +263,7 @@ let
     # `rec`: this entry builds nativeGguf/args/preconditions from its own
     # ggufDir/packDir (the Flash-Next entries above repeat literal paths instead).
     qwen36-ud-q4-k-xl = rec {
+      selectable = true;
       ownPath = true;
       arch = "qwen35moe";
       ggufDir = "/home/cjdell/Models/Qwen3.6-35B-A3B-MTP-GGUF";
@@ -246,33 +306,51 @@ let
   # `preconditions`; the shared run line below is Flash-Next-only.
   ownPath = m.ownPath or false;
 
-  # ---- the swap pair (strata-swap, ./strata-swap.py) ------------------------
-  # One card cannot host both engines, but the OpenAI `model` field can still
+  # ---- the swap table (strata-swap, ./strata-swap.py) ------------------------
+  # One card cannot host two engines, but the OpenAI `model` field can still
   # *choose* between them: strata-swap.service owns :8080 (every nginx location
-  # already points there) and behind it two serve processes live on loopback:
+  # already points there) and behind it one serve process per SELECTABLE model
+  # lives on loopback:
   #
-  #   strata.service         config.ai.strataModel        127.0.0.1:8091  (wantedBy)
-  #   strata-second.service  the OTHER of the pair        127.0.0.1:8092  (shim-only)
+  #   strata.service         config.ai.strataModel       127.0.0.1:8091   (wantedBy)
+  #   strata-<key>.service   every other selectable      127.0.0.1:8092..  (shim-only)
   #
-  # The pair is {flash-next v31, Qwen3.6-35B-A3B} whichever way ai.strataModel
-  # points; the partner never starts at boot (no wantedBy) and the shim only
-  # ever SWAPS between them while one is already live — it never starts an
-  # engine onto the off-lease card (./gpu-mode.nix owns that lease). A request
-  # whose `model` names neither (absent included) goes to the live engine
-  # untouched, which is how Recallium's name-blind calls keep working.
+  # A models-map entry joins the table when it says `selectable = true` (the
+  # old ones whose GGUFs were deleted are deliberately not marked: ConditionPathExists
+  # would only turn a request naming them into a confusing swap failure). The
+  # primary is always the table's first entry — MODELS[0] is the shim's own
+  # boot/default convention — so `ai.strataModel` alone still decides what a
+  # reboot serves. Partners never start at boot (no wantedBy) and the shim
+  # only ever SWAPS between table entries while one is already live — it never
+  # starts an engine onto the off-lease card (./gpu-mode.nix owns that lease).
+  # A request whose `model` names none of them (absent included) goes to the
+  # live engine untouched, which is how Recallium's name-blind calls keep
+  # working. The partners keep their table positions by attr-name sort order,
+  # stable across evaluation; the same list is shared with gpu-mode via
+  # ai.strataEngineUnits so a lease switch stops every engine, not just the boot one.
   # Ports: 8081 llama-swap (disabled), 8085 sd, 8086 lfm3, 8090 recallium-shim
-  # are the neighbours; 8091/8092 are the loopback-only engine slots.
-  secondModel = if model == "qwen36-ud-q4-k-xl" then "ud-iq4-xs-v31" else "qwen36-ud-q4-k-xl";
-  m2 = models.${secondModel};
+  # are the neighbours; 8091.. are the loopback-only engine slots.
   swapPort = 8080;
   primaryPort = 8091;
-  secondPort = 8092;
+  partnerPort0 = 8092;
+  partnerModels =
+    let
+      keys = lib.attrNames (lib.filterAttrs (_: v: v.selectable or false) models);
+    in
+    lib.imap0 (i: k: {
+      key = k;
+      mm = models.${k};
+      unit = "strata-${k}";
+      stateDir = "/var/lib/strata-${k}";
+      port = partnerPort0 + i;
+    }) (lib.filter (k: k != model) keys);
   # What VRAM must be free before each engine may start, per the shim's
   # amd-smi gate: flash-next's cache auto-fill wants essentially the whole card
-  # (loaded, it leaves ~666 MiB), q36 needs its ~25.8 GiB of weights plus
-  # graphs at 128K. The gate is a safety margin against a not-yet-dead
-  # predecessor, not a sizing reservation; `before_load` (stop sd-server) is
-  # already in both configs.
+  # (loaded, it leaves ~666 MiB — the Coder pack is no exception, its smaller
+  # experts only mean the cache holds more of them), q36 needs its ~25.8 GiB of
+  # weights plus graphs at 128K. The gate is a safety margin against a
+  # not-yet-dead predecessor, not a sizing reservation; `before_load` (stop
+  # sd-server) is already in every config.
   vramMinFor = mm: if mm.ownPath or false then 25000 else 30000;
 
   # 0.2.17 no longer ships expert-profile.bin in terminal/data (profiles come
@@ -284,7 +362,11 @@ let
   # profile (196 KB, 24576 ranked pairs) is carried in the model-data area
   # beside the pack and GGUFs - verified accepted by 0.1.63 at startup - and
   # regenerated later from our own traffic with --expert-profile-save P (#477).
-  expertProfile = "${strata}/share/strata/data/expert-profile.bin";
+  # On 0.2.13.1 (engine 0.1.59.1) the shipped profiles live in the package
+  # after all, and a family may need its OWN one: the Coder pack keeps only 256
+  # of the 512 experts per layer, so its ranking is a different file
+  # (expert-profile-coder.bin, half the pairs) — an entry says which via `profile`.
+  expertProfileFor = mm: "${strata}/share/strata/data/${mm.profile or "expert-profile.bin"}";
 
   # ISTA's vision encoder for Flash-Next: a 27-layer ViT + the projector into
   # the language model (0.85 GiB). Model data, so it lives beside the GGUFs and
@@ -362,7 +444,7 @@ let
       ]
       ++ [
         "--expert-profile"
-        expertProfile
+        (expertProfileFor mm)
         "--expert-cache"
         "auto"
         "--prefill"
@@ -738,14 +820,19 @@ let
   # finalize: the per-family keys on top of the shared base.
   #
   #   * `drafting` — the key the block above documents — stays with
-  #     Flash-Next. The own-path family gets NO drafting key, exactly like
-  #     upstream's install_own_path config: its MTP block drafts (the count is
+  #     DFlash2-capable Flash-Next: qwen/gyro/unsloth per drafting.py
+  #     SUPPORTED_FAMILIES. The own-path family gets NO drafting key, exactly
+  #     like upstream's install_own_path config: its MTP block drafts (the count is
   #     literal in its args), and serve's drafting layer is Qwen3.8-Flash-Next
   #     by design (drafting.supported_model(): "another model: its drafting is
   #     not this choice's business (DeepSeek, Swift, Coder, NVFP4, Qwen3.6...)").
   #     A saved "drafting" for a name that fails the gate falls back to MTP and
   #     reshapes the run line - on the q36 path --mtp is a COUNT, so a reshaped
   #     line is broken. Absent cannot misfire; that is also what setup writes.
+  #     The same reasoning covers the Coder (`dflash2 = false`): upstream has
+  #     no DFlash2 acceptance numbers for it ("they start the MTP"), and the
+  #     shared mtpDir runtime is exactly what drafts it — no key, no reshape,
+  #     the engineArgsFor literals run untouched.
   #   * `arch` — serve's family tag (FAMILY_MODEL_NAMES -> /v1/models naming +
   #     the qwen35moe thinking defaults temperature 1.0 / top_p 0.95 / top_k 20
   #     / presence_penalty 1.5, the model_arch card-defaults gate, the #5715
@@ -755,18 +842,35 @@ let
   finalize =
     cfg: mm:
     cfg
-    // lib.optionalAttrs (!(mm.ownPath or false)) {
+    // lib.optionalAttrs (mm.dflash2 or (!(mm.ownPath or false))) {
       drafting = "dflash2";
     }
     // lib.optionalAttrs (mm ? arch) {
       arch = mm.arch;
     };
 
-  # The two serve configs the swap pair runs: primary = config.ai.strataModel
-  # in /var/lib/strata (unchanged, byte-identical to the pre-swap era), the
-  # partner in its own state dir so the two never share strata.log.
+  # The serve configs: primary = config.ai.strataModel in /var/lib/strata
+  # (byte-identical to the pre-swap era), one per partner in its own state dir
+  # so the engines never share strata.log. Every one goes through the same
+  # finalize (runConfigBaseFor mm stateDir) mm path, so no unit's engine line
+  # can drift from the primary's by construction.
   runConfig = finalize (runConfigBaseFor m "/var/lib/strata") m;
-  runConfigSecond = finalize (runConfigBaseFor m2 "/var/lib/strata-second") m2;
+  partnerConfigs = map (
+    p:
+    let
+      solo = finalize (runConfigBaseFor p.mm p.stateDir) p.mm;
+    in
+    p
+    // {
+      inherit solo;
+      # Same OWN-PATH rule as the primary's configFileBatch below: on an
+      # ownPath model parallel=1 is the documented explicit-solo form, so
+      # strata-batch on|off is a no-op there (see the batch-mode block).
+      batch = solo // {
+        parallel = if (p.mm.ownPath or false) then 1 else 2;
+      };
+    }
+  ) partnerModels;
 
   # `strata-batch on|off|status` (./strata-batch.sh, installed on PATH) picks
   # between these by writing /var/lib/strata/batch-mode; strataExec below reads
@@ -815,16 +919,8 @@ let
     )
   );
 
-  # The partner's two run configs (same finalize, m2, own state dir).
-  configFileSecond = pkgs.writeText "strata-${secondModel}.json" (builtins.toJSON runConfigSecond);
-  configFileSecondBatch = pkgs.writeText "strata-${secondModel}-batch2.json" (
-    builtins.toJSON (
-      runConfigSecond
-      // {
-        parallel = if (m2.ownPath or false) then 1 else 2; # see the OWN-PATH note above
-      }
-    )
-  );
+  # Per-partner store configs (solo + the batch toggle's alternative), folded
+  # into the exec wrapper so a models-map entry is all a new model needs.
 
   # Unit entry point: pick the run config per service start from the mode file.
   # Anything but exactly "2" (absent file, garbage, "off") is the solo config,
@@ -842,12 +938,16 @@ let
       exec ${strata}/bin/strata-server --engine strata --config "$cfg" --host 127.0.0.1 --port ${toString port}
     '';
   strataExec = execFor "primary" configFile configFileBatch primaryPort;
-  strataExecSecond = execFor "second" configFileSecond configFileSecondBatch secondPort;
+  execForPartner =
+    p:
+    execFor p.key (pkgs.writeText "strata-${p.key}.json" (
+      builtins.toJSON p.solo
+    )) (pkgs.writeText "strata-${p.key}-batch2.json" (builtins.toJSON p.batch)) p.port;
 
-  # The shim's routing table (read at its ExecStart via SWAP_CONFIG): the two
-  # ids clients put in `"model"` are exactly the configs' model_name values,
-  # which serve's own /v1/models echoes - so what the shim advertises, the
-  # engines confirm.
+  # The shim's routing table (read at its ExecStart via SWAP_CONFIG): the ids
+  # clients put in `"model"` are exactly the configs' model_name values, which
+  # serve's own /v1/models echoes - so what the shim advertises, the engines
+  # confirm. Primary first: MODELS[0] is the shim's own boot/default entry.
   swapConfig = pkgs.writeText "strata-swap.json" (
     builtins.toJSON {
       models = [
@@ -857,13 +957,13 @@ let
           port = primaryPort;
           vram_min_mib = vramMinFor m;
         }
-        {
-          id = m2.modelName;
-          unit = "strata-second";
-          port = secondPort;
-          vram_min_mib = vramMinFor m2;
-        }
-      ];
+      ]
+      ++ map (p: {
+        id = p.mm.modelName;
+        unit = p.unit;
+        port = p.port;
+        vram_min_mib = vramMinFor p.mm;
+      }) partnerConfigs;
     }
   );
 
@@ -890,6 +990,12 @@ let
   };
 in
 {
+  # Every Strata engine unit, primary first — the one list gpu-mode must stop
+  # when the card leaves the llm lease (./gpu-mode.nix bakes it into the
+  # command, ./gpu-mode.sh reads it), so adding a selectable model here needs
+  # no gpu-mode edit.
+  ai.strataEngineUnits = [ "strata" ] ++ map (p: p.unit) partnerConfigs;
+
   # `strata-batch` — two conversations at once on the R9700, on demand.
   # Solo is the default (boot, no mode file); see ./strata-batch.sh for the
   # trade and the strataExec comment above for what a batch start costs.
@@ -906,6 +1012,56 @@ in
       }:/run/setuid-programs
       exec ${pkgs.bash}/bin/bash ${./strata-batch.sh} "$@"
     '')
+  ];
+
+  # The swap partners: one unit per selectable model other than the primary,
+  # on 127.0.0.1:8092+, each in its own state dir, and deliberately NO
+  # wantedBy — only strata-swap starts them (on a `model` mismatch), exactly
+  # like sd-server is gpu-mode-only. That keeps the boot story unchanged (a
+  # reboot always restores ai.strataModel) and makes `systemctl status
+  # strata-<key>` the whole audit trail of the last swap to that model. The
+  # same strataExec batch-mode logic applies; on an ownPath entry the batch2
+  # config is parallel=1, a documented no-op.
+  #
+  # Shipped as an inline module, and imported, because a plain
+  # `systemd.services = <attrs>` assignment and the `systemd.services.strata`
+  # / `.strata-swap` PATHS below cannot coexist in one attrset literal in
+  # either order (Nix calls that a duplicate `systemd.services`), and rooting
+  # the generated block at `config.` would force this whole module under an
+  # explicit `config` — a 200-line re-indent for nothing. An inline module is
+  # ordinary option definitions merged as usual (the generated names are
+  # strata-<key>, never plain strata, so they never collide with those two),
+  # and as a closure it sees the `let` above (partnerConfigs, execForPartner)
+  # without threading.
+  imports = [
+    (
+      { ... }:
+      {
+        systemd.services = lib.listToAttrs (
+          map (
+            p:
+            lib.nameValuePair p.unit {
+              description = "Strata swap model (${p.key}: ${p.mm.modelName})";
+              after = [ "network.target" ];
+              unitConfig.ConditionPathExists =
+                p.mm.preconditions or [
+                  "${p.mm.packDir}/index.txt"
+                  (p.mm.mmproj or mmprojDefault)
+                ];
+              serviceConfig = {
+                ExecStart = execForPartner p;
+                StateDirectory = "strata-${p.key}";
+                Restart = "on-failure";
+                RestartSec = 10;
+                LimitCORE = "0";
+                TimeoutStartSec = "infinity";
+                TimeoutStopSec = 120;
+              };
+            }
+          ) partnerConfigs
+        );
+      }
+    )
   ];
 
   systemd.services.strata = {
@@ -949,40 +1105,14 @@ in
     };
   };
 
-  # The swap partner: the other model of the pair, on 127.0.0.1:8092, its own
-  # state dir, and deliberately NO wantedBy — only strata-swap starts it (on a
-  # `model` mismatch), exactly like sd-server is gpu-mode-only. That keeps the
-  # boot story unchanged (a reboot always restores ai.strataModel) and makes
-  # `systemctl status strata-second` the whole audit trail of the last swap.
-  # The same strataExec batch-mode logic applies; on an ownPath entry the
-  # batch2 config is parallel=1, a documented no-op.
-  systemd.services."strata-second" = {
-    description = "Strata swap partner (${secondModel}: ${m2.modelName})";
-    after = [ "network.target" ];
-    unitConfig.ConditionPathExists =
-      m2.preconditions or [
-        "${m2.packDir}/index.txt"
-        (m2.mmproj or mmprojDefault)
-      ];
-    serviceConfig = {
-      ExecStart = strataExecSecond;
-      StateDirectory = "strata-second";
-      Restart = "on-failure";
-      RestartSec = 10;
-      LimitCORE = "0";
-      TimeoutStartSec = "infinity";
-      TimeoutStopSec = 120;
-    };
-  };
-
   # strata-swap — the model-selecting front (see ./strata-swap.py's header for
-  # the whole contract: advertise both, exact-match routing, swap-with-
+  # the whole contract: advertise all, exact-match routing, swap-with-
   # rollback, never start onto an off-lease card). Runs as ROOT, unlike the
-  # DynamicUser shims: its job is systemctl stop/start of the two engine
-  # units, which needs PID-1 privileges; it is loopback-only, and the engines
+  # DynamicUser shims: its job is systemctl stop/start of the engine units,
+  # which needs PID-1 privileges; it is loopback-only, and the engines
   # behind it keep their own user + Host allow-list.
   systemd.services."strata-swap" = {
-    description = "Strata model-selection shim (both models on :8080, swap on mismatch)";
+    description = "Strata model-selection shim (every selectable model on :8080, swap on mismatch)";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" ];
     wants = [ "strata.service" ];

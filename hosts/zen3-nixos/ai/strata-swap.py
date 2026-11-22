@@ -12,15 +12,17 @@ serve layer has no such front either, by design: one config JSON -> one engine
 
 WHAT THIS IS. A stdlib-only HTTP proxy on 127.0.0.1:8080 — the port every
 nginx location (IP vhost "/", strata.ai, llm.ai, /recallium-llm via the
-thinking-shim) already proxies to — so no client URL changes. Two Strata
-SERVE processes live behind it on loopback ports (strata.service -> 8091,
-strata-<second>.service -> 8092; the second is declared in ./strata.nix and
-starts only on demand):
+thinking-shim) already proxies to — so no client URL changes. One Strata
+SERVE process per selectable model lives behind it on loopback ports
+(strata.service -> 8091, strata-<key>.service -> 8092, ...; the table is
+declared in ./strata.nix — entries say `selectable = true` — and partners
+start only on demand):
 
-  GET  /v1/models      advertises BOTH models: the live engine's own entries,
-                       plus the other id listed {"status": {"value":
-                       "unloaded"}} — the same "listed, loads on use" form the
-                       serve layer itself uses for an idle-unloaded model.
+  GET  /v1/models      advertises ALL table models: the live engine's own
+                       entries, plus the other ids listed {"status":
+                       {"value": "unloaded"}} — the same "listed, loads on
+                       use" form the serve layer itself uses for an
+                       idle-unloaded model.
   POST /v1/chat/completions (and /v1/completions, /v1/messages,
                        /v1/responses)   — the body's `model`, EXACT-matched
                        against the table, picks the engine. A name that is not

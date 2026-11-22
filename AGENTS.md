@@ -1484,23 +1484,53 @@ almost entirely fixed cost.
   (own_path_fit parses the size back out of it). Serving it needs the 0.2.15
   engine (`--families` → `qwen4exp qwen35moe`); switching = one
   `ai.strataModel` line + rebuild + restart, same ConditionPathExists contract.
+- **Third Flash-Next pack, selectable since 2026-11-22: `models.coder-iq1m` —
+  Qwen3.8-Flash-Next Coder** (`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF`,
+  rev `5348543e…`, IQ1_M, 58.4 GB in two shards — shard 2 is the SAME PLE
+  table, sha `316b46f3…`): ISTA's expert-pruned coder, **256 of the 512
+  experts per layer kept** (code/tools/vision ones), stored like IQ3_S at
+  3.5 bpw — "IQ1_M" is the file's average bpw, not a tensor type, so no new
+  kernels and no engine floor past MIN_ENGINE (the pinned 0.1.59.1 reads it).
+  setup.py: "needs ~32 GB of RAM, faster; weaker outside coding" — arena 23.4
+  GB, so every expert is RAM-resident **without** `--resident-budget-gib`.
+  Two things made it not a copy-paste entry: it ships its **own expert
+  profile** (`expert-profile-coder.bin` in the package, 12,288 pairs — half
+  the ranking; `models.<k>.profile` selects it via `expertProfileFor`), and
+  **DFlash2 must NOT be configured for it** — `drafting.py`
+  `SUPPORTED_FAMILIES = qwen/gyro/unsloth`: "Coder … no DFlash2 acceptance
+  numbers for them, they start the MTP" — so the entry sets `dflash2 = false`
+  and its config carries no `drafting` key; the shared
+  `/home/cjdell/Strata/mtp/rt` runtime drafts it like the IQ3_S era.
+  `selectable = true` puts it in the swap table under id
+  **`qwen3.8-flash-next-coder-iq1m`** (upstream's own spelling is `…iq1_m`;
+  nothing parses the tail — DFlash2 rejects both alike). Prepare with
+  `scripts/fetch-strata-coder-iq1m.sh` + `scripts/repack-strata-coder-iq1m.sh`
+  (plain `iq_pack.py`, NO `--compat-bf16` — that flag is for Unsloth files'
+  Q8_0 dense side; the MTP runtime and mmproj are the ones already on disk).
 - **Model choice via the API — `strata-swap`, live on `:8080` since 2026-11-18.**
   The engine is still one-model-per-process; what changed is the front.
   `strata-swap.py` (system unit `strata-swap`, root because it drives
   `systemctl`, loopback-only) owns **127.0.0.1:8080 — which every nginx
   location already proxied — so no client URL changed**; the engines moved
-  behind it (primary `strata.service` → `:8091`, partner `strata-second.service`
-  → `:8092`, the partner = the other of {`config.ai.strataModel`, q36}, built
-  by the same `finalize (runConfigBaseFor mm …)` path so the two configs
-  cannot drift; verified byte-identical JSON hashes for the primary across the
-  refactor). Its contract (full rationale in the file header):
-  `GET /v1/models` advertises **both** ids (the other one listed
-  `"unloaded"` — serve's own loads-on-use form); a request whose `model`
-  **exactly** names the other engine triggers a SWAP — stop live unit → wait
-  `amd-smi` free VRAM (`vram_min_mib`: flash-next 30000 / q36 25000; NOTE the
+  behind it (primary `strata.service` → `:8091`; since 2026-11-22 one unit
+  per **selectable** model instead of the old single `strata-second`:
+  `strata-<key>.service` → `:8092+` in attr-name order, for every `models`
+  entry marked `selectable = true` other than `config.ai.strataModel` — today
+  `strata-coder-iq1m` (8092) and `strata-qwen36-ud-q4-k-xl` (8093), all built
+  by the same `finalize (runConfigBaseFor mm …)` path so no config can
+  drift; the 11-22 refactor left the primary's exec + run-config
+  byte-identical to the live system). Its contract (full rationale in the
+  file header — the shim was already table-driven, so the generalization cost
+  it zero code):
+  `GET /v1/models` advertises **every selectable** id (the non-live ones
+  listed `"unloaded"` — serve's own loads-on-use form); a request whose
+  `model` **exactly** names a non-live engine triggers a SWAP — stop live
+  unit → wait
+  `amd-smi` free VRAM (`vram_min_mib`: flash-next + coder 30000 / q36 25000;
+  NOTE the
   amd-smi 7.2.4 `metric -m --json` shape is `gpu_data[0].mem_usage.free_vram`,
   not a flat list — the flat read silently returned None = gate skipped until
-  fixed the same day) → `systemctl start strata-second` → poll `/v1/status`
+  fixed the same day) → `systemctl start strata-<key>` → poll `/v1/status`
   `loaded:true` (≤25 min,
   inside nginx's 3600 s location timeout) → forward the buffered request. A
   failed bring-up **rolls the stopped unit back** and 503s; with nothing live
@@ -1513,10 +1543,13 @@ almost entirely fixed cost.
   waits `loaded:true` up to 25 min); a swap interrupts
   the other model's in-flight streams (journal line `SWAP <id> -> <id>`);
   name-blind traffic follows whichever model is live — llama-swap-era
-  semantics, back with exactly two entries and a Nix-built table
-  (`swapConfig`). `gpu-mode llm` restores the **primary** and stops
-  strata-second first (warning + prompt if a turn is in flight);
-  `gpu-mode sd|game` stop both LLM units; a reboot always comes back on
+  semantics, back with a Nix-built table (`swapConfig`) over the selectable
+  models. `gpu-mode llm` restores the **primary** and stops every running
+  partner first (warning + prompt if a turn is in flight);
+  `gpu-mode sd|game` stop ALL LLM units — the list is
+  `config.ai.strataEngineUnits` (primary first), baked into the command by
+  `gpu-mode.nix` as `GPU_MODE_LLM_UNITS`, so a new selectable model needs no
+  gpu-mode edit; a reboot always comes back on
   `ai.strataModel` (only `strata.service` has wantedBy). `strata-batch` still
   means flash-next-batching; on the ownPath partner the batch2 config is
   `parallel = 1`, a documented no-op.

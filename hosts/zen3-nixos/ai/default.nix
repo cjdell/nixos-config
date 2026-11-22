@@ -113,15 +113,44 @@
     #                and the 0.2.15 engine. The config's model_name
     #                ("qwen3.6-35b-a3b-ud-q4_k_xl") carries the arch string
     #                serve parses, hence the exact spelling.
+    #   "coder-iq1m" ISTA-DASLab's Qwen3.8-Flash-Next CODER (GSQ-RCO-Coder,
+    #                IQ1_M) — a third Flash-Next pack, not a new family: 256
+    #                of the 512 experts per layer kept (the code/tools/vision
+    #                ones), stored at IQ3_S's 3.5 bpw ("the IQ1_M in the name
+    #                is the file's average, not a tensor type"). 58.4 GB on
+    #                disk, arena 23.4 GB, so every expert is RAM-resident
+    #                without a budget flag; its own expert-profile-coder.bin;
+    #                MTP drafts it (upstream: no DFlash2 acceptance numbers
+    #                for Coder). "needs ~32 GB of RAM, faster; weaker outside
+    #                coding" (setup.py). Needs scripts/fetch-strata-coder-iq1m.sh
+    #                + scripts/repack-strata-coder-iq1m.sh.
     strataModel = lib.mkOption {
       type = lib.types.enum [
         "iq3s"
         "ud-iq4-xs"
         "ud-iq4-xs-v31"
+        "coder-iq1m"
         "qwen36-ud-q4-k-xl"
       ];
       default = "iq3s";
-      description = "the model Strata serves: iq3s (GSQ-RCO), ud-iq4-xs[-v31] (Unsloth Flash-Next) or qwen36-ud-q4-k-xl (Qwen3.6-35B-A3B)";
+      description = "the model Strata serves: iq3s (GSQ-RCO), ud-iq4-xs[-v31] or coder-iq1m (Flash-Next packs) or qwen36-ud-q4-k-xl (Qwen3.6-35B-A3B)";
+    };
+
+    # Every Strata engine unit, primary first, set by ./strata.nix from the
+    # same list that generates the units. Read by ./gpu-mode.nix, which bakes
+    # it into the `gpu-mode` command so a lease switch stops EVERY model
+    # behind the swap shim (./gpu-mode.sh: GPU_MODE_LLM_UNITS), not just the
+    # boot one. A third model joining the swap table therefore needs no
+    # gpu-mode edit.
+    strataEngineUnits = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [
+        "strata"
+        "strata-coder-iq1m"
+        "strata-qwen36-ud-q4-k-xl"
+      ];
+      description = "systemd unit names of the Strata engine units (primary first) that share the R9700 llm lease";
     };
   };
 
