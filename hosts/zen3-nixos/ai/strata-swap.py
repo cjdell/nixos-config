@@ -77,7 +77,9 @@ Env: SWAP_CONFIG = the JSON table (written by ./strata.nix):
 import http.client
 import json
 import os
+import select
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -430,39 +432,105 @@ class Handler(BaseHTTPRequestHandler):
                          "auto_load": False, "models": [m["id"] for m in MODELS],
                          "hint": "gpu-mode llm"})
 
+    CLIENT_POLL = 0.5  # seconds between downstream EOF checks
+
+    def _client_gone(self):
+        """True when the downstream peer has closed its end of the connection.
+
+        `select` marks a socket readable on EOF (FIN) and MSG_PEEK then returns
+        b"" without consuming anything. Unexpected early data is NOT treated as
+        gone (a pipelining client is merely ignored)."""
+        try:
+            r, _, _ = select.select([self.connection], [], [], 0)
+            if not r:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
     def _proxy(self, method, body=None):
-        """Stream through to `self.upstream_port` (chunk-by-chunk: SSE included).
+        """Stream through to `self.upstream_port` (chunk-by-chunk: SSE included),
+        and CANCEL the upstream the moment the downstream client disappears.
+
+        A prefill can run for many minutes before the first response byte
+        exists, so a blocking read can never notice a dead client: the request
+        then runs to completion into a socket nobody is reading (measured
+        2026-11-23 — a 102K prefill kept grinding for 8 min after its clients
+        were cut off at the firewall). So the upstream leg runs in a worker
+        thread and this thread watches the client socket; on EOF we close the
+        upstream connection, which is how llama-server is told the client is
+        gone ("client disconnected") and stops the request dead.
 
         Framing: http.client already decoded any chunked encoding, and we do
         not re-chunk — so the proxied response is NOT keep-alive: the close is
         the framing when there is no Content-Length (and nginx copes with
         close-delimited upstreams fine; it is itself a fresh downstream
         connection per request either way)."""
-        try:
-            conn = http.client.HTTPConnection("127.0.0.1", self.upstream_port, timeout=3700)
-            conn.request(method, self.path, body=body, headers=self._headers())
-            resp = conn.getresponse()
-            self.send_response(resp.status, resp.reason)
-            for k, v in resp.getheaders():
-                if k.lower() not in HOP_BY_HOP:
-                    self.send_header(k, v)
-            self.close_connection = True
-            self.end_headers()
-            while True:
-                chunk = resp.read(64 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
-            conn.close()
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # client hung up mid-stream; nothing to report
-        except Exception as e:
-            log(f"proxy {method} {self.path} -> :{self.upstream_port} failed: {e}")
+        self.close_connection = True
+        cancelled = threading.Event()
+        state = {"conn": None}
+
+        def upstream():
+            conn = None
             try:
-                self._json(502, {"error": {"type": "bad_gateway", "message": f"strata-swap: {e}"}})
-            except Exception:
-                pass
+                conn = http.client.HTTPConnection("127.0.0.1", self.upstream_port, timeout=3700)
+                state["conn"] = conn
+                if cancelled.is_set():
+                    return
+                conn.request(method, self.path, body=body, headers=self._headers())
+                resp = conn.getresponse()
+                if cancelled.is_set():
+                    return
+                self.send_response(resp.status, resp.reason)
+                for k, v in resp.getheaders():
+                    if k.lower() not in HOP_BY_HOP:
+                        self.send_header(k, v)
+                self.end_headers()
+                while not cancelled.is_set():
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client hung up mid-stream; the watcher logs the cancel
+            except Exception as e:
+                if not cancelled.is_set():
+                    log(f"proxy {method} {self.path} -> :{self.upstream_port} failed: {e}")
+                    try:
+                        self._json(502, {"error": {"type": "bad_gateway", "message": f"strata-swap: {e}"}})
+                    except Exception:
+                        pass
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        t = threading.Thread(target=upstream, daemon=True)
+        t.start()
+        while t.is_alive():
+            if self._client_gone():
+                cancelled.set()
+                conn = state["conn"]
+                if conn is not None:
+                    # shutdown(), not close(): close() on a socket whose fd is
+                    # held by the worker's blocked read sends no FIN at all, so
+                    # the engine never learns. shutdown() emits it immediately.
+                    usock = getattr(conn, "sock", None)
+                    if usock is not None:
+                        try:
+                            usock.shutdown(socket.SHUT_RDWR)
+                        except Exception:
+                            pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                log(f"CANCEL {method} {self.path} -> :{self.upstream_port} (client gone)")
+                return
+            t.join(self.CLIENT_POLL)
 
     def _headers(self):
         h = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}

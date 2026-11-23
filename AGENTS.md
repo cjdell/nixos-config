@@ -1727,6 +1727,21 @@ almost entirely fixed cost.
   `ai.strataModel` (only `strata.service` has wantedBy). `strata-batch` still
   means flash-next-batching; on the ownPath partner the batch2 config is
   `parallel = 1`, a documented no-op.
+- **A client that hangs up now cancels the request (`CANCEL` in the shim's
+  log).** `_proxy()` runs the upstream leg in a worker thread and watches the
+  *client* socket with `select`+`MSG_PEEK` every 0.5 s; on EOF it
+  `shutdown(SHUT_RDWR)`s the upstream, and llama-server stops the task. This
+  matters because a prefill can run for many minutes before the first response
+  byte exists, so a blocking read can never notice a dead client — on
+  2026-11-23 an orphaned 102K prefill ground for 8 minutes after its clients
+  were cut off at the firewall. Two traps worth keeping in the code: plain
+  `close()` from another thread sends **no FIN** while a read is in flight (use
+  `shutdown()`), and llama.cpp itself polls nothing during compute —
+  `req.is_connection_closed` exists in httplib but the slot loop never calls
+  it, so the FIN is the only signal. Measured: cancel within ~4 s, task
+  released at 4 108 of 74 K tokens. **Known gap:** the same check is not wired
+  into the swap wait in `route()`, so a client that dies during a model swap is
+  only noticed once the swap finishes.
 - **A long-context reply can collapse to one repeated token (or a thinking-only
   turn with no answer).** This is the **fp16-overflow #606 class**, not a model
   quality issue: a `q8_1` activation block stores its scale and 32-value sum as
