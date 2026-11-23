@@ -728,7 +728,9 @@ on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
 ## Inkling-2-Mini on llama.cpp (`inkling-2-mini.service` — the third swap lane)
 
 Thinking Machines' Inkling 2 Mini (released 2026-11-20, Apache 2.0), served by
-**stock llama.cpp Vulkan** on the R9700 — Strata cannot run it: the engine's
+**stock llama.cpp HIP (ROCm)** on the R9700 — switched from Vulkan 2026-11-23
+because Vulkan's FA path collapses to 22 t/s past ~88K depth (see below) —
+Strata cannot run it: the engine's
 families are qwen4exp/qwen35moe and `inkling2_loop` (a **looped** transformer:
 24 physical layers, layers 6–17 run 3× = 48 layer-visits, 8-of-128 MoE, hybrid
 local/global attention, per-expert NVFP4 scales) matches neither. It is a
@@ -753,8 +755,9 @@ waits (same contract as coder/q36).
   load-bearing: `-ub 1024` collapses a 53.6K prefill to 128 t/s, `-ub 256` is
   slower still at 32K, `-b/-ub 2048` = 55 t/s, `-b 4096` hangs — see below),
   `--jinja`,
-  `--slots`, mmproj-F16 for vision, pinned `MESA_VK_DEVICE_SELECT=1002:7551!`,
-  port 8094 (8091/8092/8093 are strata/coder/q36 — swapConfig asserts port
+  `--slots`, mmproj-F16 for vision, `--device ROCm0` with
+  `HIP_VISIBLE_DEVICES=0` (only the R9700 is HIP-visible — no gfx803 in ROCm 7 —
+  so the console card cannot be picked), port 8094 (8091/8092/8093 are strata/coder/q36 — swapConfig asserts port
   uniqueness).
 - **Files**: `scripts/fetch-inkling-2-mini.sh` (rev+size+sha pinned) — and it
   must fetch from **`Mainline_Support/`** (`inkling2_loop` tensor layout,
@@ -772,6 +775,30 @@ waits (same contract as coder/q36).
   `nix flake update llama-cpp` is now also what updates this lane (and
   lfm3/`asus`/`alderlake` at their next switches; the shared floor is the max
   of lfm3's b11960, this b12611 and #32735).
+- **BACKEND: HIP, not Vulkan — measured 2026-11-23, same GGUF, same flags**
+  (`-ctk/-ctv q8_0`, `-ub 512`), `pp4096` unless noted:
+
+  | depth | Vulkan | HIP |
+  |---|---|---|
+  | d 0 | 1 069 (pp512) | 1 012 |
+  | d 32 K | 505 (pp2048) | 269 |
+  | d 65 K | — | 170 |
+  | d 90 K | **21.9** | **134** |
+  | live full prefill | 139 (95 K, 11.5 min) | **289** (60 K, 209 s) |
+
+  Vulkan's rate is flat-ish to 84 K (**106 t/s instantaneous**, from a live 95 K
+  session log) and then falls to **22 t/s by 88 K** — a 5x step, GPU only 48 %
+  busy at 294 W. It is **not** memory or KV type, all A/B'd at d90000: q8_0/q8_0
+  21.85, q8_0/f16 21.77 (that arm skips the whole-cache dequant copy, so
+  `use_dequant_kv` is not the cause), `GGML_VK_DISABLE_COOPMAT2=1` 21.86. HIP on
+  the identical prompt: 133.5 t/s at 97 % busy / 207 W, and it allocates the
+  card whole (idle = 32.5 GB used, **GTT 95 MiB** — nothing host-resident), so
+  there is no cliff. Price: HIP is slower shallow/32 K (269 vs 505). For a lane
+  whose live sessions grow past 70 K the trade is obvious: Vulkan's failure mode
+  is unusable, HIP's is merely slower.
+  The package is `llamaCppPkgs.rocm`, and `flake.nix` overrides
+  `rocmGpuTargets = "gfx1201"` for it (nixpkgs' default target list has no
+  RDNA4 entry, so without that the card gets no compatible kernels).
 - **Measured on this box 2026-11-23** (`a0677c34`, `-b 1024 -ub 512`,
   128K ctx): decode 33-36 t/s (llama-bench tg128 35.7 at depth 0, 27-31 at
   32-49K), and the prefill curve that decides whether the lane is usable:

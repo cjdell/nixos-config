@@ -77,9 +77,11 @@
 # graph re-dequantises the WHOLE cache to f16 before attention (ggml-vulkan's
 # `use_dequant_kv`: `k_quant && v_quant` -> a full-depth f16 copy, per global
 # layer visit). That is why a ~700-token turn at 92K depth costs 28 s while the
-# same turn shallow costs ~1 s, and why `-ctk f16 -ctv f16` is the next thing to
-# A/B — on RDNA4 that makes kv_raw true and skips the dequant copy entirely, for
-# 2x KV (4.5 GB at 128K). Untested as of this writing.
+# same turn shallow costs ~1 s. A/B'd 2026-11-23 and REJECTED as the cause:
+# `q8_0/f16` (which makes kv_raw true and skips that copy) measured 21.77 t/s at
+# d90000 against 21.85 for `q8_0/q8_0` — identical, so the dequant copy is not
+# what costs the depth. It is the backend's attention path (see the HIP note
+# below), not the cache layout.
 #   * keep prompt prefixes stable so LCP reuse skips the re-read entirely;
 #   * shrink -c if sessions get shallower: 2.2 GB of KV per 128K.
 # -c sweep at the old 384K setting (same line, nothing else changed): 524288 ->
@@ -88,37 +90,45 @@
 # itself goes to GTT. UD-IQ4_XS is 1.8 GiB smaller but measured identical in
 # speed — AGENTS.md.
 #
-# PREFILL RATES — clean card, ONE server, 2026-11-23:
+# PREFILL RATES — clean card, ONE server, 2026-11-23. The BACKEND matters more
+# than any flag at depth, so both are listed (pp4096 except where noted):
 #
-#   pp512  d0     1069   (-b 1024 -ub 512)      1061 at -ub 1024
-#   3.5K   live    877
-#   32K    bench   513                           504 at -ub 1024
-#   49K    bench   421   (llama-bench allocates only ~51K KV = no spill)
-#   53.6K  live    551   (-c 131072; 431 at the old -c 393216)
-#   95K    live    139   (full re-read of an agent session: 11.5 min)
-#   decode          34.2 @ d0, ~27-31 @ 32-49K, 25-85 for small turns at 92K
+#   depth        Vulkan        HIP (deployed)
+#   d 0        1069 (pp512)    1012
+#   d 3.5K      877 (live)     —
+#   d 32K       505 (pp2048)   269
+#   d 65K       —              170
+#   d 90K        21.9          134
+#   decode      34.2 @ d0      27 @ 32K, 25 @ 65K
 #
-# -ub 512 is what makes this lane usable at depth, and the reason is a kernel
-# cliff, not memory: at -ub 1024 the SAME 53.6K prefill ran at **128 t/s**
-# (29.5 GB VRAM peak + 4.8 GB GTT) while -ub 512 runs 431 t/s (551 at the
-# current 128K ctx) with the same total working set. -ub 256 is worse (481 @ 32K, 900 shallow). `-b/-ub 2048`
-# = 55 t/s @ 32K and `-b 4096` hangs llama-bench outright — stay well away from
-# large query blocks on RDNA4. q4_0 KV = 471 @ 32K (q8_0 is the native FA type;
-# quantising the cache does not pay here). llama.cpp's ROCm/HIP build
-# (rocmGpuTargets = gfx1201) is worse across the board: pp512 1012, tg128 29.2,
-# pp2048@32K 272.
+# WHY HIP. Vulkan's flash-attention path falls off a cliff between 84K (106 t/s
+# instantaneous, from a live 95K session log) and 88K (22 t/s) — and it is NOT
+# memory or KV type: at d90000 `q8_0/q8_0` and `q8_0/f16` measured 21.85 vs
+# 21.77 t/s, `GGML_VK_DISABLE_COOPMAT2` changed nothing (21.86), and the GPU sat
+# at 48 % busy / 294 W peak while HIP does the same prompt at 97 % busy / 207 W.
+# HIP's curve is smooth and stays >100 t/s across the whole 128K window. The
+# price is shallow speed (269 vs 505 at 32K) — the right trade for a lane whose
+# live sessions grow past 70K, because Vulkan's failure mode there is unusable
+# (22 t/s) while HIP's is merely slower. Package: `llamaCppPkgs.rocm`, built
+# with `rocmGpuTargets = "gfx1201"` in flake.nix (same llama.cpp pin as Vulkan;
+# without that target ROCm has no compatible kernels for this card).
 #
-# WHY IT DECAYS AT ALL (and why the Qwen3.8 lane does not): the GPU is genuinely
-# loaded (95 % gfx utilisation, 2.2 GHz, 120-184 W sampled mid-prefill), so this
-# is the backend, not a setting. Upstream's best published Inkling figure on an
-# R9700 is 893 t/s at 16K depth — also decaying — so "1000 t/s across a long
-# context" is not reachable on llama.cpp for `inkling2_loop`. Architecturally
-# this is a LOOPED transformer (24 physical layers, 6-17 run 3x = 48 visits per
-# token, 8-of-128 MoE, mostly sliding-window attention) paying a per-visit
-# dispatch cost in a generic backend; the Qwen3.8-Flash-Next lane is flat
-# because most of its layers are gated-delta-net (linear attention: constant
-# state, no depth term) and Strata has hand-fused kernels for them. Full
-# comparison in AGENTS.md.
+# Vulkan-specific lessons, kept because they still hold if this lane ever goes
+# back: `-ub 512` vs `-ub 1024` at 53.6K measured 431 vs 128 t/s (query-block
+# size is load-bearing there); `-ub 256` is worse (481 @ 32K); `-b/-ub 2048` = 55
+# t/s and `-b 4096` hangs llama-bench outright; q4_0 KV = 471 @ 32K. And -c
+# 393216 vs 131072 on the same 53.6K prompt: 431 vs 551 t/s — the
+# reserved-but-unused KV was exactly the scratch's headroom.
+#
+# WHY IT STILL DECAYS WITH DEPTH (and why the Qwen3.8 lane does not): upstream's
+# best published Inkling figure on an R9700 is 893 t/s at 16K, also decaying, so
+# "1000 t/s across a long context" is not reachable on llama.cpp for
+# `inkling2_loop`. Architecturally this is a LOOPED transformer (24 physical
+# layers, 6-17 run 3x = 48 visits per token, 8-of-128 MoE, mostly
+# sliding-window attention) paying a per-visit cost in a generic backend; the
+# Qwen3.8-Flash-Next lane is flat because most of its layers are
+# gated-delta-net (linear attention: constant state, no depth term) and Strata
+# has hand-fused kernels for them. Full comparison in AGENTS.md.
 #
 # --parallel 1 (llama-server's default): the whole pool to one conversation;
 # a second client queues instead of halving both streams (the strata-batch
@@ -155,27 +165,21 @@ in
   ai.strataEngineUnits = [ "inkling-2-mini" ];
 
   systemd.services."inkling-2-mini" = {
-    description = "llama.cpp Vulkan server (Inkling-2-Mini UD-Q4_K_XL) on the R9700 — strata-swap lane";
+    description = "llama.cpp HIP (ROCm) server (Inkling-2-Mini UD-Q4_K_XL) on the R9700 — strata-swap lane";
     documentation = [ "https://huggingface.co/unsloth/Inkling-2-Mini-GGUF" ];
     after = [ "network.target" ];
     # Swap-only, like the strata partners: strata-swap starts it when a
     # request names it; NO wantedBy, so the boot default stays Strata.
     # Runs as root because /home/cjdell is 700 (the llama-log-viewer reason).
 
-    # Pin to the R9700 and hide the RX 580 (AGENTS.md "GPU pinning"): the
-    # trailing `!` makes the R9700 the only visible device, so --device
-    # Vulkan0 cannot silently mean the console card.
+    # HIP, not Vulkan — Vulkan's FA path drops off a cliff between 84K and 88K
+    # depth (106 -> 22 t/s) with the GPU only 48 % busy, and no KV type or
+    # coopmat2 setting changes it; HIP runs the same 90K prompt at 134 t/s at
+    # 97 % busy. Curve and A/B evidence in the header above and AGENTS.md.
+    # Only the R9700 is HIP-visible (gfx803 is not supported by ROCm 7), so
+    # device 0 is always the dGPU and the console RX 580 cannot be picked.
     environment = {
-      XDG_DATA_DIRS = "/run/opengl-driver/share";
-      MESA_VK_DEVICE_SELECT = "1002:7551!";
-      # Vulkan's default is 100 graph nodes per queue submit, and this arch is
-      # DISPATCH-BOUND, not bandwidth-bound: one decoded token is ~7,650 kernel
-      # launches and 66 % of the step time is ~3.6 us elementwise/copy kernels
-      # (GGML_VK_PERF_LOGGER on 2026-11-23 — SiTU's scale/sigmoid/sqr/sqrt/tanh
-      # and the loop's concat/cont/cpy/repeat, all separate dispatches). 100
-      # nodes/submit therefore meant ~77 submits per token; batching them all
-      # measured +3.9 % tg128 (34.38 -> 35.73 t/s) and +0.7 % pp512.
-      GGML_VK_MAX_NODES_PER_SUBMIT = "10000";
+      HIP_VISIBLE_DEVICES = "0";
     };
 
     unitConfig.ConditionPathExists = [
@@ -185,10 +189,10 @@ in
 
     serviceConfig = {
       ExecStart = ''
-        ${llamaCppPkgs.vulkan}/bin/llama-server \
+        ${llamaCppPkgs.rocm}/bin/llama-server \
           --model ${model} \
           --mmproj ${mmproj} \
-          --device Vulkan0 \
+          --device ROCm0 \
           --n-gpu-layers 99 \
           --jinja \
           --ctx-size 131072 \

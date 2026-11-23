@@ -471,10 +471,17 @@
               builtins.elem name [
                 "default"
                 "vulkan"
-                "rocm"
               ]
             then
               pkg.override { useWebUi = false; }
+            else if name == "rocm" then
+              # EXACT target, not nixpkgs' default list: the R9700 is gfx1201 and
+              # ROCm will not run kernels built for other targets (the Inkling
+              # lane runs this package — see hosts/zen3-nixos/ai/inkling.nix).
+              pkg.override {
+                useWebUi = false;
+                rocmGpuTargets = "gfx1201";
+              }
             else
               pkg;
         in
