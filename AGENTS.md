@@ -742,10 +742,13 @@ waits (same contract as coder/q36).
 
 - **Run line** (all VRAM knobs documented in the module's header comment):
   UD-Q4_K_XL (17.63 GB, Unsloth's KLD plateau) **fully offloaded**,
-  `-c 524288` (NOT the model's 1M: q8_0 KV ≈ 16.9 KB/token — only 8 of the 48
-  expanded cache layers are global, window 1024 for the rest — so 512K ≈ 9.4 GB
-  and the whole config stays under 32624 MiB **fully committed**; 1M would not),
-  `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, `-b 4096 -ub 1024`, `--jinja`,
+  `-c 393216` (NOT the model's 1M: q8_0 KV is 17 408 B/token — 8 of the 48
+  expanded cache layers are global, window 1024 for the rest — and past ~600K
+  of ctx the pool stops fitting VRAM and is pushed into **GTT**, i.e. read over
+  PCIe at depth, so 384K leaves ~4.8 GB spare and keeps every buffer resident),
+  `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, **`-b 1024 -ub 1024`** (`-b` must
+  stay at ubatch: `-b/-ub 2048` collapses deep prefill to **55 t/s**),
+  `--jinja`,
   `--slots`, mmproj-F16 for vision, pinned `MESA_VK_DEVICE_SELECT=1002:7551!`,
   port 8094 (8091/8092/8093 are strata/coder/q36 — swapConfig asserts port
   uniqueness).
@@ -765,24 +768,33 @@ waits (same contract as coder/q36).
   `nix flake update llama-cpp` is now also what updates this lane (and
   lfm3/`asus`/`alderlake` at their next switches; the shared floor is the max
   of lfm3's b11960, this b12611 and #32735).
-- **Measured on this box 2026-11-23** (`a0677c34` + the
-  `GGML_VK_MAX_NODES_PER_SUBMIT=10000` env in `inkling.nix`): **decode
-  20.1 -> 33.6 t/s** (llama-bench tg128 34.4 -> 35.7), **prefill pp512
-  ~440 -> 1061 t/s** (an 800-token prompt ingests at 884 t/s), VRAM 31.1 ->
-  29.7 GB of 32.6. What is left is dispatch-bound, not a knob: one decoded
-  token is ~7,650 kernel launches and 66 % of the 36 ms step is ~3.6 us
-  elementwise/copy kernels (SiTU's scale/sigmoid/sqr/sqrt/tanh + the loop's
-  concat/cont/cpy/repeat, all separate dispatches) — matmul is 33 %. Fixes are
-  upstream fusion (#32855, #32752 open). `-ub 2048` measures *worse* here
-  (pp2048 999.7 -> 963.1; keep 1024) and RADV reports `fp4: 0`, so NVFP4 never
-  gets the RDNA4 int8 coopmat MMQ (`if (!rdna4)` in `ggml_vulkan.cpp`). **That
-  last theory was then A/B'd and did NOT hold**: `scripts/fetch-inkling-2-mini.sh
-  --iq4xs` fetches Unsloth's UD-IQ4_XS (15.73 GB, KLD 0.0109 vs Q4_K_XL's
-  0.0107 — the same plateau), and on this card the two are identical:
-  **pp512 1066.8 vs 1065.6, pp2048 998.9 vs 996.1, tg128 35.69 vs 36.00–36.09,
-  tg128 @32K depth 31.94 vs 32.25** (llama-bench, 2026-11-23). So the lane
-  stays on UD-Q4_K_XL; IQ4_XS is only worth fetching if the 1.8 GiB of VRAM or
-  the slightly smaller file is wanted.
+- **Measured on this box 2026-11-23** (`a0677c34`, `-b 1024 -ub 1024`,
+  384K ctx): decode 33-36 t/s (llama-bench tg128 35.7 at depth 0, 30-32 at
+  32K), and the prefill curve that decides whether the lane is usable —
+  pp512 1 061 (depth 0), ~1 180 at 4K, ~700 at 16K, **505 at 32K** (llama-bench
+  pp2048 @ d32768). The GPU is genuinely loaded doing it (95 % gfx utilisation,
+  2.2 GHz, 120-184 W measured during a live 32K prefill), so this is the
+  backend, not a setting:
+  * `-b/-ub 2048` → **55 t/s** at 32K (9x worse, a pathological path for this
+    arch; `-b 4096` hangs outright in llama-bench).
+  * q4_0 KV → 471 at 32K, i.e. *worse* than q8_0 (q8_0 is the native FA type,
+    so quantising the KV cache does not pay here).
+  * llama.cpp's own **ROCm/HIP** backend (built with `rocmGpuTargets =
+    "gfx1201"`, `flake.nix`'s `llamaCppPkgs.rocm`; HIP sees the card natively)
+    is worse across the board: pp512 1012, tg128 29.2, pp2048@32K **272**.
+    Upstream's best published Inkling figure on an R9700 is 893 t/s at 16K
+    depth, so "~1000 t/s across a long context" is not reachable on llama.cpp
+    here — the levers that actually help TTFT are a **stable prompt prefix**
+    (llama-server's LCP reuse turns a warm 50K turn into a 7-token prefill)
+    and keeping prompts in the 0-32K band.
+  * Earlier, "prefill tanking to 178 t/s with 6 GB in GTT" was **two
+    llama-server processes on the card at once** (one orphaned by an
+    interrupted benchmark) — two 16.4 GB models cannot share 31.9 GB, so the
+    driver shoves the difference into GTT. One server on a clean card sits at
+    27.8 GB used / 4.8 GB free / 2.5 GB GTT. **Check `pgrep -af
+    '[b]in/llama-server'` before believing a GTT number.**
+- The `-b 4096`/512K era is in git history; the DRAM/GTT sweep that justified
+  384K is also in the module header.
 - ⚠️ **A `nixos-rebuild switch` starts `strata.service` even while a partner
   engine is live** (strata is `wantedBy=multi-user.target` and the partner
   units have no `wantedBy`), so a switch quietly puts the 90 GB Flash-Next

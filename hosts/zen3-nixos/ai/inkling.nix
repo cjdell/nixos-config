@@ -43,48 +43,62 @@
 # scales — SILENT garbage, ppl ~130, no load error). ConditionPathExists
 # keeps the unit down until the fetch ran, as everywhere else here.
 #
-# VRAM: "the card, fully, without overflow" — measured on this box's 32624 MiB
-# (headless R9700, console is the RX 580), 2026-11-23:
+# VRAM: this config is sized so the Vulkan pool NEVER overshoots into GTT.
+# Measured on this box's 32624 MiB (headless R9700, console is the RX 580),
+# 2026-11-23, at -c 393216 / -b 1024 -ub 1024 / q8_0 KV:
 #
 #   weights (UD-Q4_K_XL)      16800 MiB   all 48 visits GPU-resident (-ngl 99;
-#                                         17.6 GB is why Q4_K_XL, not Q8_K_XL:
-#                                         Q8's 22.9 GB + KV cannot fit 512K)
-#   KV @ 524288 ctx, q8_0       8746 MiB   8 full-history CACHE layers (physical
+#                                         17.6 GB is why Q4_K_XL, not Q8_K_XL)
+#   KV @ 393216 ctx, q8_0      6570 MiB   8 full-history CACHE layers (physical
 #                                         5, 11, 17, 23 — the loop makes 11 and
 #                                         17 into 3 cache layers each) x K,V x
 #                                         8 kv-heads x 128 x 1.0625 B q8_0 =
 #                                         17408 B/token; + 42.5 MiB fixed for
 #                                         the 20 windowed (1024-cell) layers
-#   mmproj F16 (vision)          640 MiB
-#   graphs/scratch/alloc slack  ~3500 MiB  -b 4096 -ub 1024 FA graphs + driver
+#   mmproj F16 (vision)         640 MiB
+#   graph/scratch/slack         ~3800 MiB
 #   --------------------------------------------------------------
-#   measured at -c 524288     29717 MiB used, 2907 free, 3278 GTT  (X)
+#   idle                      27779 MiB used, 4845 free, GTT 2510
+#   llama-server reserves       27.1 GiB of 31.9 -> fits, no over-commit
 #
-# 524288 is deliberately NOT the model's 1M native window, and the reason is
-# NOT "KV is 18.7 GB" (it is 17450 MiB at 1M): the binding limit is that the
-# card has no room for the marginal KV, so the driver pushes it into GTT (host
-# memory over PCIe). Measured by starting the same line at bigger -c:
+# WHY NOT MORE, and why the numbers matter more than the ctx: measured by
+# starting the same line at bigger -c (everything else identical):
 #
-#   -c 524288  29717 MiB used, 2907 free, GTT  3278 MiB   <- KV in VRAM
+#   -c 524288  29717 MiB used, 2907 free, GTT  3278 MiB
 #   -c 655360  32562 used,  62 free,   GTT  4145 MiB   +0.9 GB spilled
 #   -c 786432  32533 used,  91 free,   GTT  7886 MiB   +4.6 GB spilled
 #   -c 917504  32564 used,  60 free,   GTT 11568 MiB   +8.3 GB spilled
 #
-# All of those LOAD, but past ~600K the pool is host-resident and attention
-# would read it at PCIe speed (~30 GB/s vs the card's 640) — 1.8x the context
-# for ~20x the cost per attention pass is a bad trade. So 512K (which leaves
-# ~2.9 GB of slack, the insurance against that spill) is the practical ceiling;
-# ~576-640K fits but spends all the slack. UD-IQ4_XS is 1.8 GiB smaller and
-# would buy another ~108K tokens of VRAM-resident context (17 KiB/token), which
-# is the only reason to prefer it — it measured identical in speed (AGENTS.md).
-# 512K also lands inside the model card's own MRCR 256K-512K eval band.
+# All of those LOAD, but past ~600K the marginal KV is host-resident (GTT) and
+# is read over PCIe at depth. 393216 keeps ~4.8 GB spare, which is what stops
+# the pool from spilling at all. UD-IQ4_XS is 1.8 GiB smaller (another ~108K
+# tokens of VRAM-resident ctx) but measured identical in speed — AGENTS.md.
+#
+# PREFILL IS THE WEAK SPOT, and it is the kernels, not this line. Measured t/s
+# on this card (2026-11-23, clean card, one server):
+#
+#   depth 0     pp512  1061      (-b 1024 -ub 1024, q8_0 KV, -fa on)
+#   depth 4K    ~1180 (live traffic)
+#   depth 16K     ~700
+#   depth 32K      505      <- pp2048 @ d32768, llama-bench
+#   decode         35.7 @ d0, 30-32 @ 32K depth
+#
+# -b/-ub 2048 measured **55 t/s** at 32K depth (a pathological path for this
+# arch — 9x worse), q4_0 KV 471 (q8_0 is the native FA type, so quantising the
+# cache does NOT pay here), and llama.cpp's own ROCm/HIP backend (gfx1201,
+# rocmGpuTargets) is worse across the board: pp512 1012, tg 29.2,
+# pp2048@32K 272. The GPU is genuinely loaded while doing this — 95 % gfx
+# utilisation, 2.2 GHz, 120-184 W — so there is no misconfiguration left to
+# find: this is llama.cpp's Vulkan attention/loop path on RDNA4. Upstream's
+# best published Inkling number on an R9700 is 893 t/s at 16K depth, which also
+# decays, so "1000 t/s across a long context" is not reachable on this backend.
+# The levers that DO help TTFT: keep the prefix stable so llama-server's LCP
+# reuse hits (a warm 50K turn prefills 7 tokens instead of 50K), and keep
+# prompts <=16-32K where the rate is 500-700.
+#
 # --parallel 1 (llama-server's default): the whole pool to one conversation;
 # a second client queues instead of halving both streams (the strata-batch
 # lesson, docs/strata-batching.md). No DSpark drafter: mainline support is
-# still open PR #32218 — when it merges, add
-# Mainline_Support/dspark-Inkling-2-Mini-Q8_0.gguf and
-# `--spec-type draft-dspark --spec-draft-n-max 5` (unsloth: ~1.1-1.2x decode).
-#
 # Sampling follows the model card (temp 1.0, top-p 1.0, top-k off, min-p 0) —
 # these are ALSO embedded in the GGUF (general.sampling.*), restated here so
 # the run line is self-describing. Reasoning effort is per-request via
@@ -151,10 +165,10 @@ in
           --device Vulkan0 \
           --n-gpu-layers 99 \
           --jinja \
-          --ctx-size 524288 \
+          --ctx-size 393216 \
           --flash-attn on \
           --cache-type-k q8_0 --cache-type-v q8_0 \
-          --batch-size 4096 --ubatch-size 1024 \
+          --batch-size 1024 --ubatch-size 1024 \
           --parallel 1 \
           --slots \
           --host 127.0.0.1 --port ${toString port} \

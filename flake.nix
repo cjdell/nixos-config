@@ -471,6 +471,7 @@
               builtins.elem name [
                 "default"
                 "vulkan"
+                "rocm"
               ]
             then
               pkg.override { useWebUi = false; }
