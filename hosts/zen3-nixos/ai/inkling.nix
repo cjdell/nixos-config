@@ -43,39 +43,50 @@
 # scales — SILENT garbage, ppl ~130, no load error). ConditionPathExists
 # keeps the unit down until the fetch ran, as everywhere else here.
 #
-# VRAM: sized so weights + KV + idle graphs fit with ~8 GB spare, because that
-# spare is what the PREFILL SCRATCH eats (see below). Measured on this box's
-# 32624 MiB (headless R9700, console is the RX 580), 2026-11-23, at
-# -c 393216 / -b 1024 -ub 512 / q8_0 KV:
+# VRAM: weights + KV + idle graphs, sized to the depth sessions ACTUALLY reach.
+# Measured on this box's 32624 MiB (headless R9700, console is the RX 580),
+# 2026-11-23, at -c 131072 / -b 1024 -ub 512 / q8_0 KV:
 #
 #   weights (UD-Q4_K_XL)      16800 MiB   all 48 visits GPU-resident (-ngl 99;
 #                                         17.6 GB is why Q4_K_XL, not Q8_K_XL)
-#   KV @ 393216 ctx, q8_0      6570 MiB   8 full-history CACHE layers (physical
+#   KV @ 131072 ctx, q8_0      2280 MiB   8 full-history CACHE layers (physical
 #                                         5, 11, 17, 23 — the loop makes 11 and
 #                                         17 into 3 cache layers each) x K,V x
 #                                         8 kv-heads x 128 x 1.0625 B q8_0 =
 #                                         17408 B/token; + 42.5 MiB fixed for
 #                                         the 20 windowed (1024-cell) layers
 #   mmproj F16 (vision)         640 MiB
-#   graphs/slack              ~1400 MiB
+#   graphs/slack              ~3200 MiB
 #   --------------------------------------------------------------
-#   idle                      24415 MiB used, 8209 free, GTT 1387
+#   idle                      22941 MiB used, 9683 free, GTT 530
 #
-# THE PREFILL SCRATCH IS DEPTH-PROPORTIONAL — that is the thing to know about
-# this lane. While a prefill runs, the Vulkan backend's attention working set
-# grows at ~140 KB per token of context in the graph (measured: +7.7 GB total at
-# a 53.6K prompt), and it is NOT a function of batch shape — `-b 512 -ub 512`
-# measured byte-identical in speed AND residency to `-b 1024 -ub 512`. Whatever
-# does not fit in free VRAM is silently placed in GTT (host memory read over
-# PCIe), so the only real levers are:
-#   * shrink -c: frees KV (2.2 GB per 128K of ctx) for the scratch — at 262144
-#     the same 53.6K prefill no longer spills at all;
-#   * keep prompt prefixes stable so LCP reuse skips the re-read entirely.
-# -c sweep, same line, nothing else changed: 524288 -> 29717 used / 2907 free;
-# 655360 -> 32562 / 62 (+0.9 GB GTT); 786432 -> 32533 / 91 (+4.6); 917504 ->
-# 32564 / 60 (+8.3). All load; past ~600K the marginal KV itself goes to GTT.
-# UD-IQ4_XS is 1.8 GiB smaller (another ~108K tokens of resident ctx) but
-# measured identical in speed — AGENTS.md.
+# 128K is a deliberate sizing choice, not a model limit (1M native): live agent
+# sessions here reach ~96K, and every 128K of reserved window costs 2.2 GB of KV
+# — exactly the headroom the prefill scratch needs. At 384K (6.6 GB KV) a 53.6K
+# prompt measured 431 t/s with 2.6-4.8 GB spilled to GTT; at 128K the same
+# prompt measures **551 t/s**. The fleet's other 32 GB lanes sit at 40-65K for
+# the same reason.
+#
+# THE PREFILL SCRATCH IS DEPTH-PROPORTIONAL — the thing to know about this lane.
+# While a graph runs, the Vulkan attention working set grows with the tokens in
+# it (~140-300 KB per token of depth: +7.7 GB at a 53.6K prompt, ~16 GB at 95K)
+# and it is NOT a function of batch shape — `-b 512 -ub 512` measured
+# byte-identical in speed AND residency to `-b 1024 -ub 512`. Whatever does not
+# fit in free VRAM silently lands in GTT. Two reasons it grows with depth: the
+# FA kernels materialise per-op scratch, and with a QUANTISED KV cache EVERY
+# graph re-dequantises the WHOLE cache to f16 before attention (ggml-vulkan's
+# `use_dequant_kv`: `k_quant && v_quant` -> a full-depth f16 copy, per global
+# layer visit). That is why a ~700-token turn at 92K depth costs 28 s while the
+# same turn shallow costs ~1 s, and why `-ctk f16 -ctv f16` is the next thing to
+# A/B — on RDNA4 that makes kv_raw true and skips the dequant copy entirely, for
+# 2x KV (4.5 GB at 128K). Untested as of this writing.
+#   * keep prompt prefixes stable so LCP reuse skips the re-read entirely;
+#   * shrink -c if sessions get shallower: 2.2 GB of KV per 128K.
+# -c sweep at the old 384K setting (same line, nothing else changed): 524288 ->
+# 29717 used / 2907 free; 655360 -> 32562 / 62 (+0.9 GB GTT); 786432 -> 32533 /
+# 91 (+4.6); 917504 -> 32564 / 60 (+8.3). All load; past ~600K the marginal KV
+# itself goes to GTT. UD-IQ4_XS is 1.8 GiB smaller but measured identical in
+# speed — AGENTS.md.
 #
 # PREFILL RATES — clean card, ONE server, 2026-11-23:
 #
@@ -83,13 +94,14 @@
 #   3.5K   live    877
 #   32K    bench   513                           504 at -ub 1024
 #   49K    bench   421   (llama-bench allocates only ~51K KV = no spill)
-#   53.6K  live    431   (384K KV resident + 2.6 GB transient GTT)
-#   decode          34.2 @ d0, ~27-31 @ 32-49K depth
+#   53.6K  live    551   (-c 131072; 431 at the old -c 393216)
+#   95K    live    139   (full re-read of an agent session: 11.5 min)
+#   decode          34.2 @ d0, ~27-31 @ 32-49K, 25-85 for small turns at 92K
 #
 # -ub 512 is what makes this lane usable at depth, and the reason is a kernel
 # cliff, not memory: at -ub 1024 the SAME 53.6K prefill ran at **128 t/s**
-# (29.5 GB VRAM peak + 4.8 GB GTT) while -ub 512 runs 431 t/s with the same
-# total working set. -ub 256 is worse (481 @ 32K, 900 shallow). `-b/-ub 2048`
+# (29.5 GB VRAM peak + 4.8 GB GTT) while -ub 512 runs 431 t/s (551 at the
+# current 128K ctx) with the same total working set. -ub 256 is worse (481 @ 32K, 900 shallow). `-b/-ub 2048`
 # = 55 t/s @ 32K and `-b 4096` hangs llama-bench outright — stay well away from
 # large query blocks on RDNA4. q4_0 KV = 471 @ 32K (q8_0 is the native FA type;
 # quantising the cache does not pay here). llama.cpp's ROCm/HIP build
@@ -179,7 +191,7 @@ in
           --device Vulkan0 \
           --n-gpu-layers 99 \
           --jinja \
-          --ctx-size 393216 \
+          --ctx-size 131072 \
           --flash-attn on \
           --cache-type-k q8_0 --cache-type-v q8_0 \
           --batch-size 1024 --ubatch-size 512 \

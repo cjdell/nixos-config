@@ -742,10 +742,13 @@ waits (same contract as coder/q36).
 
 - **Run line** (all VRAM knobs documented in the module's header comment):
   UD-Q4_K_XL (17.63 GB, Unsloth's KLD plateau) **fully offloaded**,
-  `-c 393216` (NOT the model's 1M: q8_0 KV is 17 408 B/token — 8 of the 48
-  expanded cache layers are global, window 1024 for the rest — and past ~600K
-  of ctx the pool stops fitting VRAM and is pushed into **GTT**, i.e. read over
-  PCIe at depth, so 384K leaves ~4.8 GB spare and keeps every buffer resident),
+  `-c 131072` (NOT the model's 1M: q8_0 KV is 17 408 B/token — 8 of the 48
+  expanded cache layers are global, window 1024 for the rest — so 128K costs
+  2.2 GB and 384K costs 6.6 GB of a 32 GB card. **Sized to the depth sessions
+  actually reach** (~96K here): the reserved-but-unused KV was exactly the
+  headroom the prefill scratch needed, and cutting 384K -> 128K measured
+  **431 -> 551 t/s** on the same 53.6K prompt. Bump -c only if a session really
+  needs it: 2.2 GB of KV per extra 128K),
   `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, **`-b 1024 -ub 512`** (`-ub` is
   load-bearing: `-ub 1024` collapses a 53.6K prefill to 128 t/s, `-ub 256` is
   slower still at 32K, `-b/-ub 2048` = 55 t/s, `-b 4096` hangs — see below),
@@ -770,10 +773,11 @@ waits (same contract as coder/q36).
   lfm3/`asus`/`alderlake` at their next switches; the shared floor is the max
   of lfm3's b11960, this b12611 and #32735).
 - **Measured on this box 2026-11-23** (`a0677c34`, `-b 1024 -ub 512`,
-  384K ctx): decode 33-36 t/s (llama-bench tg128 35.7 at depth 0, 27-31 at
+  128K ctx): decode 33-36 t/s (llama-bench tg128 35.7 at depth 0, 27-31 at
   32-49K), and the prefill curve that decides whether the lane is usable:
-  pp512 1 069 (depth 0), 877 at 3.5K, 513 at 32K, 421 at 49K, and **431 on a
-  live 53.6K prompt** (was **128 t/s** on the same prompt at `-ub 1024`). The
+  pp512 1 069 (depth 0), 877 at 3.5K, 513 at 32K, 421 at 49K, **551 on a live
+  53.6K prompt** (431 on the same prompt while `-c` was still 384K; 128 t/s at
+  `-ub 1024`), and **139 t/s / 11.5 min for a 95K full re-read**. The
   GPU is genuinely loaded doing it (95 % gfx utilisation, 2.2 GHz, 120-184 W
   sampled mid-prefill), so this is the backend, not a setting:
   * **`-ub 512` is load-bearing, and the cliff is kernel-side, not memory:**
@@ -783,6 +787,14 @@ waits (same contract as coder/q36).
     gives **55 t/s** at 32K and `-b 4096` hangs llama-bench outright — never
     use large query blocks on RDNA4. `-b 512 -ub 512` measured byte-identical
     to `-b 1024 -ub 512` (speed and residency), so `-b` need not follow.
+  * **Cost per turn grows with depth even when only a few tokens are new** —
+    measured on one live session: 163 new tokens at 92K depth = 2.1 s,
+    449 = 5.3 s, 703 = 28 s, against ~1 s shallow. Two causes: per-op FA
+    scratch that scales with the tokens in the graph, and (for a QUANTISED KV
+    cache) ggml-vulkan's `use_dequant_kv` re-dequantising the **whole cache** to
+    f16 before attention on every graph. **`-ctk f16 -ctv f16` is the untested
+    candidate**: kv_raw on RDNA4 bypasses the dequant copy entirely, at 2x KV
+    (4.5 GB at 128K). Do not assume it wins — A/B it at a fixed depth.
   * **The prefill scratch is depth-proportional: ~140 KB per token of context**
     (+7.7 GB total at a 53.6K prompt), independent of batch shape. Whatever
     exceeds free VRAM is placed in **GTT** silently — at `-c 393216` that is
