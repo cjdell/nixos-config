@@ -665,8 +665,9 @@ rule is needed.
 ## LFM3-1.7B on the RX 580 (`lfm3.service` — the second-card lane)
 
 `hosts/zen3-nixos/ai/lfm3.nix`: stock llama.cpp **Vulkan** (`llamaCppPkgs.vulkan`,
-the flake's `llama-cpp` input — bleeding-edge `956591f4` (2026-11-11 HEAD) since
-this service landed; must stay ≥ upstream b11960 for lfm3) serving
+the flake's `llama-cpp` input — `a0677c34` (2026-11-23 HEAD, moved from
+`956591f4` 2026-11-11 for Inkling-2-Mini's #32704 floor, see the Inkling
+section; must stay ≥ upstream b11960 for lfm3) serving
 `LFM3-1.7B-Q4_K_M.gguf` (from `scripts/fetch-lfm3-1.7b.sh`, rev+size+sha256 pinned)
 on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
 `127.0.0.1:8086`; `lfm3.ai.chrisdell.info` (UI + API) and `/lfm3/` on the IP vhost.
@@ -723,6 +724,91 @@ on the **RX 580 = the console GPU** (`1002:67df`, renderD128). Loopback
   `fetchFromGitHub`s its own pinned llama.cpp `3cf03257` for `tools/vision`
   only, independent of this input. Bumping `llama-cpp` only moves llama-swap's
   (disabled) build, alderlake's, asus' and this service's next switch.
+
+## Inkling-2-Mini on llama.cpp (`inkling-2-mini.service` — the third swap lane)
+
+Thinking Machines' Inkling 2 Mini (released 2026-11-20, Apache 2.0), served by
+**stock llama.cpp Vulkan** on the R9700 — Strata cannot run it: the engine's
+families are qwen4exp/qwen35moe and `inkling2_loop` (a **looped** transformer:
+24 physical layers, layers 6–17 run 3× = 48 layer-visits, 8-of-128 MoE, hybrid
+local/global attention, per-expert NVFP4 scales) matches neither. It is a
+strata-swap table entry, not a new proxy: `hosts/zen3-nixos/ai/inkling.nix`
+publishes it via the new `ai.swapEngines` option (consumed in strata.nix's
+`swapConfig`); `ai.strataEngineUnits` gains `inkling-2-mini` so `gpu-mode
+sd|game` stops it and `gpu-mode llm` evicts it like the Strata partners. No
+`wantedBy` — a reboot still serves `ai.strataModel`; a request naming
+`inkling-2-mini-ud-q4_k_xl` on :8080 drains the live engine, swaps units, and
+waits (same contract as coder/q36).
+
+- **Run line** (all VRAM knobs documented in the module's header comment):
+  UD-Q4_K_XL (17.63 GB, Unsloth's KLD plateau) **fully offloaded**,
+  `-c 524288` (NOT the model's 1M: q8_0 KV ≈ 16.9 KB/token — only 8 of the 48
+  expanded cache layers are global, window 1024 for the rest — so 512K ≈ 9.4 GB
+  and the whole config stays under 32624 MiB **fully committed**; 1M would not),
+  `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, `-b 4096 -ub 1024`, `--jinja`,
+  `--slots`, mmproj-F16 for vision, pinned `MESA_VK_DEVICE_SELECT=1002:7551!`,
+  port 8094 (8091/8092/8093 are strata/coder/q36 — swapConfig asserts port
+  uniqueness).
+- **Files**: `scripts/fetch-inkling-2-mini.sh` (rev+size+sha pinned) — and it
+  must fetch from **`Mainline_Support/`** (`inkling2_loop` tensor layout,
+  renamed to `.gguf`): the repo's ROOT UD files use Unsloth's looped layout
+  and mainline rejects them. **llama-cpp has two floors for this lane**:
+  **b12611** (#32704, 2026-11-20) — older mainline loads the file but silently
+  loses the per-expert NVFP4 scales on loop passes 2/3, ppl ~130 instead of
+  7.65, no load-time error — and **#32735 (2026-11-22)**, which is what makes
+  it usable at all: at b12611 Vulkan's `supports_op` rejects `SCALE` on
+  non-contiguous input (`ggml_is_contiguous(op->src[0])` in the
+  `GGML_OP_SCALE` arm), so SiTU's two scales per layer — applied to the strided
+  gate/up halves of the fused `gate_up` — ran **on the CPU**, 194 graph splits
+  per token, and decode sat at **20 t/s**. Upstream's own report is the same
+  numbers on the same card (tg128 19.1 -> 53.8, pp512 507 -> 1605).
+  `nix flake update llama-cpp` is now also what updates this lane (and
+  lfm3/`asus`/`alderlake` at their next switches; the shared floor is the max
+  of lfm3's b11960, this b12611 and #32735).
+- **Measured on this box 2026-11-23** (`a0677c34` + the
+  `GGML_VK_MAX_NODES_PER_SUBMIT=10000` env in `inkling.nix`): **decode
+  20.1 -> 33.6 t/s** (llama-bench tg128 34.4 -> 35.7), **prefill pp512
+  ~440 -> 1061 t/s** (an 800-token prompt ingests at 884 t/s), VRAM 31.1 ->
+  29.7 GB of 32.6. What is left is dispatch-bound, not a knob: one decoded
+  token is ~7,650 kernel launches and 66 % of the 36 ms step is ~3.6 us
+  elementwise/copy kernels (SiTU's scale/sigmoid/sqr/sqrt/tanh + the loop's
+  concat/cont/cpy/repeat, all separate dispatches) — matmul is 33 %. Fixes are
+  upstream fusion (#32855, #32752 open). `-ub 2048` measures *worse* here
+  (pp2048 999.7 -> 963.1; keep 1024) and RADV reports `fp4: 0`, so NVFP4 never
+  gets the RDNA4 int8 coopmat MMQ (`if (!rdna4)` in `ggml_vulkan.cpp`) — a
+  K-quant/IQ4_XS file of the same model should prefill faster.
+- ⚠️ **A `nixos-rebuild switch` starts `strata.service` even while a partner
+  engine is live** (strata is `wantedBy=multi-user.target` and the partner
+  units have no `wantedBy`), so a switch quietly puts the 90 GB Flash-Next
+  engine back on the card alongside Inkling. After any switch on zen3:
+  `sudo systemctl stop strata && sudo systemctl start inkling-2-mini` — a
+  measurement taken while strata is loading is garbage (a decode read 19.6
+  t/s that way, vs 33.6 when quiet).
+- ⚠️ **`llama-cpp` is pinned to `a0677c34` (2026-11-23) in `flake.nix`, not
+  floating HEAD**: from ~2026-11-20 the upstream flake builds a new Svelte webui
+  (`useWebUi ? true`), and that derivation fails in the sandbox
+  (brand-favicons `copyfile` EACCES overwriting files in the read-only flake
+  source — present at b12611 and at 2026-11-23 HEAD alike). `flake.nix`'s
+  `llamaCppPkgs` wrapper now sets `.override { useWebUi = false; }` — which is
+  what every llamaCppPkgs build here has always shipped (the classic UI is
+  embedded in the binary; the old package had no webui reference). Moving to a
+  newer llama.cpp = keep that override until upstream fixes the derivation,
+  then restore the floating url and test-build (`#webui` is not a public flake
+  output — test through the toplevel).
+- **No speculation drafting**: DSpark (`--spec-type draft-dspark`) is still
+  open PR #32218 on mainline (unsloth: ~1.1–1.2× when it lands, with the
+  Mainline_Support drafter files); `--mtp` does not apply to this model at all.
+- **Sampling**: model card = temp 1.0 / top-p 1.0 / top-k 0 / min-p 0 (also
+  embedded in the GGUF as `general.sampling.*`); reasoning effort is
+  per-request `chat_template_kwargs` (template default `high`). Known quirk
+  from the card: it can loop in long reasoning — cap output tokens client-side.
+- **strata-swap kinds**: the shim's table entries now carry `kind`
+  (`"strata"` default, `"llama"`): liveness/drain via llama-server's `/slots`
+  (answered only once the model is loaded; needs `--slots`) instead of
+  `/v1/status`, and while a llama engine is live the shim **synthesizes**
+  `/v1/status` so `gpu-mode.sh`'s `json_field` parsing keeps working
+  unchanged. Name-blind traffic follows the live engine as always — while
+  inkling is live, Recallium's nightly runs on inkling.
 
 ## opencode supervisor plugin (`users/cjdell/opencode/plugins/supervisor.ts`)
 

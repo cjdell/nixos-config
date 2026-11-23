@@ -948,24 +948,48 @@ let
   # clients put in `"model"` are exactly the configs' model_name values, which
   # serve's own /v1/models echoes - so what the shim advertises, the engines
   # confirm. Primary first: MODELS[0] is the shim's own boot/default entry.
-  swapConfig = pkgs.writeText "strata-swap.json" (
-    builtins.toJSON {
-      models = [
-        {
-          id = m.modelName;
-          unit = "strata";
-          port = primaryPort;
-          vram_min_mib = vramMinFor m;
-        }
+  # Appended last: the non-Strata engines from ai.swapEngines (./inkling.nix) —
+  # same routing, but `kind` tells the shim to speak llama-server's readiness
+  # dialect (/slots) instead of /v1/status. Their ports come from their own
+  # modules, so the whole list is asserted distinct: a partner's auto-assigned
+  # 8092+N port must never silently collide with a hand-picked swapEngines port
+  # (the shim would route one model onto the other's engine). The assert lives
+  # INSIDE this lazy binding, never at the module's `in`: forcing config at
+  # module-collection time from a top-level assert is an infinite recursion.
+  swapConfig =
+    let
+      allPorts = [
+        primaryPort
       ]
-      ++ map (p: {
-        id = p.mm.modelName;
-        unit = p.unit;
-        port = p.port;
-        vram_min_mib = vramMinFor p.mm;
-      }) partnerConfigs;
-    }
-  );
+      ++ (map (p: p.port) partnerModels)
+      ++ (map (e: e.port) config.ai.swapEngines);
+    in
+    assert (lib.all (p: lib.count (q: q == p) allPorts == 1) allPorts);
+    pkgs.writeText "strata-swap.json" (
+      builtins.toJSON {
+        models = [
+          {
+            id = m.modelName;
+            unit = "strata";
+            port = primaryPort;
+            vram_min_mib = vramMinFor m;
+          }
+        ]
+        ++ map (p: {
+          id = p.mm.modelName;
+          unit = p.unit;
+          port = p.port;
+          vram_min_mib = vramMinFor p.mm;
+        }) partnerConfigs
+        ++ map (e: {
+          id = e.id;
+          unit = e.unit;
+          port = e.port;
+          vram_min_mib = e.vramMinMiB;
+          kind = e.kind;
+        }) config.ai.swapEngines;
+      }
+    );
 
   strataRootLocation = {
     # :8080 is strata-swap now (./strata-swap.py), not the engine: it

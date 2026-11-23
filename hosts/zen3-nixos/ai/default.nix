@@ -11,6 +11,10 @@
 #   strata.nix          - Strata engine (HIP/gfx1201) + serve + strata. subdomain
 #                         (the live engine since 2026-11-04; ./avalon.nix is the
 #                         disabled alternative)
+#   inkling.nix         - Inkling-2-Mini on stock llama.cpp Vulkan (the arch
+#                         Strata cannot run) — a swap-table engine like the
+#                         Strata partners: no subdomain of its own, it joins
+#                         strata-swap on :8080 via ai.swapEngines
 #   sd-server.nix       - Flux-schnell stable-diffusion.cpp server + sd. subdomain
 #                         (started by gpu-mode, NOT at boot)
 #   gpu-mode.nix        - the `gpu-mode` command: lease the R9700 to llm / sd /
@@ -56,6 +60,9 @@
     # import both - they double-bind :8080.
     ./strata.nix
     # ./avalon.nix
+    # The Inkling-2-Mini llama.cpp lane: joins the strata-swap table and the
+    # gpu-mode lease list via ai.swapEngines / ai.strataEngineUnits below.
+    ./inkling.nix
     # ./ollama-bridge.nix
     ./recallium.nix
     # SD shares the card with Strata via the gpu-mode lease (./gpu-mode.nix):
@@ -151,6 +158,53 @@
         "strata-qwen36-ud-q4-k-xl"
       ];
       description = "systemd unit names of the Strata engine units (primary first) that share the R9700 llm lease";
+    };
+
+    # Swap-table engines that ./strata.nix does not build — an engine in a
+    # different runtime entirely (./inkling.nix: stock llama.cpp, because
+    # Inkling-2-Mini's inkling2_loop arch matches no Strata family). The
+    # shim (./strata-swap.py) routes to them by `model` exactly like the
+    # Strata partners, and each must also join ai.strataEngineUnits so the
+    # gpu-mode lease stops it. Their units have no wantedBy: like the
+    # partners, only strata-swap starts them, and only while the llm lease
+    # is already live.
+    swapEngines = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule (
+          { ... }:
+          {
+            options = {
+              id = lib.mkOption {
+                type = lib.types.str;
+                description = "the exact `model` name clients put in a request; must equal the engine's own /v1/models id";
+              };
+              unit = lib.mkOption {
+                type = lib.types.str;
+                description = "systemd unit strata-swap starts/stops for this engine";
+              };
+              port = lib.mkOption {
+                type = lib.types.port;
+                description = "loopback port the engine serves on (must not collide with the strata engine ports)";
+              };
+              vramMinMiB = lib.mkOption {
+                type = lib.types.int;
+                default = 20000;
+                description = "free-VRAM floor the shim waits for (via amd-smi) before starting this engine";
+              };
+              kind = lib.mkOption {
+                type = lib.types.enum [
+                  "strata"
+                  "llama"
+                ];
+                default = "strata";
+                description = "readiness/drain dialect: strata = /v1/status loaded+activity.in_flight; llama = llama-server /slots (served only once the model is loaded; --slots)";
+              };
+            };
+          }
+        )
+      );
+      default = [ ];
+      description = "non-Strata engines in the strata-swap routing table";
     };
   };
 

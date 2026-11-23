@@ -57,7 +57,19 @@ ever moves WITHIN the llm lease):
     reload into a killed request). Decisions are logged to the journal.
 
 Env: SWAP_CONFIG = the JSON table (written by ./strata.nix):
-  {"models": [{"id","unit","port","vram_min_mib"}...], "default_port": N}
+  {"models": [{"id","unit","port","vram_min_mib","kind"?}...], "default_port": N}
+  kind (default "strata") is the engine's readiness/drain dialect:
+    strata — GET /v1/status: loaded:true, activity.in_flight;
+    llama  — GET /slots (a llama-server endpoint, answered only once the
+             model has loaded, empty list = idle; needs --slots): loaded =
+             the endpoint answers, in_flight = slots with state "processing"
+             (or the older "processing": true). ./inkling.nix is this kind:
+             Inkling-2-Mini's inkling2_loop arch matches no Strata family,
+             so the swap table covers llama.cpp engines as well — swap,
+             rollback and the lease invariant work identically. While a
+             llama engine is live the shim SYNTHESIZES /v1/status itself
+             (llama-server has none) so gpu-mode.sh's json_field parsing
+             keeps working per kind.
   SWAP_PROBE_MAX_TOKENS (default 4), SWAP_PROBE_MAX_CHARS (default 1024),
   SWAP_DRAIN_SECS (default 180, 0 = never wait).
 """
@@ -132,16 +144,63 @@ def status_of(port, timeout=3.0):
         return None
 
 
+def llama_slots(model, timeout=3.0):
+    """(loaded, in_flight) from llama-server's /slots, or (None, None).
+
+    llama-server starts serving ONLY after the model is fully loaded, so an
+    answering /slots means loaded:true; the list itself counts busy slots
+    (both spellings across versions: state:"processing" and "processing":true).
+    A 404/absent endpoint counts as not-live: the unit runs without --slots
+    only if someone broke the run line, which is a bug to surface, not to
+    route around."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{model['port']}/slots", timeout=timeout
+        ) as r:
+            slots = json.loads(r.read().decode())
+    except Exception:
+        return None, None
+    if not isinstance(slots, list):
+        return None, None
+    busy = sum(
+        1
+        for s in slots
+        if isinstance(s, dict)
+        and (str(s.get("state", "")).lower() == "processing" or s.get("processing") is True)
+    )
+    return True, busy
+
+
+def loaded_of(model):
+    """Is this table entry's engine loaded? (serve-up-but-loading -> False for
+    strata; the live_model() caller keeps that as a weaker 'best' hint.)"""
+    if model.get("kind") == "llama":
+        loaded, _ = llama_slots(model)
+        return bool(loaded)
+    st = status_of(model["port"])
+    return bool(st and st.get("loaded"))
+
+
+def inflight_of(model):
+    """Requests the engine is currently answering (best-effort: a probe that
+    cannot be parsed counts 0 — the same tolerance the strata path has)."""
+    if model.get("kind") == "llama":
+        _, busy = llama_slots(model)
+        return busy or 0
+    st = status_of(model["port"])
+    return int(((st or {}).get("activity") or {}).get("in_flight", 0) or 0)
+
+
 def live_model():
     """The id of the model currently served (loaded > loading > none), or None."""
     best = None
     for m in MODELS:
-        st = status_of(m["port"])
-        if st is None:
-            continue
-        if st.get("loaded"):
+        if loaded_of(m):
             return m["id"]
-        best = best or m["id"]  # serve is up but the engine is loading/unloaded
+        if m.get("kind") == "llama":
+            continue  # llama-server is up exactly when it is loaded; no middle state
+        if status_of(m["port"]) is not None:
+            best = best or m["id"]  # serve is up but the engine is loading/unloaded
     return best
 
 
@@ -205,11 +264,12 @@ def systemctl(action, unit):
 
 
 def wait_loaded(model, timeout_s=1500):
-    """Poll until the target serve layer says loaded:true. True/False."""
+    """Poll until the target engine reports loaded (strata: serve says
+    loaded:true; llama: /slots answers — which it only does once the model
+    is fully loaded). True/False."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        st = status_of(model["port"], timeout=5)
-        if st and st.get("loaded"):
+        if loaded_of(model):
             return True
         try:
             active = subprocess.run(
@@ -245,8 +305,7 @@ def do_swap(target_id):
     deadline = time.monotonic() + DRAIN_SECS
     waited = False
     while time.monotonic() < deadline:
-        st = status_of(cur["port"])
-        busy = int(((st or {}).get("activity") or {}).get("in_flight", 0) or 0)
+        busy = inflight_of(cur)
         if busy <= 0:
             break
         if not waited:
@@ -256,8 +315,7 @@ def do_swap(target_id):
         time.sleep(2)
     else:
         if DRAIN_SECS > 0:
-            st = status_of(cur["port"])
-            busy = int(((st or {}).get("activity") or {}).get("in_flight", 0) or 0)
+            busy = inflight_of(cur)
             if busy > 0:
                 log(f"BUSY {cur_id}: {busy} request(s) still in flight after {DRAIN_SECS}s; "
                     f"not swapping to {target_id}")
@@ -431,6 +489,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/status":
                 return self._status_stub()
             return self._json(503, {"error": {"type": "unavailable", "message": "the LLM lease is off: gpu-mode llm"}})
+        if path == "/v1/status" and BY_ID[live].get("kind") == "llama":
+            # Synthesize the strata-dialect /v1/status: llama-server has no
+            # such endpoint (a proxy pass would 404), and gpu-mode.sh's
+            # json_field(loaded/in_flight/model) on :8080 must keep reading
+            # the truth for whichever engine is live.
+            _, busy = llama_slots(BY_ID[live])
+            return self._json(200, {
+                "service": "strata-swap", "engine": "llama.cpp", "model": live,
+                "loaded": True, "in_flight": busy or 0, "auto_load": False,
+                "models": [m["id"] for m in MODELS],
+            })
         self.upstream_port = BY_ID[live]["port"]
         return self._proxy("GET")
 

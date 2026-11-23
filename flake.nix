@@ -110,8 +110,28 @@
       url = "github:nix-community/stylix/master";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Pinned to a0677c341b (2026-11-23) since 2026-11-23, NOT floating HEAD:
+    # HEAD's webui derivation fails to build here (@ggml-org/llama-brand
+    # brand-favicons copyfile EACCES onto the read-only flake source), hence
+    # the `useWebUi = false` override in llamaCppPkgs below.
+    #
+    # FLOORS for this pin:
+    #  * b12611 / #32704 (2026-11-21) — inkling2_loop loop-slot layout. Older
+    #    mainline silently garbles Inkling-2-Mini (ppl ~130, no load error);
+    #    #32694 (initial inkling2_loop support) is inside it too.
+    #  * #32735 (2026-11-22) — "vulkan : support non-contiguous src in SCALE".
+    #    WITHOUT IT Inkling-2-Mini decodes at ~20 tok/s on the R9700: SiTU
+    #    scales the non-contiguous gate/up halves of the fused gate_up, Vulkan
+    #    rejected SCALE there (`ggml_is_contiguous(op->src[0])` in
+    #    supports_op) and the scheduler ran both scales of every layer on the
+    #    CPU — 194 graph splits/token. Same fix 19.1 -> 53.8 tok/s upstream.
+    #    lfm3 only needs b11960; the rest is cream (#32725/#32727 non-UMA
+    #    memset, #32799 ignore_merges tokenizer, #32833 inkling chat grammar).
+    # Once upstream fixes the webui derivation: restore the floating
+    # `url = "github:ggml-org/llama.cpp"`, `nix flake update llama-cpp`, keep
+    # the floor notes only, and test-build.
     llama-cpp = {
-      url = "github:ggml-org/llama.cpp";
+      url = "github:ggml-org/llama.cpp/a0677c341ba6bbfbbf74fa3c966f4dba74e1c830";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # Avalon: the llama.cpp fork that serves Qwen3.8-Flash-Next with hosted
@@ -432,9 +452,40 @@
       # ICEs GCC on test-jinja.cpp (GGC crash; same failure documented for the
       # rdna-boosts fork in AGENTS.md). The tests are useless for a server
       # deployment anyway, so wrap every package with -DLLAMA_BUILD_TESTS=OFF.
+      #
+      # And since ~2026-11-20 they default `useWebUi = true`, which builds the
+      # new Svelte "Llama Chat" app in .devops/nix/package.nix — whose
+      # brand-favicons step fails in the sandbox (copyfile EACCES: it
+      # overwrites files inside the read-only flake source, upstream bug
+      # present at b12611 AND at 2026-11-23 HEAD). Off = exactly what every
+      # llamaCppPkgs build here has always shipped: llama-server's classic UI,
+      # embedded in the binary itself (the pre-2026-11 package had no webui
+      # reference at all). Flip this back if upstream fixes the derivation —
+      # `useWebUi` is a callPackage argument, so it must go through
+      # `.override`, not `overrideAttrs`.
       llamaCppPkgs = builtins.mapAttrs (
-        _: pkg:
-        pkg.overrideAttrs (old: {
+        name: pkg:
+        let
+          pkg' =
+            if
+              builtins.elem name [
+                "default"
+                "vulkan"
+              ]
+            then
+              pkg.override { useWebUi = false; }
+            else
+              pkg;
+        in
+        pkg'.overrideAttrs (old: {
+          # useWebUi=false makes the phases/cmake-flag conditional, but
+          # package.nix still carries `webui = stdenvNoCC.mkDerivation ...`
+          # as a plain derivation ARGUMENT — which keeps the broken webui
+          # drv as a dependency of the .drv even when unused. Nulling the
+          # argument drops the dependency; no phase references $webui when
+          # the flag is off (verified: BUILD_WEBUI=FALSE + this line, and
+          # the toplevel builds).
+          webui = null;
           cmakeFlags = old.cmakeFlags ++ [ "-DLLAMA_BUILD_TESTS=OFF" ];
         })
       ) llama-cpp.packages.${system};

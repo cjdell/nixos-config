@@ -38,10 +38,10 @@ gpu-mode — give the R9700 to exactly one thing at a time
                       strata.ai / llm.ai / 192.168.49.50 endpoints). Starts the
                       PRIMARY model (config.ai.strataModel); every other
                       selectable model in the strata-swap table (the Coder
-                      IQ1_M, Qwen3.6-35B-A3B) is picked per-request through
-                      :8080 — a request naming it swaps the engines
-                      (./strata-swap.py), costing a multi-minute model load,
-                      and 'gpu-mode llm' puts the primary back.
+                      IQ1_M, Qwen3.6-35B-A3B, Inkling-2-Mini) is picked
+                      per-request through :8080 — a request naming it swaps
+                      the engines (./strata-swap.py), costing a multi-minute
+                      model load, and 'gpu-mode llm' puts the primary back.
   gpu-mode sd         FLUX.1-schnell on stable-diffusion.cpp (./sd-server.nix)
                       web UI http://192.168.49.50/sd/  (https://sd.ai.chrisdell.info)
   gpu-mode game       free the GPU for gaming  (aliases: free, off)
