@@ -814,6 +814,29 @@ waits (same contract as coder/q36).
     gives **55 t/s** at 32K and `-b 4096` hangs llama-bench outright — never
     use large query blocks on RDNA4. `-b 512 -ub 512` measured byte-identical
     to `-b 1024 -ub 512` (speed and residency), so `-b` need not follow.
+  * **A HIP re-sweep on 2026-11-23 showed `-ub 512` is a SHARP optimum, not a
+    plateau** — and that the community's RDNA4 batch advice does not transfer
+    to `inkling2_loop`. llama.cpp discussion #21043 (gfx1201/RX 9070 XT sweep)
+    reports `-ub 2048` = **+29 % prefill** and `-b 16384 -ub 2048` = +48 % on a
+    35B MoE, with a dead band at `-ub` 65-256; the common R9700 configs in the
+    wild are `-b 2048 -ub 512` (Unsloth Flash-Next) and `-b 2048 -ub 1024`
+    (Qwen3.6-35B-A3B). Re-measured here on the ROCm build (`pp2048`, `-r 2`,
+    q8_0 KV, the live model, `GGML_CUDA_DISABLE_GRAPHS=1`):
+
+    | `-b`/`-ub` | @d0 | @d65K | @d90K | full 49 152-token prefill |
+    |---|---:|---:|---:|---:|
+    | 1024/512 (**this**, shipped) | 679 | 171.7 | 134.3 | **329.8** |
+    | 2048/512 | 684 | 171.9 | — | — |
+    | 2048/1024 | 748 | 171.5 | **timeout >600 s** | 331.8 |
+    | 16384/2048 | 658 | **timeout** | — | — |
+    | 2048/384 | — | — | **timeout** | 284.4 |
+    | 2048/288 | — | — | **timeout** | 239.9 |
+
+    `-b` is irrelevant again (1024 vs 2048 identical); `-ub 1024` buys +10 %
+    only on a shallow 2 K prompt and **nothing on a real prefill**, while every
+    value other than 512 collapses at depth. 512 is where the FA tile path
+    lands right for this model on gfx1201 — treat any other query block as a
+    regression until re-measured.
   * **Cost per turn grows with depth even when only a few tokens are new** —
     measured on one live session: 163 new tokens at 92K depth = 2.1 s,
     449 = 5.3 s, 703 = 28 s, against ~1 s shallow. Two causes: per-op FA

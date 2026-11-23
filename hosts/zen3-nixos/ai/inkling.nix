@@ -113,12 +113,25 @@
 # with `rocmGpuTargets = "gfx1201"` in flake.nix (same llama.cpp pin as Vulkan;
 # without that target ROCm has no compatible kernels for this card).
 #
-# Vulkan-specific lessons, kept because they still hold if this lane ever goes
-# back: `-ub 512` vs `-ub 1024` at 53.6K measured 431 vs 128 t/s (query-block
-# size is load-bearing there); `-ub 256` is worse (481 @ 32K); `-b/-ub 2048` = 55
-# t/s and `-b 4096` hangs llama-bench outright; q4_0 KV = 471 @ 32K. And -c
-# 393216 vs 131072 on the same 53.6K prompt: 431 vs 551 t/s — the
-# reserved-but-unused KV was exactly the scratch's headroom.
+# BATCH SIZE: `-b 1024 -ub 512`, and `-ub 512` is a SHARP optimum on both
+# backends — not a plateau. Re-swept on the HIP build 2026-11-23 (pp2048, -r 2,
+# q8_0 KV, GGML_CUDA_DISABLE_GRAPHS=1) — full 49 152-token cold prefill /
+# pp2048 @d65K / pp2048 @d90K:
+#   1024/512 (this)   329.8 / 171.7 / 134.3
+#   2048/512            —   / 171.9 /  —      (-b is irrelevant, as before)
+#   2048/1024         331.8 / 171.5 / TIMEOUT (>600 s)
+#   16384/2048          —   / TIMEOUT / —
+#    2048/384         284.4 /  —    / TIMEOUT
+#    2048/288         239.9 /  —    / TIMEOUT
+# `-ub 1024` measures +10 % (748 vs 679) on a shallow 2K prompt and buys nothing
+# on a real prefill, so that gain is an artefact; every value but 512 collapses
+# at depth. Community RDNA4 advice points the other way (llama.cpp discussion
+# #21043: `-ub 2048` = +29 % prefill, `-b 16384 -ub 2048` = +48 %, dead band at
+# 65-256) and the usual R9700 configs are 2048/512 or 2048/1024 — none of it
+# transfers to `inkling2_loop`. Vulkan-era numbers kept for the same reason:
+# -ub 1024 at 53.6K = 128 vs 431 t/s, -ub 256 = 481 @ 32K, -b 4096 hangs
+# llama-bench, q4_0 KV = 471 @ 32K. And -c 393216 vs 131072 on that 53.6K
+# prompt: 431 vs 551 t/s — the reserved-but-unused KV was the scratch's headroom.
 #
 # WHY IT STILL DECAYS WITH DEPTH (and why the Qwen3.8 lane does not): upstream's
 # best published Inkling figure on an R9700 is 893 t/s at 16K, also decaying, so
@@ -180,6 +193,13 @@ in
     # device 0 is always the dGPU and the console RX 580 cannot be picked.
     environment = {
       HIP_VISIBLE_DEVICES = "0";
+      # ROCm 7.2.3's hipGraphExecUpdate SEGVs inside VirtualGPU::submitKernel-
+      # Internal when ggml-hip captures/updates a graph (crash 2026-11-23
+      # 22:07:50, stack: ggml_cuda_graph_launch_chunk -> hipGraphExecUpdate ->
+      # amd::roc::VirtualGPU::submitKernelInternal). Graphs are a launch-overhead
+      # optimisation only, so the documented escape hatch is to turn them off
+      # until ROCm fixes it — measure the decode cost before re-enabling.
+      GGML_CUDA_DISABLE_GRAPHS = "1";
     };
 
     unitConfig.ConditionPathExists = [
