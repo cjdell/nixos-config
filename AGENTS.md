@@ -775,8 +775,14 @@ waits (same contract as coder/q36).
   concat/cont/cpy/repeat, all separate dispatches) — matmul is 33 %. Fixes are
   upstream fusion (#32855, #32752 open). `-ub 2048` measures *worse* here
   (pp2048 999.7 -> 963.1; keep 1024) and RADV reports `fp4: 0`, so NVFP4 never
-  gets the RDNA4 int8 coopmat MMQ (`if (!rdna4)` in `ggml_vulkan.cpp`) — a
-  K-quant/IQ4_XS file of the same model should prefill faster.
+  gets the RDNA4 int8 coopmat MMQ (`if (!rdna4)` in `ggml_vulkan.cpp`). **That
+  last theory was then A/B'd and did NOT hold**: `scripts/fetch-inkling-2-mini.sh
+  --iq4xs` fetches Unsloth's UD-IQ4_XS (15.73 GB, KLD 0.0109 vs Q4_K_XL's
+  0.0107 — the same plateau), and on this card the two are identical:
+  **pp512 1066.8 vs 1065.6, pp2048 998.9 vs 996.1, tg128 35.69 vs 36.00–36.09,
+  tg128 @32K depth 31.94 vs 32.25** (llama-bench, 2026-11-23). So the lane
+  stays on UD-Q4_K_XL; IQ4_XS is only worth fetching if the 1.8 GiB of VRAM or
+  the slightly smaller file is wanted.
 - ⚠️ **A `nixos-rebuild switch` starts `strata.service` even while a partner
   engine is live** (strata is `wantedBy=multi-user.target` and the partner
   units have no `wantedBy`), so a switch quietly puts the 90 GB Flash-Next

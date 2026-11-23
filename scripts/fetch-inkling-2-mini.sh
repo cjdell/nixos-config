@@ -19,6 +19,12 @@
 # and 5.2 GB smaller, which is what makes the 512K ctx the service runs fit
 # the 32 GiB R9700. Q8_K_XL (22.9 GB) + 512K KV does not fit the card.
 #
+# --iq4xs additionally fetches UD-IQ4_XS (15.7 GB, ~1.9 GB smaller): the same
+# model with IQ4_XS experts instead of NVFP4. That matters on this GPU — RADV
+# reports `fp4: 0` and ggml-vulkan disables the int8 coopmat MMQ for NVFP4 on
+# RDNA4 (`if (!rdna4)` in ggml-vulkan.cpp), while IQ4_XS gets the fast prompt
+# path. Optional, so a plain run does not spend 15.7 GB on it.
+#
 # mmproj-F16.gguf is the vision projector (root file, works on mainline —
 # llama-server --mmproj per the same README).
 #
@@ -32,7 +38,8 @@
 # moved HEAD or a truncated download cannot pass as a model file.
 #
 # Usage:
-#   scripts/fetch-inkling-2-mini.sh            # fetch + verify both files
+#   scripts/fetch-inkling-2-mini.sh            # fetch + verify the run set
+#   scripts/fetch-inkling-2-mini.sh --iq4xs    # ... plus UD-IQ4_XS (15.7 GB)
 #   scripts/fetch-inkling-2-mini.sh --check    # verify what is on disk, no network
 set -euo pipefail
 
@@ -46,6 +53,10 @@ declare -A FILES=(
   [Inkling-2-Mini-UD-Q4_K_XL.gguf]="17629760736 e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3 Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf_file"
   [mmproj-F16.gguf]="639348160 3bff75ffeb2d6e0371ba7bd42e30d26a7d98aea681fa44b03b5a20891cfa2c5f mmproj-F16.gguf"
 )
+# Fetched only with --iq4xs (see the quant note above).
+declare -A OPTIONAL_FILES=(
+  [Inkling-2-Mini-UD-IQ4_XS.gguf]="15733756512 374970bf6f151fc50da49419751c3e77b82e373a3b9445ded617bd386cd12163 Mainline_Support/Inkling-2-Mini-UD-IQ4_XS.gguf_file"
+)
 
 check_one() { # path bytes sha -> 0 ok, 1 mismatch
   local p=$1 bytes=$2 sha=$3
@@ -57,21 +68,40 @@ check_one() { # path bytes sha -> 0 ok, 1 mismatch
 
 mkdir -p "$OUT"
 check_only=0
-[ "${1:-}" = "--check" ] && check_only=1
+want_iq4xs=0
+for arg in "$@"; do
+  case "$arg" in
+    --check) check_only=1 ;;
+    --iq4xs) want_iq4xs=1 ;;
+    *) echo "usage: $0 [--check] [--iq4xs]" >&2; exit 2 ;;
+  esac
+done
+
+declare -A SEL
+for k in "${!FILES[@]}"; do SEL[$k]=${FILES[$k]}; done
+if [ "$want_iq4xs" -eq 1 ]; then
+  for k in "${!OPTIONAL_FILES[@]}"; do SEL[$k]=${OPTIONAL_FILES[$k]}; done
+fi
 
 if [ "$check_only" -eq 0 ]; then
-  # 18.3 GB of new model; guard at 22 GiB. This set lives ALONGSIDE the live
-  # Flash-Next 94 GB pack (which stays), so check before pruning anything else.
+  # Guard on what is actually missing, + 2 GiB. This set lives ALONGSIDE the
+  # live Flash-Next 94 GB pack (which stays), so check before pruning anything.
+  need=0
+  for name in "${!SEL[@]}"; do
+    read -r bytes _ <<<"${SEL[$name]}"
+    [ -f "$OUT/$name" ] && [ "$(stat -c %s "$OUT/$name")" -eq "$bytes" ] && continue
+    need=$((need + bytes))
+  done
   free_kb=$(df --output=avail -k "$OUT" | tail -1 | tr -d ' ')
-  [ "$free_kb" -gt $((22 * 1024 * 1024)) ] || {
-    echo "only $((free_kb / 1024 / 1024)) GiB free on $OUT; the download is 18.3 GB." >&2
+  [ "$free_kb" -gt $(( (need / 1024) + 2 * 1024 * 1024 )) ] || {
+    echo "only $((free_kb / 1024 / 1024)) GiB free on $OUT; still need $((need / 1024 / 1024 / 1024)) GiB" >&2
     exit 1
   }
 fi
 
 rc=0
-for name in $(printf '%s\n' "${!FILES[@]}" | sort); do
-  read -r bytes sha src <<<"${FILES[$name]}"
+for name in $(printf '%s\n' "${!SEL[@]}" | sort); do
+  read -r bytes sha src <<<"${SEL[$name]}"
   dest="$OUT/$name"
   if check_one "$dest" "$bytes" "$sha"; then
     echo "OK   $name (already complete)"
@@ -90,8 +120,9 @@ for name in $(printf '%s\n' "${!FILES[@]}" | sort); do
 done
 
 if [ "$rc" -eq 0 ]; then
-  echo "both files present and verified in $OUT"
-  echo "next: confirm the llama-cpp input is >= b12611 (inkling2_loop + #32704), then"
-  echo "      name \"inkling-2-mini-ud-q4_k_xl\" in a request to :8080 to swap to it."
+  echo "all requested files present and verified in $OUT"
+  echo "next: confirm the llama-cpp input is >= b12611 (#32704 inkling2_loop) AND"
+  echo "      >= #32735 (the Vulkan non-contiguous SCALE fix), then name"
+  echo "      \"inkling-2-mini-ud-q4_k_xl\" in a request to :8080 to swap to it."
 fi
 exit "$rc"
