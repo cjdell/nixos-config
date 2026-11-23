@@ -740,6 +740,25 @@ Verify after the switch: `ip -6 route show 2001:8b0:1d14::/48` empty; from the
 Mac (browser, no forcing) `id.leighhack.org` opens; `journalctl -u
 hackspace-tunnel-check -n 20` green; on the phone both names still open.
 
+Follow-up, same day — **there is a second flapper and it is theirs.** After
+the switch the door kept going intermittently dead, from every source and over
+both paths: within the same minutes, new sessions to `81.187.195.17` AND
+`2001:8b0:1d14:225::1`, ports 80 and 443, got no SYN-ACK, while `frigate.int`
+over `fd99` — the tailnet path to the SAME nginx — answered 200, and their
+tailnet DNS `10.3.1.1` i/o-timed out through the healthy tunnel (AdGuard
+journal, 09:43:49–59). Our side audited clean: no PPPoE events in the journal
+(two hours), routes as deployed, healthcheck green throughout, SYNs verifiably
+leaving (`conntrack` showed [UNREPLIED] where the door was silent). So the
+flap is their edge's WAN-facing handling of Grafton-sourced sessions — the
+prime suspects being a DNS-resolved firewall alias for our ranges expiring
+between re-resolves, state-table pressure, or anti-flood banning cycling after
+the reconnect storms of 2026-11-22. Worth their looking at edge logs keyed on
+our WAN v4 `51.148.168.145` and v6 `2a02:8010:6680::/48`. This does NOT
+rehabilitate the /48-via-VM route: the stall-while-established behaviour it
+caused (browsers never falling back) was real and measured; this second
+flapper just means "green from the router" doesn't guarantee the door is up
+for anyone else during their bad minutes.
+
 ## Related
 
 * `hosts/grafton-router/virtual-machines/grafton-hackspace-client.nix` — the VM,
