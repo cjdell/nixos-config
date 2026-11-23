@@ -746,8 +746,9 @@ waits (same contract as coder/q36).
   expanded cache layers are global, window 1024 for the rest — and past ~600K
   of ctx the pool stops fitting VRAM and is pushed into **GTT**, i.e. read over
   PCIe at depth, so 384K leaves ~4.8 GB spare and keeps every buffer resident),
-  `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, **`-b 1024 -ub 1024`** (`-b` must
-  stay at ubatch: `-b/-ub 2048` collapses deep prefill to **55 t/s**),
+  `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, **`-b 1024 -ub 512`** (`-ub` is
+  load-bearing: `-ub 1024` collapses a 53.6K prefill to 128 t/s, `-ub 256` is
+  slower still at 32K, `-b/-ub 2048` = 55 t/s, `-b 4096` hangs — see below),
   `--jinja`,
   `--slots`, mmproj-F16 for vision, pinned `MESA_VK_DEVICE_SELECT=1002:7551!`,
   port 8094 (8091/8092/8093 are strata/coder/q36 — swapConfig asserts port
@@ -768,15 +769,27 @@ waits (same contract as coder/q36).
   `nix flake update llama-cpp` is now also what updates this lane (and
   lfm3/`asus`/`alderlake` at their next switches; the shared floor is the max
   of lfm3's b11960, this b12611 and #32735).
-- **Measured on this box 2026-11-23** (`a0677c34`, `-b 1024 -ub 1024`,
-  384K ctx): decode 33-36 t/s (llama-bench tg128 35.7 at depth 0, 30-32 at
-  32K), and the prefill curve that decides whether the lane is usable —
-  pp512 1 061 (depth 0), ~1 180 at 4K, ~700 at 16K, **505 at 32K** (llama-bench
-  pp2048 @ d32768). The GPU is genuinely loaded doing it (95 % gfx utilisation,
-  2.2 GHz, 120-184 W measured during a live 32K prefill), so this is the
-  backend, not a setting:
-  * `-b/-ub 2048` → **55 t/s** at 32K (9x worse, a pathological path for this
-    arch; `-b 4096` hangs outright in llama-bench).
+- **Measured on this box 2026-11-23** (`a0677c34`, `-b 1024 -ub 512`,
+  384K ctx): decode 33-36 t/s (llama-bench tg128 35.7 at depth 0, 27-31 at
+  32-49K), and the prefill curve that decides whether the lane is usable:
+  pp512 1 069 (depth 0), 877 at 3.5K, 513 at 32K, 421 at 49K, and **431 on a
+  live 53.6K prompt** (was **128 t/s** on the same prompt at `-ub 1024`). The
+  GPU is genuinely loaded doing it (95 % gfx utilisation, 2.2 GHz, 120-184 W
+  sampled mid-prefill), so this is the backend, not a setting:
+  * **`-ub 512` is load-bearing, and the cliff is kernel-side, not memory:**
+    `-b 1024 -ub 1024` ran that same 53.6K prompt at 128 t/s with the *same*
+    total working set (29.5 GB VRAM + 4.8 GB GTT), while `-b 1024 -ub 512`
+    does 431 t/s. `-ub 256` is worse (481 at 32K, 900 shallow), `-b/-ub 2048`
+    gives **55 t/s** at 32K and `-b 4096` hangs llama-bench outright — never
+    use large query blocks on RDNA4. `-b 512 -ub 512` measured byte-identical
+    to `-b 1024 -ub 512` (speed and residency), so `-b` need not follow.
+  * **The prefill scratch is depth-proportional: ~140 KB per token of context**
+    (+7.7 GB total at a 53.6K prompt), independent of batch shape. Whatever
+    exceeds free VRAM is placed in **GTT** silently — at `-c 393216` that is
+    ~1.3 GB idle / ~2.6 GB during a 50K+ prefill, and it costs little
+    (431 live vs 421 bench with no spill). Shrinking `-c` is the only way to
+    buy scratch room: 2.2 GB of KV per 128K, so at `-c 262144` the same
+    prefill does not spill at all.
   * q4_0 KV → 471 at 32K, i.e. *worse* than q8_0 (q8_0 is the native FA type,
     so quantising the KV cache does not pay here).
   * llama.cpp's own **ROCm/HIP** backend (built with `rocmGpuTargets =
@@ -791,10 +804,20 @@ waits (same contract as coder/q36).
     llama-server processes on the card at once** (one orphaned by an
     interrupted benchmark) — two 16.4 GB models cannot share 31.9 GB, so the
     driver shoves the difference into GTT. One server on a clean card sits at
-    27.8 GB used / 4.8 GB free / 2.5 GB GTT. **Check `pgrep -af
+    ~24.4 GB used / 8.2 GB free / 1.4 GB GTT. **Check `pgrep -af
     '[b]in/llama-server'` before believing a GTT number.**
-- The `-b 4096`/512K era is in git history; the DRAM/GTT sweep that justified
-  384K is also in the module header.
+- **Why Qwen3.8-Flash-Next felt flat at 256K and this does not** (the question
+  this lane always raises): it is a genuinely different architecture in the one
+  dimension that matters. Flash-Next's majority mixer is **gated delta net**
+  (linear attention — constant-size recurrent state, *no* depth term; Strata's
+  `STRATA_GDN_CHUNKED` is exactly that scan), so most of its layers cost the
+  same at 200K as at 2K, and it runs on Strata's hand-fused kernels at ~1 250
+  t/s. `inkling2_loop` instead has 24 physical layers run as 48 visits (layers
+  6-17 x3), softmax attention throughout (mostly sliding-window 1024, 4 global
+  layers whose cost *is* O(depth)), and no engine but generic llama.cpp. Hence
+  a 1 069 t/s shallow ceiling that halves by 32K. Practical consequence: long
+  prompts are 3-4x cheaper to re-send than to re-read — keep prefixes stable.
+
 - ⚠️ **A `nixos-rebuild switch` starts `strata.service` even while a partner
   engine is live** (strata is `wantedBy=multi-user.target` and the partner
   units have no `wantedBy`), so a switch quietly puts the 90 GB Flash-Next

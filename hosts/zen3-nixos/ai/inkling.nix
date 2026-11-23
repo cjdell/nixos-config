@@ -43,9 +43,10 @@
 # scales — SILENT garbage, ppl ~130, no load error). ConditionPathExists
 # keeps the unit down until the fetch ran, as everywhere else here.
 #
-# VRAM: this config is sized so the Vulkan pool NEVER overshoots into GTT.
-# Measured on this box's 32624 MiB (headless R9700, console is the RX 580),
-# 2026-11-23, at -c 393216 / -b 1024 -ub 1024 / q8_0 KV:
+# VRAM: sized so weights + KV + idle graphs fit with ~8 GB spare, because that
+# spare is what the PREFILL SCRATCH eats (see below). Measured on this box's
+# 32624 MiB (headless R9700, console is the RX 580), 2026-11-23, at
+# -c 393216 / -b 1024 -ub 512 / q8_0 KV:
 #
 #   weights (UD-Q4_K_XL)      16800 MiB   all 48 visits GPU-resident (-ngl 99;
 #                                         17.6 GB is why Q4_K_XL, not Q8_K_XL)
@@ -56,49 +57,62 @@
 #                                         17408 B/token; + 42.5 MiB fixed for
 #                                         the 20 windowed (1024-cell) layers
 #   mmproj F16 (vision)         640 MiB
-#   graph/scratch/slack         ~3800 MiB
+#   graphs/slack              ~1400 MiB
 #   --------------------------------------------------------------
-#   idle                      27779 MiB used, 4845 free, GTT 2510
-#   llama-server reserves       27.1 GiB of 31.9 -> fits, no over-commit
+#   idle                      24415 MiB used, 8209 free, GTT 1387
 #
-# WHY NOT MORE, and why the numbers matter more than the ctx: measured by
-# starting the same line at bigger -c (everything else identical):
+# THE PREFILL SCRATCH IS DEPTH-PROPORTIONAL — that is the thing to know about
+# this lane. While a prefill runs, the Vulkan backend's attention working set
+# grows at ~140 KB per token of context in the graph (measured: +7.7 GB total at
+# a 53.6K prompt), and it is NOT a function of batch shape — `-b 512 -ub 512`
+# measured byte-identical in speed AND residency to `-b 1024 -ub 512`. Whatever
+# does not fit in free VRAM is silently placed in GTT (host memory read over
+# PCIe), so the only real levers are:
+#   * shrink -c: frees KV (2.2 GB per 128K of ctx) for the scratch — at 262144
+#     the same 53.6K prefill no longer spills at all;
+#   * keep prompt prefixes stable so LCP reuse skips the re-read entirely.
+# -c sweep, same line, nothing else changed: 524288 -> 29717 used / 2907 free;
+# 655360 -> 32562 / 62 (+0.9 GB GTT); 786432 -> 32533 / 91 (+4.6); 917504 ->
+# 32564 / 60 (+8.3). All load; past ~600K the marginal KV itself goes to GTT.
+# UD-IQ4_XS is 1.8 GiB smaller (another ~108K tokens of resident ctx) but
+# measured identical in speed — AGENTS.md.
 #
-#   -c 524288  29717 MiB used, 2907 free, GTT  3278 MiB
-#   -c 655360  32562 used,  62 free,   GTT  4145 MiB   +0.9 GB spilled
-#   -c 786432  32533 used,  91 free,   GTT  7886 MiB   +4.6 GB spilled
-#   -c 917504  32564 used,  60 free,   GTT 11568 MiB   +8.3 GB spilled
+# PREFILL RATES — clean card, ONE server, 2026-11-23:
 #
-# All of those LOAD, but past ~600K the marginal KV is host-resident (GTT) and
-# is read over PCIe at depth. 393216 keeps ~4.8 GB spare, which is what stops
-# the pool from spilling at all. UD-IQ4_XS is 1.8 GiB smaller (another ~108K
-# tokens of VRAM-resident ctx) but measured identical in speed — AGENTS.md.
+#   pp512  d0     1069   (-b 1024 -ub 512)      1061 at -ub 1024
+#   3.5K   live    877
+#   32K    bench   513                           504 at -ub 1024
+#   49K    bench   421   (llama-bench allocates only ~51K KV = no spill)
+#   53.6K  live    431   (384K KV resident + 2.6 GB transient GTT)
+#   decode          34.2 @ d0, ~27-31 @ 32-49K depth
 #
-# PREFILL IS THE WEAK SPOT, and it is the kernels, not this line. Measured t/s
-# on this card (2026-11-23, clean card, one server):
+# -ub 512 is what makes this lane usable at depth, and the reason is a kernel
+# cliff, not memory: at -ub 1024 the SAME 53.6K prefill ran at **128 t/s**
+# (29.5 GB VRAM peak + 4.8 GB GTT) while -ub 512 runs 431 t/s with the same
+# total working set. -ub 256 is worse (481 @ 32K, 900 shallow). `-b/-ub 2048`
+# = 55 t/s @ 32K and `-b 4096` hangs llama-bench outright — stay well away from
+# large query blocks on RDNA4. q4_0 KV = 471 @ 32K (q8_0 is the native FA type;
+# quantising the cache does not pay here). llama.cpp's ROCm/HIP build
+# (rocmGpuTargets = gfx1201) is worse across the board: pp512 1012, tg128 29.2,
+# pp2048@32K 272.
 #
-#   depth 0     pp512  1061      (-b 1024 -ub 1024, q8_0 KV, -fa on)
-#   depth 4K    ~1180 (live traffic)
-#   depth 16K     ~700
-#   depth 32K      505      <- pp2048 @ d32768, llama-bench
-#   decode         35.7 @ d0, 30-32 @ 32K depth
-#
-# -b/-ub 2048 measured **55 t/s** at 32K depth (a pathological path for this
-# arch — 9x worse), q4_0 KV 471 (q8_0 is the native FA type, so quantising the
-# cache does NOT pay here), and llama.cpp's own ROCm/HIP backend (gfx1201,
-# rocmGpuTargets) is worse across the board: pp512 1012, tg 29.2,
-# pp2048@32K 272. The GPU is genuinely loaded while doing this — 95 % gfx
-# utilisation, 2.2 GHz, 120-184 W — so there is no misconfiguration left to
-# find: this is llama.cpp's Vulkan attention/loop path on RDNA4. Upstream's
-# best published Inkling number on an R9700 is 893 t/s at 16K depth, which also
-# decays, so "1000 t/s across a long context" is not reachable on this backend.
-# The levers that DO help TTFT: keep the prefix stable so llama-server's LCP
-# reuse hits (a warm 50K turn prefills 7 tokens instead of 50K), and keep
-# prompts <=16-32K where the rate is 500-700.
+# WHY IT DECAYS AT ALL (and why the Qwen3.8 lane does not): the GPU is genuinely
+# loaded (95 % gfx utilisation, 2.2 GHz, 120-184 W sampled mid-prefill), so this
+# is the backend, not a setting. Upstream's best published Inkling figure on an
+# R9700 is 893 t/s at 16K depth — also decaying — so "1000 t/s across a long
+# context" is not reachable on llama.cpp for `inkling2_loop`. Architecturally
+# this is a LOOPED transformer (24 physical layers, 6-17 run 3x = 48 visits per
+# token, 8-of-128 MoE, mostly sliding-window attention) paying a per-visit
+# dispatch cost in a generic backend; the Qwen3.8-Flash-Next lane is flat
+# because most of its layers are gated-delta-net (linear attention: constant
+# state, no depth term) and Strata has hand-fused kernels for them. Full
+# comparison in AGENTS.md.
 #
 # --parallel 1 (llama-server's default): the whole pool to one conversation;
 # a second client queues instead of halving both streams (the strata-batch
 # lesson, docs/strata-batching.md). No DSpark drafter: mainline support is
+# still an open PR (ggml-org/llama.cpp#32218).
+#
 # Sampling follows the model card (temp 1.0, top-p 1.0, top-k off, min-p 0) —
 # these are ALSO embedded in the GGUF (general.sampling.*), restated here so
 # the run line is self-describing. Reasoning effort is per-request via
@@ -168,7 +182,7 @@ in
           --ctx-size 393216 \
           --flash-attn on \
           --cache-type-k q8_0 --cache-type-v q8_0 \
-          --batch-size 1024 --ubatch-size 1024 \
+          --batch-size 1024 --ubatch-size 512 \
           --parallel 1 \
           --slots \
           --host 127.0.0.1 --port ${toString port} \
