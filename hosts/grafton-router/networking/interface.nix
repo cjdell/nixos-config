@@ -125,38 +125,56 @@ in
             # installing the route must not depend on the gateway answering.
             GatewayOnLink = true;
           }
+          # The public hackspace /48 (2001:8b0:1d14::/48) is deliberately
+          # NOT routed through the VM any more (removed 2026-11-23 — it was
+          # added 2026-11-19; the whole story is in docs/leighhack-tailscale.md).
+          # It is public IPv6 owned by the hackspace, their nginx on
+          # 2001:8b0:1d14:225::1 is reachable from the internet, and they now
+          # keep a standing firewall allow for the Grafton IPv6 ranges, so
+          # every house v6 request for it should just leave over Zen.
+          # Measured that same day, house client -> internet path: 302 in
+          # ~0.13 s steady, frigate.int vhost 200 in ~0.07 s; via the tunnel:
+          # the same request took ~1 s of TCP retransmissions while the
+          # tailnet path was settling, and during a gw<->VM flap LAN clients
+          # saw SYN-never-answered ([UNREPLIED] storms in conntrack) for
+          # minutes while the V4 tunnel stayed healthy — and browsers refuse
+          # Happy-Eyeballs fallback on a TCP session that CONNECTS but whose
+          # data stalls, which is the "hangs forever unless I force IPv4"
+          # symptom. The tunnel detour bought nothing except that failure
+          # mode; the 2026-11-19 rationale (their hand-written WAN ACL row
+          # breaks) is superseded by the standing allow policy.
+          # NOTE two things this leaves behind:
+          #  * grafton-tailnet MEMBERS reaching the /48 in v6 over this box
+          #    relied on this route + the hackspace-v6-nat masquerade
+          #    (services/tailscale.nix, networking/firewall.nix). Their v4
+          #    (.int via 10.3.0.0/16, kept) is unaffected; if member v6 ever
+          #    matters again, do not restore this main-table route — re-add
+          #    it scoped to iif tailscale0 via an nft meta mark + a policy
+          #    rule, so house traffic stays on the clean internet path.
+          #  * the mark-hackspace-replies chain (firewall.nix) and table 100
+          #    (pppoe.nix) stay: their gateway still SOURCES monitoring
+          #    traffic at us from 225::1 over the WAN, and those sessions
+          #    must keep their replies on the same leg.
           {
-            # The IPv6 counterparts, added 2026-11-19: every
-            # *.int.leighhack.org name answers with the two hackspace AAAAs
-            # (AAISP + ULA), and without these routes each one left the house
-            # over Zen and arrived at the hackspace door as a WAN client,
-            # admitted only by a hand-written ACL row pinned to a prefix the
-            # hackspace has to keep chasing — when that row broke on
-            # 2026-11-19, 794 requests got 403 while every reachability layer
-            # stayed green (docs/leighhack-tailscale.md; note it blamed a Zen
-            # re-delegation — it had NOT happened, which is exactly why the
-            # tailnet path with its own stable source is the fix).
-            # Both /48s are advertised by gw-1 and live in the VM's tailscale
-            # routing table (verified: `ip -6 route show table all` ->
-            # table 52; the unconditional `from all lookup 52` rule serves
-            # forwarded traffic too).
-            #
-            # The gateway is the VM's link-local: derived by EUI-64 from the
-            # tap MAC 02:00:00:00:00:15 that
-            # virtual-machines/grafton-hackspace-client.nix pins, so it is as
-            # stable as that MAC (change one, change the other). It must carry
-            # NO %scope suffix — [Route] Gateway= is inet_pton(3)-format and
-            # systemd-networkd (v262) rejects "fe80::…%lan" outright; the
-            # link-local next-hop is implicitly bound to the lan link this
-            # .network file configures.
-            # The v6 source is the VM's tailnet address by the time it
-            # reaches the hackspace — masqueraded in that file, NOT here;
-            # networking/firewall.nix says why the router cannot do it.
-            Destination = "${net.HACKSPACE_IPV6_SUBNET}";
-            Gateway = "fe80::ff:fe00:15";
-            GatewayOnLink = true;
-          }
-          {
+            # The tailnet-only ULA counterpart, added 2026-11-19, STILL
+            # routed via the VM: fd99:dead:beef::/48 is not publicly
+            # routable — it is the sole v6 answer for some *.int hosts —
+            # so those really do need the tailnet. The gateway is the VM's
+            # link-local: derived by EUI-64 from the tap MAC
+            # 02:00:00:00:00:15 that
+            # virtual-machines/grafton-hackspace-client.nix pins, so it is
+            # as stable as that MAC (change one, change the other). It must
+            # carry NO %scope suffix — [Route] Gateway= is inet_pton(3)
+            # format and systemd-networkd (v262) rejects "fe80::…%lan"
+            # outright; the link-local next-hop is implicitly bound to the
+            # lan link this .network file configures. (Corrections from
+            # 2026-11-23: the claim here and in services/hackspace-tunnel.nix
+            # that forwarded v6 arrives masqueraded as the VM's fd7a tailnet
+            # address was WRONG even before the /48 change — the VM's
+            # masquerade rule sits at "counter packets 0" — forwarded house
+            # traffic crossed gw with the LAN client's own 2a02:… source,
+            # which is what their access logs saw, and what their allow
+            # policy now admits.)
             Destination = "${net.HACKSPACE_ULA_SUBNET}";
             Gateway = "fe80::ff:fe00:15";
             GatewayOnLink = true;

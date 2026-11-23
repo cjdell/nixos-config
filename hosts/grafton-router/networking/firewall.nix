@@ -267,9 +267,17 @@ in
 
         # ----------------------------------------------------------------------------
         # policy-routing marks — hackspace-session symmetry (added 2026-11-19)
-        # The v6 route 2001:8b0:1d14::/48 -> VM (networking/interface.nix) keys
-        # on DESTINATION, but the hackspace also SOURCES from that same /48 —
-        # their gateway 2001:8b0:1d14:225::1 pings/monitors us from it, over the
+        # (2026-11-23: the destination route 2001:8b0:1d14::/48 -> VM is GONE
+        # from main — see networking/interface.nix — so the original hazard
+        # below, replies following a VM route into the tailnet, no longer
+        # exists for it. The chain stays anyway: it is still the guarantee
+        # that hackspace-SOURCED sessions keep replies on the leg they
+        # arrived on even if anything ever re-adds a route into that /48,
+        # and their gateway 225::1 keeps SOURCING monitoring at us from the
+        # prefix.)
+        # The v6 route keyed on DESTINATION, but the hackspace also SOURCES
+        # from that same /48 — their gateway 2001:8b0:1d14:225::1 pings/
+        # monitors us from it, over the
         # internet (their tailnet has no v6 path into the house, so v6 sessions
         # from them can ONLY arrive on the WAN). A destination lookup on our
         # REPLY to one of those fresh requests hits the VM route anyway, and
@@ -289,7 +297,11 @@ in
         #     unreachable across the internet so its replies always belong on
         #     the tailnet, and our own tailnet members' outbound-to-hackspace
         #     sessions (iif tailscale0, SNATed by hackspace-v6-nat below) must
-        #     reply via the VM exactly like their request.
+        #     reply via the VM exactly like their request. NB since 2026-11-23
+        #     member traffic to the PUBLIC /48 no longer reaches the VM (main
+        #     routes it out the WAN), so that pairing is now about the ULA;
+        #     if member-v6-to-the-door is ever wanted back, scope a route to
+        #     iif tailscale0 per the note in networking/interface.nix.
         # `ct direction original` matters: WITHOUT it, reply-direction packets
         # of an OUTBOUND-to-door session also carry ip6 saddr hackspace and
         # would get stamped — and their way-back packets would then be fwmarked

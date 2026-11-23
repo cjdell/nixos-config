@@ -1698,15 +1698,22 @@ Full write-up: **`docs/leighhack-tailscale.md`**. Diagnose with
 `sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh` (walks route → VM →
 tailscale session → tunnel → DNS and names the failing layer). `hackspace-tunnel-check.service`
 probes it every 2 min and pushes to the phone via `notifications.gateway`.
-Since 2026-11-19 there is also an **IPv6** path through this VM: `networking/interface.nix`
-routes the hackspace's `2001:8b0:1d14::/48` + `fd99:dead:beef::/48` via the VM's
-link-local, the VM masquerades only that v6 to its tailnet address (v4 stays
-source-preserving on purpose), and the health check has a 4th layer that reports
-HTTP 403 on `*.int` as "our source is not in their ACL" — its own failure
-class, learned the hard way when the hackspace's ACL row for our v6 broke and
-794 requests died while every reachability layer stayed green (the delegation
-had NOT changed — `docs/leighhack-tailscale.md` before you re-pin anything
-pinned to it).
+Since 2026-11-19 there is an **IPv6** path through this VM — as of
+2026-11-23 only for the **tailnet-only ULA**: `networking/interface.nix` routes
+`fd99:dead:beef::/48` via the VM's link-local, while the hackspace's **public**
+`2001:8b0:1d14::/48` now goes straight over Zen. Their nginx `…225::1` is
+publicly routable and leigh keeps a standing firewall allow for the Grafton
+IPv6 ranges; the via-VM route for the /48 was **deleted** because `gw`↔VM
+tunnel flaps stall *established* TCP (SYN-ACK fine, data silent) — the one
+failure browsers never fall back from: that was the 2026-11-22/23 "Pixel hangs,
+then Mac hangs unless IPv4 forced" saga, and the old claim that forwarded v6
+was masqueraded to the VM's fd7a address was false (masq rule counter 0 — LAN
+clients crossed the tailnet with their own `2a02:…` source). The health check's
+v6 layers now report HTTP 403 on `*.int` as "**their** allow row broke", and a
+reappearing `ip -6 route show 2001:8b0:1d14::/48` means someone re-attached
+the probe to the tunnel's flaps. Both directions of the history (the 794×403
+of 2026-11-19 and this) are in `docs/leighhack-tailscale.md` — read it before
+re-routing or re-pinning anything against that /48.
 
 The 2026-10 outage, in one paragraph: the VM had **no disk**, so
 `/var/lib/tailscale` was RAM-only and every restart had to re-register; nixpkgs'

@@ -680,6 +680,66 @@ itself (not just the door) is their policy; if pings to `gw` ever go dark
 while `switch.int` stays 302, that is their row to widen, not our route to
 fix.
 
+## 2026-11-23: the /48 comes off the tunnel — flaps beat ACL-chasing
+
+Two days of swapped symptoms ended this design change. Friday the Pixel hung on
+`frigate.int` and `id.leighhack.org` while the Mac was fine; overnight that
+**flipped** — phone fine, Mac now hanging on `id.leighhack.org` unless forced to
+IPv4. Neither device was the variable; the tailnet path was. The watchers
+(`conntrack -E`) caught the failure class overnight: LAN-client SYNs to
+`2001:8b0:1d14:225::1` sitting `[UNREPLIED]` for a full 120 s while the v4
+tunnel stayed healthy. Reproduced from a netns client on the lan bridge: the
+path was also *degrading* — SYN-ACK fine (mss 1220, i.e. genuinely through the
+tailnet), then the first data packet retransmitted ~3 times over a second
+before the connection came alive, and the router's own session to the same
+address sailed through the same minute. That combination — TCP **connects**,
+data stalls — is exactly the one failure mode browsers refuse to fall back
+from: Happy Eyeballs gives up on failed connections, not established-but-
+silent ones, which is the whole "hangs forever unless I force IPv4" experience.
+`gw` is the VM's only peer with a live direct WireGuard session; when it flaps
+to DERP or rebinds, established TCP through it stalls rather than breaks.
+
+The question was what the tunnel was actually buying for the public /48 —
+`2001:8b0:1d14:225::1` is their **internet** nginx, publicly routable, and
+this house has been dialled in on the other side's firewall: leigh keeps a
+standing allow policy for the Grafton IPv6 ranges. Measured with the /48 forced
+over Zen (client-sourced and router-sourced both, sources `2a02:8b0…49::/64`
+and the pppoe link /64): `id.leighhack.org` 302 in ~0.13 s **steady**, the
+`frigate.int` vhost 200 in ~0.07 s, the health probe
+`network-info.int.leighhack.org/healthz` 200 in ~0.09 s, zero retransmit
+storms. The detour bought only the flap exposure. So the 2026-11-19 decision
+that built this section (their hand-written WAN ACL row breaks → ride the
+tailnet with its "stable" source) is **superseded**: the allow policy is now
+the contract, and the internet path is the primary for the public /48.
+
+What changed (`networking/interface.nix`): the `2001:8b0:1d14::/48 via
+fe80::ff:fe00:15` route is **deleted**. Kept on the tunnel: v4
+`10.3.0.0/16` (frigate's A record, `.int` DNS at 10.3.1.1, everything
+name-blind), the `fd99:dead:beef::/48` ULA (not routable anywhere else —
+still the sole v6 answer for some `*.int` hosts), the `mark-hackspace-replies`
+chain (their gateway still SOURCES monitoring at us from 225::1 over the WAN —
+`firewall.nix`, `pppoe.nix`), and AdGuard's `[/int.leighhack.org/]` forward.
+Consequences documented in the files: grafton-tailnet **members'** v6 to the
+/48 no longer rides the VM (their v4 `.int` is untouched) — if member v6 ever
+matters, re-add the route scoped to `iif tailscale0` via a mark, not in main;
+and the health check's two IPv6 `where=` strings now teach the new failure
+classes — a 403 on the door means **their allow row broke**, and a stray
+`ip -6 route show 2001:8b0:1d14::/48` re-attaches the probe to the tunnel and
+its flaps.
+
+One correction, true before this change as well: everything from interface.nix
+and the health check that says forwarded v6 "arrives masqueraded as the VM's
+fd7a tailnet address" was **wrong** — that masquerade rule sat at `counter
+packets 0` inside the VM. Forwarded house traffic crossed the tailnet with the
+LAN client's own `2a02:…` source, which is what their access log saw, and what
+their allow policy admits. (The only v6 that ever did masquerade is our own
+tailnet members' `fd7a`, SNATed to LAN space by `hackspace-v6-nat` on the
+router before the VM ever sees it — see the 2026-11-19 section above.)
+
+Verify after the switch: `ip -6 route show 2001:8b0:1d14::/48` empty; from the
+Mac (browser, no forcing) `id.leighhack.org` opens; `journalctl -u
+hackspace-tunnel-check -n 20` green; on the phone both names still open.
+
 ## Related
 
 * `hosts/grafton-router/virtual-machines/grafton-hackspace-client.nix` — the VM,

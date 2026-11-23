@@ -20,7 +20,11 @@
     # WAN-only routing table for the mark set by `mark-hackspace-replies`
     # (networking/firewall.nix) + the FwMark rule on 100-lan
     # (networking/interface.nix): answers to hackspace-initiated v6 flows must
-    # leave via Zen even though the VM route owns 2001:8b0:1d14::/48 in main.
+    # leave via Zen. Since 2026-11-23 main no longer carries the VM route for
+    # 2001:8b0:1d14::/48 (networking/interface.nix), so for NEW outbound
+    # sessions this table is a no-op; it stays because their gateway still
+    # SOURCES monitoring traffic at us from 225::1 over the WAN, and because
+    # the table must be in place the day anything ever re-adds a /48 route.
     routes = [
       {
         # ::/0 spelled explicitly — the mark chain in networking/firewall.nix
