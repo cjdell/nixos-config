@@ -1117,6 +1117,15 @@ in
     after = [ "network.target" ];
     wants = [ "strata.service" ];
     environment.SWAP_CONFIG = toString swapConfig;
+    # Liveness completions (answer budget <= 4 tokens AND <= 1024 chars of
+    # message text) are answered by the LIVE engine instead of reloading a
+    # model for one token; a swap waits up to 180 s for an in-flight request to
+    # finish, then answers a 409 "busy" without stopping anything. Both are
+    # defaults in ./strata-swap.py — kept here so the behaviour is visible
+    # where the unit is declared.
+    environment.SWAP_PROBE_MAX_TOKENS = "4";
+    environment.SWAP_PROBE_MAX_CHARS = "1024";
+    environment.SWAP_DRAIN_SECS = "180";
     path = [
       pkgs.coreutils
       pkgs.rocmPackages.amdsmi

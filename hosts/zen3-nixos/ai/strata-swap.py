@@ -38,18 +38,28 @@ ever moves WITHIN the llm lease):
   * It NEVER starts an engine onto a silent card: with nothing live the shim
     503s ("gpu-mode llm") — a stray request must not grab the VRAM mid-game,
     the same invariant gpu-mode exists for.
-  * Mismatch -> stop the live unit, wait until amd-smi reports the target's
-    vram_min_mib free, start the target unit, wait until its /v1/status says
-    loaded, then forward the buffered request. One swap at a time (lock);
-    requests for the other model queue behind it, requests naming the live
-    model never touch the lock.
+  * Mismatch -> WAIT for the live engine to finish the request it is answering
+    (activity.in_flight, up to SWAP_DRAIN_SECS), then stop the live unit, wait
+    until amd-smi reports the target's vram_min_mib free, start the target
+    unit, wait until its /v1/status says loaded, then forward the buffered
+    request. If the turn is still running at the deadline nothing is stopped:
+    the request gets a 409 "busy" and the running generation survives. One
+    swap at a time (lock); requests for the other model queue behind it,
+    requests naming the live model never touch the lock.
+  * A liveness/readiness completion — answer budget <= SWAP_PROBE_MAX_TOKENS
+    AND prompt text <= SWAP_PROBE_MAX_CHARS — is answered by the LIVE engine
+    even when it names another model. "Are you still there?" gets a nod; it
+    never pays a 30-90 s model reload (and never stops someone else's turn).
   * A swap whose engine fails to come up RESTARTS the unit it had stopped
     before answering 503 — a broken second model must never strand the LLM.
-  * A swap interrupts whatever the old engine was streaming, exactly like
-    `gpu-mode sd` does; it is logged to the journal with the request path.
+  * No swap ever kills a running generation any more (2026-11-23: two clients
+    naming different models turned every turn into a reload and every
+    reload into a killed request). Decisions are logged to the journal.
 
 Env: SWAP_CONFIG = the JSON table (written by ./strata.nix):
   {"models": [{"id","unit","port","vram_min_mib"}...], "default_port": N}
+  SWAP_PROBE_MAX_TOKENS (default 4), SWAP_PROBE_MAX_CHARS (default 1024),
+  SWAP_DRAIN_SECS (default 180, 0 = never wait).
 """
 
 import http.client
@@ -64,6 +74,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG_PATH = os.environ.get("SWAP_CONFIG", "/etc/strata-swap.json")
 LISTEN_PORT = int(os.environ.get("SWAP_LISTEN_PORT", "8080"))
+
+# A health/readiness completion must never cost a model swap: both of these
+# must hold (answer budget and total message text) for a request to be treated
+# as a probe and answered by the live engine. Anything with a real budget or
+# real content takes the normal swap path.
+PROBE_MAX_TOKENS = int(os.environ.get("SWAP_PROBE_MAX_TOKENS", "4"))
+PROBE_MAX_CHARS = int(os.environ.get("SWAP_PROBE_MAX_CHARS", "1024"))
+# Seconds to let the live engine finish an in-flight request before a swap.
+# A swap with one running kills it mid-stream; at the deadline we answer 503
+# and leave the running turn alone. 0 disables the wait.
+DRAIN_SECS = int(os.environ.get("SWAP_DRAIN_SECS", "180"))
 
 # Endpoints whose JSON body carries the OpenAI-style `model` field.
 MODEL_BODY_PATHS = {
@@ -141,6 +162,44 @@ def free_vram_mib():
         return None  # like gpu-mode.sh: skip the VRAM gate if amd-smi cannot answer
 
 
+def _is_probe(body_bytes):
+    """True for a liveness/readiness completion: tiny prompt AND tiny answer.
+
+    Such requests must never cost a swap (a health check naming the "other"
+    model would otherwise stop the live engine and reload a tens-of-GB model
+    to emit one token). serve's /v1/chat/completions answers a foreign `model`
+    name with whatever is loaded, so forwarding it to the live engine IS the
+    nod. Deliberately conservative: anything with real content, tools, or a
+    real answer budget is not a probe and takes the normal swap path."""
+    if not body_bytes:
+        return False
+    try:
+        b = json.loads(body_bytes.decode("utf-8", "replace"))
+    except Exception:
+        return False
+    mt = b.get("max_tokens", b.get("max_completion_tokens"))
+    if not isinstance(mt, int) or isinstance(mt, bool) or mt > PROBE_MAX_TOKENS:
+        return False
+    if b.get("tools"):
+        return False
+    msgs = b.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return False
+    chars = 0
+    for m in msgs:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, str):
+            chars += len(c)
+        elif isinstance(c, list):
+            for p in c:
+                if not isinstance(p, dict) or p.get("type", "text") != "text":
+                    return False  # images/other parts: not a probe
+                chars += len(p.get("text") or "")
+        elif c is not None:
+            return False  # content parts we do not understand: not a probe
+    return chars <= PROBE_MAX_CHARS
+
+
 def systemctl(action, unit):
     subprocess.run(["systemctl", action, unit], check=True, capture_output=True, timeout=300)
 
@@ -178,6 +237,31 @@ def do_swap(target_id):
     if cur_id == target_id:
         return True  # someone else already made the swap while we queued
     cur = BY_ID[cur_id]
+    # Never pull the model out from under a running request: the other client's
+    # turn would be killed mid-stream (which is what made the card feel like it
+    # "kept restarting"). Wait for it to drain; if it is still busy at the
+    # deadline, answer 409 and leave it alone — a single-slot engine queues,
+    # it does not cancel.
+    deadline = time.monotonic() + DRAIN_SECS
+    waited = False
+    while time.monotonic() < deadline:
+        st = status_of(cur["port"])
+        busy = int(((st or {}).get("activity") or {}).get("in_flight", 0) or 0)
+        if busy <= 0:
+            break
+        if not waited:
+            log(f"WAIT {cur_id}: {busy} request(s) in flight; swapping to {target_id} "
+                f"when it finishes (max {DRAIN_SECS}s)")
+            waited = True
+        time.sleep(2)
+    else:
+        if DRAIN_SECS > 0:
+            st = status_of(cur["port"])
+            busy = int(((st or {}).get("activity") or {}).get("in_flight", 0) or 0)
+            if busy > 0:
+                log(f"BUSY {cur_id}: {busy} request(s) still in flight after {DRAIN_SECS}s; "
+                    f"not swapping to {target_id}")
+                return "busy"
     log(f"SWAP {cur_id} -> {target_id} (unit {target['unit']})")
     t0 = time.monotonic()
     try:
@@ -227,6 +311,15 @@ def route(target_id):
             ok = do_swap(target_id)
         if ok is None:
             return None, {"error": {"type": "unavailable", "message": "the card went idle mid-swap"}}
+        if ok == "busy":
+            return None, {
+                "_status": 409,
+                "error": {
+                    "type": "conflict",
+                    "message": f"{BY_ID[live]['id']} is still answering a request; retry to switch to "
+                    f"{target_id} when it finishes (nothing was stopped)",
+                }
+            }
         if not ok:
             return None, {
                 "error": {
@@ -348,6 +441,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": {"type": "invalid_request", "message": "strata-swap: body too large"}})
         body = self.rfile.read(n) if n else b""
         target = self._pick_target(body) if path in MODEL_BODY_PATHS else None
+        if target is not None and _is_probe(body):
+            # "Are you still there?" is answered by whatever is live: a reload
+            # (tens of GB, tens of seconds) to emit one token is pure waste, and
+            # it would stop another client's turn. serve answers a foreign
+            # `model` name with the loaded engine — this is the nod.
+            live_now = live_model()
+            if live_now is not None and live_now != target:
+                log(f"NOD {target} -> {live_now} (probe: {n} body bytes; no swap)")
+            target = None
         if target is None:
             live = live_model()
             if live is None:
@@ -356,7 +458,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             port, err = route(target)
         if err:
-            return self._json(503, err)
+            return self._json(err.pop("_status", 503), err)
         self.upstream_port = port
         return self._proxy("POST", body)
 

@@ -1524,7 +1524,9 @@ almost entirely fixed cost.
   it zero code):
   `GET /v1/models` advertises **every selectable** id (the non-live ones
   listed `"unloaded"` — serve's own loads-on-use form); a request whose
-  `model` **exactly** names a non-live engine triggers a SWAP — stop live
+  `model` **exactly** names a non-live engine triggers a SWAP — **wait for the
+  live engine's `activity.in_flight` to drain** (up to `SWAP_DRAIN_SECS`,
+  default 180 s; still busy → 409 `busy`, **nothing stopped**) → stop live
   unit → wait
   `amd-smi` free VRAM (`vram_min_mib`: flash-next + coder 30000 / q36 25000;
   NOTE the
@@ -1537,7 +1539,13 @@ almost entirely fixed cost.
   the shim **never starts an engine** (503 `gpu-mode llm`) — the lease
   invariant stays gpu-mode's. Unknown/absent `model` = untouched pass-through
   to whatever is live, which is what keeps Recallium's stale DB row and every
-  name-blind client on the live model. Consequences to remember: the first
+  name-blind client on the live model. A **liveness completion** (answer
+  budget ≤ `SWAP_PROBE_MAX_TOKENS`=4 **and** ≤ `SWAP_PROBE_MAX_CHARS`=1024
+  chars of message text, no tools) is likewise forwarded to the live engine
+  even when it names another model — "are you still there" gets a *nod*, never
+  a reload (2026-11-23: two clients naming different models had been turning
+  every turn into a ~30 s reload and every reload into a SIGTERM'd request;
+  the drain + nod are the fix, both logged as `WAIT`/`BUSY`/`NOD`). Consequences to remember: the first
   request after a name change pays the model load (measured 2026-11-18, warm
   page cache: flash→q36 26 s, q36→flash 45 s; cold cache = minutes — the shim
   waits `loaded:true` up to 25 min); a swap interrupts
