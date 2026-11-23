@@ -43,24 +43,41 @@
 # scales — SILENT garbage, ppl ~130, no load error). ConditionPathExists
 # keeps the unit down until the fetch ran, as everywhere else here.
 #
-# VRAM: "the card, fully, without overflow" — the arithmetic of the line
-# below, against this box's 32624 MiB (headless R9700, console is the RX 580):
+# VRAM: "the card, fully, without overflow" — measured on this box's 32624 MiB
+# (headless R9700, console is the RX 580), 2026-11-23:
 #
-#   weights (UD-Q4_K_XL)      17630 MiB   all 48 visits GPU-resident (-ngl 99;
+#   weights (UD-Q4_K_XL)      16800 MiB   all 48 visits GPU-resident (-ngl 99;
 #                                         17.6 GB is why Q4_K_XL, not Q8_K_XL:
 #                                         Q8's 22.9 GB + KV cannot fit 512K)
-#   KV @ 524288 ctx, q8_0      ~9400 MiB   8 full-history cache layers x 2 tensors
-#                                         x 8 kv-heads x 128 dim x ~1.03 B;
-#                                         windowed layers: ~90 MiB, constant
-#   mmproj F16 (vision)          ~660 MiB
-#   compute graphs/ubatch       ~3000 MiB  budget for -b 4096 -ub 1024 FA graphs
-#                                         + Vulkan alloc slack
+#   KV @ 524288 ctx, q8_0       8746 MiB   8 full-history CACHE layers (physical
+#                                         5, 11, 17, 23 — the loop makes 11 and
+#                                         17 into 3 cache layers each) x K,V x
+#                                         8 kv-heads x 128 x 1.0625 B q8_0 =
+#                                         17408 B/token; + 42.5 MiB fixed for
+#                                         the 20 windowed (1024-cell) layers
+#   mmproj F16 (vision)          640 MiB
+#   graphs/scratch/alloc slack  ~3500 MiB  -b 4096 -ub 1024 FA graphs + driver
 #   --------------------------------------------------------------
-#   fully-loaded worst case     ~30.7 GiB of 31.4 — nothing sits idle, no GTT
+#   measured at -c 524288     29717 MiB used, 2907 free, 3278 GTT  (X)
 #
-# 524288 is deliberately NOT the model's 1M native window: 1M KV is ~18.7 GB
-# and would overflow. 512K doubles the 256K ask with the KV pool fully
-# committed, and lands inside the model card's own MRCR 256K-512K eval band.
+# 524288 is deliberately NOT the model's 1M native window, and the reason is
+# NOT "KV is 18.7 GB" (it is 17450 MiB at 1M): the binding limit is that the
+# card has no room for the marginal KV, so the driver pushes it into GTT (host
+# memory over PCIe). Measured by starting the same line at bigger -c:
+#
+#   -c 524288  29717 MiB used, 2907 free, GTT  3278 MiB   <- KV in VRAM
+#   -c 655360  32562 used,  62 free,   GTT  4145 MiB   +0.9 GB spilled
+#   -c 786432  32533 used,  91 free,   GTT  7886 MiB   +4.6 GB spilled
+#   -c 917504  32564 used,  60 free,   GTT 11568 MiB   +8.3 GB spilled
+#
+# All of those LOAD, but past ~600K the pool is host-resident and attention
+# would read it at PCIe speed (~30 GB/s vs the card's 640) — 1.8x the context
+# for ~20x the cost per attention pass is a bad trade. So 512K (which leaves
+# ~2.9 GB of slack, the insurance against that spill) is the practical ceiling;
+# ~576-640K fits but spends all the slack. UD-IQ4_XS is 1.8 GiB smaller and
+# would buy another ~108K tokens of VRAM-resident context (17 KiB/token), which
+# is the only reason to prefer it — it measured identical in speed (AGENTS.md).
+# 512K also lands inside the model card's own MRCR 256K-512K eval band.
 # --parallel 1 (llama-server's default): the whole pool to one conversation;
 # a second client queues instead of halving both streams (the strata-batch
 # lesson, docs/strata-batching.md). No DSpark drafter: mainline support is
