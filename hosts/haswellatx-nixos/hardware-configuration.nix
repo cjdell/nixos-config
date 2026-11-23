@@ -27,16 +27,56 @@
     "usb_storage"
     "sd_mod"
   ];
-  boot.initrd.kernelModules = [ "amdgpu" ];
-  boot.kernelModules = [ "kvm-intel" ];
+  boot.kernelModules = [
+    "kvm-intel"
+    # nvidia.nix gates its own boot.kernelModules on services.xserver.enable,
+    # which is false on this box (SDDM on the iGPU console, no X server), so
+    # load the driver's kernel modules explicitly for the GTX 970.
+    "nvidia"
+    "nvidia_uvm"
+  ];
   boot.extraModulePackages = [ ];
 
-  boot.kernelParams = [
-    "radeon.cik_support=0"
-    "amdgpu.cik_support=1"
-  ];
+  services.xserver.videoDrivers = [ "nvidia" ];
 
-  services.xserver.videoDrivers = [ "amdgpu" ];
+  # The NVIDIA cards are compute-only here (console = the iGPU). Maxwell
+  # (GM204) fell out of the main NVIDIA branches with 590 — 580 is the last
+  # branch supporting it (and Pascal), and nixpkgs keeps it as an LTSB legacy
+  # branch (until Aug 2028), so pin it as long as the GTX 970 lives here:
+  # hardware.nvidia.package is also what ./folding-heater.nix takes the
+  # OpenCL ICD out of for the GPU folding slots.
+  hardware.nvidia = {
+    # patchelf 0.19.2 (NixOS/patchelf#674, NixOS/nixpkgs#576412 — same pin as
+    # here, 26.11.20261017.09063bd) breaks the nvidia-x11 builder's single
+    # `patchelf --interpreter … --set-rpath …` call: the result has
+    # overlapping LOAD segments with .dynamic mapped read-only, and ld.so
+    # dies with SEGV_ACCERR in dl_main before loading any library —
+    # `nvidia-smi` -> Segmentation fault, core dumped, on every call. The
+    # kernel module and libraries are unaffected (CUDA/OpenCL work fine).
+    # Work around by re-patching the bin/ programs from the pristine
+    # origBin/ copies in the order that works: rpath first, interpreter
+    # second (as verified in the issue). Drop this once nixpkgs merges the
+    # upstream fix.
+    package = (config.boot.kernelPackages.nvidiaPackages.legacy_580).overrideAttrs (
+      final: prev: {
+        postInstall = ''
+          for b in nvidia-smi nvidia-cuda-mps-control nvidia-cuda-mps-server nvidia-debugdump nvidia-powerd; do
+            if [ -e "$bin/origBin/$b" ]; then
+              cp "$bin/origBin/$b" "$bin/bin/$b"
+              chmod +w "$bin/bin/$b"
+              patchelf --set-rpath "$out/lib:$libPath" "$bin/bin/$b"
+              patchelf --interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" "$bin/bin/$b"
+            fi
+          done
+        '';
+      }
+    );
+    # Open kernel modules support Turing and newer only.
+    open = false;
+    # nvidia-drm.modeset=1 — needed for Plasma Wayland / GBM.
+    modesetting.enable = true;
+    nvidiaSettings = true;
+  };
 
   hardware.graphics =
     let
@@ -49,8 +89,6 @@
         pkgs.intel-media-driver # LIBVA_DRIVER_NAME=iHD
         intel-vaapi-driver # LIBVA_DRIVER_NAME=i965 (older but works better for Firefox/Chromium)
         pkgs.libvdpau-va-gl
-        # pkgs.ocl-icd
-        pkgs.mesa.opencl
       ];
     };
 
