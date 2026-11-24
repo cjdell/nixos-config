@@ -1,0 +1,43 @@
+# gpu-probe CORE BISECT — one knob per step, across reboots, on the repro.
+#
+# Prerequisite: the fault must already reproduce on demand. On hp-z240 it does:
+# FahCore_28 (OpenMM 8.3.1) on a real GPU work unit, run from scratch inside the
+# deployed unit's own environment with the client stopped, reaches
+#     Running tests -> All tests passed -> Checkpoint completed at step 0
+# and then, ~20 s after the core starts, the card is off the bus
+# (Xid 79 + 154, preceded only by *correctable* AER — the retries of a device that
+# stopped answering, not a link-integrity failure).
+#
+# That is the positive control (step 1). It is FIRST on purpose: if it does not
+# kill the card, every PASS below it means nothing, because the harness or the
+# card's mood changed rather than the knob. Read step 1 before believing step 7.
+#
+# Every step pins the SAME work unit (the one that folded 1 125 000 steps in
+# production and then killed the card both at 02:24 and under this repro), so the
+# only thing that varies between rows is the named knob. Inlined rather than a
+# `WU=` variable: the step reader has no concept of one, and a tab-less line in
+# this file would be read as a step.
+#
+# A kill needs a reboot to reclaim the bus, and the ladder will NOT reboot the box on
+# its own (see README: --reboot-on-kill + GPU_PROBE_I_CONSENT_TO_REBOOT=1). So run it in
+# the foreground and reboot by hand between the rows that kill:
+#   GPU_PROBE_STATE_DIR=~/.local/state/gpu-probe-core \
+#     ./result/bin/gpu-probe-ladder --steps corebisect --power-limit 120
+# It halts after a kill, and re-running resumes at the next step.
+#
+# WARNING: rows 4, 6 and 7 each killed the card on hp-z240 within 16-71 s, and row 1 —
+# the positive control — has never validly run there (its first attempt started on a card
+# that was already off the bus, which the ladder now scores NO-GPU-ON-BUS instead of
+# counting it). Rows 2, 3 and 5 never ran at all until the --setenv= parser fix.
+# Running this table is a decision to crash the GPU repeatedly, so it needs the
+# operator's explicit go-ahead every time, with the console reachable — and a saved
+# OpenMM work unit, because without one the control row has no input to run.
+#
+# name<TAB>seconds<TAB>command<TAB>hypothesis<TAB>requires
+ctrl_scratch	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --from-scratch --cpu-load 8 --seconds 360 --attempts 1	POSITIVE CONTROL: no knob at all. Must reproduce (Xid 79). If it does not, stop and re-read this file — the fault has gone quiet and no PASS below it means anything	gpu-probe-fahcore-repro
+eager_modules	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --from-scratch --cpu-load 8 --seconds 360 --attempts 1 --setenv CUDA_MODULE_LOADING=EAGER	CUDA 13 loads cubins lazily. If the fault lives in the first lazy module load of the integration kernel, eager loading moves it into context creation and usually out of the crash path	gpu-probe-fahcore-repro
+launch_blocking	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --from-scratch --cpu-load 8 --seconds 360 --attempts 1 --setenv CUDA_LAUNCH_BLOCKING=1	Serialises every launch. A fault in OpenMM's asynchronous queue/allocator behaviour cannot survive it; if it still dies, the async hypothesis is dead and the fault is in a kernel or in the bus	gpu-probe-fahcore-repro
+core27_scratch	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --core 27 --from-scratch --cpu-load 8 --seconds 360 --attempts 1	OpenMM 8.2.1 instead of 8.3.1 (both already on disk, no download): different kernel set, different CUDA toolkit build. If 27 folds and 28 dies, the core is the fault and the fix is to pin its version	gpu-probe-fahcore-repro
+opencl_scratch	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --from-scratch --cpu-load 8 --seconds 360 --attempts 1 --platform opencl	Runs the same OpenMM work through the vendor OpenCL ICD instead of the CUDA driver API (implemented as CUDA_VISIBLE_DEVICES=, because the core ignores -gpu-platform on 8.3.1). My own probe already survives on both paths, so this tests OpenMM's kernels on each, not the ICDs	gpu-probe-fahcore-repro
+no_cpuload_scratch	480	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --from-scratch --seconds 360 --attempts 1	Drops the 8 CPU threads. A heater folds with the CPU slot running, which is why ctrl_scratch has it; if ONLY this survives, the trigger is root-complex/PSU loading alongside the GPU, not the GPU work itself	gpu-probe-fahcore-repro
+ctrl_resume	600	gpu-probe-fahcore-repro --work R1ttHC75iUF5IHKDqgS7VLHXYMsAJB9RIcs_Pv7Vzds --cpu-load 8 --seconds 480 --attempts 1	Same WU, same everything, but KEEPING its 1 125 000-step checkpoint — the shape that ran 4.4 h in production. If resume folds and from-scratch dies, the fault is in cold-start-of-integration and the mitigation is never letting a WU restart from zero	gpu-probe-fahcore-repro

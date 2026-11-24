@@ -1,0 +1,16 @@
+# gpu-probe axis ladder — name<TAB>seconds<TAB>command<TAB>hypothesis
+# CUDA-only modes self-skip (TOOLING-SKIP) on hosts without libcuda, so this table
+# runs on AMD boxes too via the ocl_* axes.  $PROBE $STRESS $HASHCAT are resolved by
+# the ladder.  Keep one axis per step: a death must name the axis.
+ctx	22	$PROBE ctx --seconds 17	CUDA context + PTX JIT then idle: no kernels, no copies
+churn	45	$PROBE churn --seconds 40	CUDA tiny launch + host-sync churn: max launch rate, ~zero GPU work
+continuous	45	$PROBE continuous --seconds 40	CUDA long FMA kernels: SM busy, no churn, no PCIe
+dma	45	$PROBE dma --seconds 40	pinned H2D/D2H at link saturation: PCIe + copy engines, SM idle
+vram	45	$PROBE vram --seconds 40	CUDA kernel hammering GDDR5 (>>L2 footprint), no PCIe
+alloc	45	$PROBE alloc --seconds 40	CUDA VRAM allocate + first-touch + free churn: page tables
+ocl_churn	45	$PROBE ocl_churn --seconds 40	same churn through the OpenCL ICD (user-mode runtime axis)
+ocl_fma	45	$PROBE ocl_fma --seconds 40	same ALU work through the OpenCL ICD (user-mode runtime axis)
+cpu	45	$STRESS --cpu 8 --cpu-method matrixprod --timeout 170 --quiet	CPU arithmetic threads alone (heater load, GPU idle)
+mixed	60	$PROBE mixed --seconds 55	CUDA compute kernel + concurrent pinned DMA, CPU idle
+mixed_cpu	60	($STRESS --cpu 8 --cpu-method matrixprod --timeout 236 --quiet &); $PROBE mixed --seconds 55	composite: CUDA compute + PCIe DMA + full CPU load at once
+hashcat	60	$HASHCAT -b -d 1 --quiet	vendor OpenCL compute across every kernel, escalating power

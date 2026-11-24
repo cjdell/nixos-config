@@ -567,6 +567,24 @@
       # Video cleanup toolkit (footage-clean / footage-probe); see footage/README.md.
       packages.x86_64-linux.footage-kit = (mkPkgs nixpkgs).callPackage ./footage/kit.nix { };
 
+      # Selective GPU stress ladder for flaky-GPU / PCIe-link hunts on any host in
+      # the fleet (no CUDA toolkit needed - the kernels are PTX the driver JIT'es):
+      #   nix build .#gpu-probe
+      #   ./result/bin/gpu-probe ocl_fma --seconds 30
+      #   ./result/bin/gpu-probe-arm arm --steps xid79 --link gen3 --power-limit 120
+      # See scripts/gpu-probe/README.md.
+      packages.x86_64-linux.gpu-probe = (mkPkgs nixpkgs).callPackage ./scripts/gpu-probe/package.nix { };
+
+      # Same ladder, plus the industry-standard stress tools (glmark2, clpeak,
+      # memtest_vulkan, stressapptest, memtester, sysbench, y-cruncher, vulkan-tools)
+      # on ITS OWN PATH so they are still reachable after the ladder reboots the box
+      # it is running steps/traditional.tsv on:
+      #   nix build .#gpu-probe-traditional
+      #   ./result/bin/gpu-probe-arm arm --steps traditional --power-limit 120
+      packages.x86_64-linux.gpu-probe-traditional =
+        (mkPkgs nixpkgs).callPackage ./scripts/gpu-probe/package.nix
+          { withTraditional = true; };
+
       nixosConfigurations =
         # Find configs in `hosts` folder and use the folder name as the host name
         (
