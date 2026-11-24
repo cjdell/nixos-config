@@ -15,6 +15,9 @@
 #                         Strata cannot run) — a swap-table engine like the
 #                         Strata partners: no subdomain of its own, it joins
 #                         strata-swap on :8080 via ai.swapEngines
+#   qwen27b.nix         - Qwen3.8-27B dense on llama.cpp HIP (256K ctx, UD-Q5_K_XL,
+#                         --kv-offload for parking ctx in system RAM) — a swap-table
+#                         engine like the Strata partners: no subdomain of its own
 #   sd-server.nix       - Flux-schnell stable-diffusion.cpp server + sd. subdomain
 #                         (started by gpu-mode, NOT at boot)
 #   gpu-mode.nix        - the `gpu-mode` command: lease the R9700 to llm / sd /
@@ -63,6 +66,10 @@
     # The Inkling-2-Mini llama.cpp lane: joins the strata-swap table and the
     # gpu-mode lease list via ai.swapEngines / ai.strataEngineUnits below.
     ./inkling.nix
+    # The Qwen3.8-27B dense lane: 256K ctx, UD-Q5_K_XL, --kv-offload for
+    # parking ctx in system RAM when switching conversations. Also joins the
+    # swap table + gpu-mode lease list.
+    ./qwen27b.nix
     # ./ollama-bridge.nix
     ./recallium.nix
     # SD shares the card with Strata via the gpu-mode lease (./gpu-mode.nix):

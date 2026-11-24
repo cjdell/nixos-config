@@ -84,6 +84,13 @@
 
 let
   strataInkling = pkgs.callPackage ./strata-inkling-package.nix { };
+  # The serve layer with our monitor fixes (./inkling-metrics.diff): prefill
+  # progress per slot + before the first engine line, and the request table's
+  # decode rate (it read "-" for every request on this lane).  A copy of the
+  # share tree with the diff applied and bin/strata-server re-pointed at it -
+  # the engine binary is the package's, so this costs a file copy rather than
+  # a HIP rebuild.  See ./strata-inkling-serve.nix.
+  serve = pkgs.callPackage ./strata-inkling-serve.nix { inherit strataInkling; };
   # The same store-built ROCm 10.0.0 runtime ./strata.nix puts first in
   # LD_LIBRARY_PATH (its header explains why it is not nixpkgs'). Verify a
   # boot with: sudo cat /proc/$(pgrep -f 'strata-inkling --serve')/maps | grep -c rocm10
@@ -95,7 +102,7 @@ let
   drafter = "${models}/mtp.safetensors";
   drafterAlt = "${models}/dspark-Inkling-2-Mini-Q8_0.gguf";
   tokenizerDir = "${models}/tokenizer";
-  share = "${strataInkling}/share/strata";
+  share = "${serve}/share/strata";
   port = 8094; # engine slots: 8091 strata, 8092 coder, 8093 q36, 8094 inkling
   alias = "inkling-2-mini-ud-q4_k_xl";
 
@@ -122,15 +129,19 @@ let
         "--native"
         model
         "--max-context"
-        # 144K, and the ceiling is the PACK, not the setting. Measured on this
-        # card 2026-11-24 (fp16 KV, chunk 2048, one slot resident): a
-        # conversation costs ~0.059 MiB per token and the model + pools sit at
-        # ~21.5 GiB, so 32,624 - 22,060 = 10.5 GiB of K/V is ~178K tokens all
-        # in. 131072 was too tight for an agent session; 163840 leaves under
-        # 1 GiB free and the pools never give it back. The 17.63 GB
-        # UD-Q4_K_XL stays all-resident here - a smaller pack (SQ-10, 10.5 GB)
-        # is what buys 256K.
-        "147456"
+        # 160K.  Measured on this card 2026-11-24 (fp16 KV, chunk 2048,
+        # DSpark off), from live VRAM between two depths - not from an estimate:
+        #   model + arena, no K/V      18,623 MiB
+        #   a 20,394-token chat        22,084 MiB
+        #   119,350 + 20,457 held      29,582 MiB
+        # marginal cost = (29,582-22,084)/(119,350-20,394) = 0.0758 MiB/token
+        # (~78 KB).  So 147456 needs 29,800 MiB and left 2.8 GiB idle - the
+        # "3 GB on the table".  163840 needs 12,419 MiB of K/V -> ~31.0 GiB
+        # used, ~1.6 GiB spare, which is the headroom the prefill scratch
+        # wants.  176K would leave ~600 MiB (too tight); 200K+ needs the
+        # smaller SQ-10 pack (10.5 GB) or parking on, since 32,624 MiB total
+        # minus 18,623 of weights is ~165K tokens of K/V in all.
+        "163840"
         # FP16, NOT FP8 (measured 2026-11-24 on this card, --bench, gen 128).
         # fp8 is a shallow-depth trick and a depth penalty: at a 512-token
         # prompt it is faster (95.1 vs 53.2 t/s) but from ~4K it loses, and by
@@ -223,9 +234,6 @@ in
     }
   ];
 
-  # So gpu-mode stops/protects this unit with the rest of the llm lease.
-  ai.strataEngineUnits = [ "inkling-2-mini" ];
-
   systemd.services."inkling-2-mini" = {
     description = "Strata strata-inkling 0.2.21 server (Inkling-2-Mini UD-Q4_K_XL, DSpark) on the R9700 — strata-swap lane";
     documentation = [
@@ -264,7 +272,7 @@ in
       '';
       StateDirectory = "inkling";
       ExecStart = ''
-        ${strataInkling}/bin/strata-server --engine strata --config ${runConfig} \
+        ${serve}/bin/strata-server --engine strata --config ${runConfig} \
           --host 127.0.0.1 --port ${toString port}
       '';
       Restart = "on-failure";

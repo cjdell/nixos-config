@@ -1,0 +1,56 @@
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -2256,7 +2256,8 @@
+                     head = (f"BGENI {slot} {left}{leg_keys()}{pf} {embeddings}" if embeddings
+                             else f"BGEN {slot} {left}{leg_keys()}{pf}{sr}")
+                     live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
+-                            "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
++                            "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0,
++                            "prompt_total": len(prompt), "generated": 0,
+                             "started": began, "first_token": None}
+                     deadline = getattr(cancel, "_strata_queue_deadline", None)
+                     if deadline is not None and time.monotonic() >= deadline:
+@@ -2291,6 +2292,7 @@
+                         # the terminal layer's live prompt counter (the batch admission path)
+                         if self.progress and live["state"] == "reading":
+                             live["prompt_read"] = self.progress[0]
++                            live["prompt_total"] = self.progress[1] or live.get("prompt_total")
+                     try:
+                         for x in self._control(cancel, arrived, on_quiet=lambda: (ask(), note_progress()),
+                                                want_lp=want_lp, lines_q=lines_q):
+@@ -2664,6 +2666,7 @@
+             ft = r.get("first_token")
+             view.append({"slot": b, "state": r["state"], "prompt_tokens": r["prompt_tokens"],
+                          "prompt_read": r.get("prompt_read") if r["state"] == "reading" else None,
++                         "prompt_total": r.get("prompt_total") if r["state"] == "reading" else None,
+                          "generated": r["generated"], "elapsed_s": round(now - r["started"], 1),
+                          "tok_s": round(r["generated"] / max(1e-6, now - ft), 1) if ft else None})
+         return view
+@@ -5355,6 +5358,13 @@
+                         admitting=int(getattr(self.engine, "admitting", 0) or 0))
+             if running and state == "idle":
+                 live["state"] = "generating"
++        if live.get("prompt_read") is None:
++            # A slot reading a prompt behind a generating one (parallel): publish ITS counters, or the monitor shows a
++            # generating request with no read progress at all until the read is over (2026-11-24, inkling lane).
++            reading = [x for x in (live.get("slots") or []) if x.get("state") == "reading"]
++            if reading:
++                live["prompt_read"] = reading[0].get("prompt_read")
++                live["prompt_total"] = reading[0].get("prompt_total") or reading[0].get("prompt_tokens")
+         if hasattr(self.engine, "replica_view"):        # opt-in replicas: each one's state and requests routed to it
+             live["replicas"] = self.engine.replica_view()
+         if hasattr(self.engine, "split_view"):          # opt-in split serving: the hand-overs so far (serve/split.py)
+@@ -6528,8 +6538,11 @@
+                                 "reasoning_repeat_coverage": round(repeat_coverage, 3),
+                                 "engine_generated": last.get("generated"),
+                                 "prompt_ms": round(pm, 1), "decode_ms": round(dm, 1) if dm > 0.0 else None,
+-                                "decode_tok_s": round(last["generated"] / (dm / 1000), 1)
+-                                if n and (last.get("generated") or 0) >= 2 and dm > 0.0 else None,
++                                # The batch admission's DONE carries no `generated` and request_stats() nulls the
++                                # field for the whole request, so this row read "-" for every request on the inkling
++                                # lane (2026-11-24). Count with this server's own tokens, exactly as the times above
++                                # fall back to its own clocks.
++                                "decode_tok_s": round(n / (dm / 1000), 1) if n >= 2 and dm > 0.0 else None,
+                                 "hit_rate": hit_rate, "pcie_share": pcie_share, "ram_blobs": last.get("ram_blobs"),
+                                 "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
+                                 # #457: the speculative drafts from the DONE line (None: the engine did not say)
