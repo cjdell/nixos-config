@@ -275,6 +275,16 @@
 #   the PSU for real (the old box's notes suspect the 970's aux-power
 #   connector on this platform).
 #
+#   12. 2026-11-24: GPU folding re-enabled for an experiment ("try fold on
+#      gpu and monitor" — see services.folding-at-home-native.enableGpu).
+#      IT DIED within minutes of the switch: dmesg shows
+#      `Xid (PCI:0000:01:00): 79, pid=1036, name=[vkps] Update, GPU has fallen
+#      off the bus` followed by Xid 154 (GPU reset required) — the exact #10/#11
+#      signature — and `nvidia-smi -L` now answers "Unable to determine the
+#      device handle for gpu 0000:01:00.0: Unknown Error" (off the bus). A
+#      wedged FahCore_28 sits at 99 % CPU in R state. Reverted to false
+#      2026-11-24 14:3x; reboot is the only way to reclaim the card (#11).
+#
 # CPU: the Xeon E3-1240 v6 is 4 Kaby Lake cores / 8 threads with AVX2
 # (80 W TDP); all 8 fold. Steady state: GPU 100 W + CPU ~70-85 W + board
 # ~35 W ≈ 210-220 W — inside the 240 W rail now that the GPU cannot boost-
@@ -329,21 +339,23 @@ in
     enable = true;
     userName = "cjdell";
     teamNumber = 236565;
-    # GPU FOLDING OFF PERMANENTLY (power history #10, 2026-11-21). The 1060 dies
-    # under OpenMM GPU work in seconds — Xid 79, off the bus, reboot to reclaim —
-    # reproducibly, with the client stopped and the card otherwise passing every
-    # non-OpenMM stress (see scripts/gpu-probe/README.md "corebisect" for the
-    # bisect and what it rules out). It is also the CONSOLE GPU, so a kill takes
-    # the display too. fah-provision therefore passes --no-gpus every boot, which
-    # clears the default group's GPU list over the client's own websocket API.
+    # GPU FOLDING OFF since 2026-11-21 (power history #10, #11). The 970 on
+    # this box dies under OpenMM GPU work within seconds of the first WU —
+    # Xid 79, off the bus, reboot to reclaim — reproducibly, with the client
+    # stopped and the card otherwise passing every non-OpenMM stress (see
+    # scripts/gpu-probe/README.md "corebisect" for the bisect and what it
+    # rules out). It is also the CONSOLE GPU, so a kill takes the display too.
+    # fah-provision therefore passes --no-gpus every boot while it stays off.
+    # 2026-11-24: re-enabled for a user-requested experiment — it died within
+    # minutes of the switch: dmesg shows Xid 79 + "GPU has fallen off the bus"
+    # (1426 s uptime) — the exact #10/#11 signature — history entry 12 records
+    # it; flip back if you see it again.
     # VERIFY AFTER ANY CHANGE HERE, don't trust the seed: the client keeps prior
     # settings in its SQLite DB and config.xml only seeds, so check `ps` shows no
     # FahCore_28 and nvidia-smi stays at idle watts while the client folds.
     # The NVIDIA driver, the console output and the cap pair below all STAY — the
     # card is still the display; with GPU folding off those caps merely bound the
     # console card's power (quiet), and their "-"/"+" prefixes remain load-bearing.
-    # Do NOT set this back to true before the aux 6-pin wiring and one clean
-    # control-kill + surviving-knob-row repro described in #10.
     enableGpu = false;
     cpus = 8;
     gpuUsage = 50;
@@ -523,6 +535,11 @@ in
     # every service start; a slider move overrides live but is NOT kept
     # across restarts/boot until changed HERE.
     cpuTempTarget = 80;
+    # Startup GPU power limit, now that we measured the 970 at its minimum:
+    # the panel applies it at every start (common/fah-panel.nix), so the
+    # cap survives reboots; the live cap slider stays the per-session
+    # override.
+    gpuPowerLimit = 100;
   };
 
   # The panel reads/pins the cap the boot-time unit owns, so start after it.

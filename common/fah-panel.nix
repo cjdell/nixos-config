@@ -20,9 +20,12 @@
 #
 # The service runs as root: binding :80 needs it, RAPL energy_uj is 0400, and
 # both power-cap controls (nvidia-smi -pl / hwmon power1_cap) want root too.
-# The startup power cap is NOT this panel's job — a boot-time unit per host
-# owns that (e.g. nvidia-power-limit.service); the slider only moves the live
-# setting, exactly like the hardware state it reads.
+# The panel owns an OPTIONAL persistent startup power limit
+# (services.fah-panel.gpuPowerLimit → --gpu-power-limit): applied at every
+# start, so the limit survives panel restarts and reboots; the slider (POST
+# /api/power) only moves the live setting, exactly like the hardware state it
+# reads. A boot-time unit (e.g. nvidia-power-limit.service) is still the right
+# place when a host wants the cap applied even before the panel is up.
 {
   options.services.fah-panel = {
     enable = lib.mkEnableOption "folding@home heater telemetry web panel (crates/fah-panel)";
@@ -92,6 +95,19 @@
         hp-z240).
       '';
     };
+
+    gpuPowerLimit = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 0;
+      example = 100;
+      description = ''
+        Startup GPU power limit in W (0 = off). The panel applies it at
+        every start via the backend (ExecStart state), so the limit
+        persists across panel restarts and reboots. The live cap — the
+        GPU power-cap slider (POST /api/power) — overrides it per
+        session. Same split as cpuTempTarget.
+      '';
+    };
   };
 
   config =
@@ -130,6 +146,10 @@
       ++ lib.optionals (cfg.cpuTempTarget > 0) [
         "--cpu-target"
         (toString cfg.cpuTempTarget)
+      ]
+      ++ lib.optionals (cfg.gpuPowerLimit > 0) [
+        "--gpu-power-limit"
+        (toString cfg.gpuPowerLimit)
       ];
     in
     lib.mkIf cfg.enable {

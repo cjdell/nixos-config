@@ -1298,6 +1298,7 @@ fn main() {
     let mut budget: f64 = 0.0;
     let mut dmi = String::new();
     let mut cpu_target: f64 = 0.0;
+    let mut gpu_power_limit: f64 = 0.0;
 
     let mut i = 1;
     while i < args.len() {
@@ -1311,6 +1312,7 @@ fn main() {
             || flag == "--budget"
             || flag == "--dmidecode"
             || flag == "--cpu-target"
+            || flag == "--gpu-power-limit"
         {
             i += 1;
             let v = args.get(i).cloned().unwrap_or_default();
@@ -1324,6 +1326,7 @@ fn main() {
                 "--budget" => budget = v.parse().unwrap_or(0.0),
                 "--dmidecode" => dmi = v,
                 "--cpu-target" => cpu_target = v.parse().unwrap_or(0.0),
+                "--gpu-power-limit" => gpu_power_limit = v.parse().unwrap_or(0.0),
                 _ => unreachable!(),
             }
         } else if flag == "--help" || flag == "-h" {
@@ -1331,13 +1334,15 @@ fn main() {
                 "usage: fah-panel [--listen ADDR:PORT] [--gpu auto|nvidia|amd]\n\
                  [--nvidia-smi PATH] [--amd-pci VENDOR:DEVICE|BDF] [--gpu-name NAME]\n\
                  [--interval MS] [--budget W] [--dmidecode PATH]\n\
+                 [--cpu-target T] [--gpu-power-limit W]\n\
                  Backend auto = nvidia when --nvidia-smi is given, else the first PCI\n\
                  device whose hwmon exports power1_average (amdgpu). Port 80 needs root,\n\
                  as does RAPL energy_uj and both power-cap controls — the service runs\n\
                  as root.\n\
                  Each GPU gets its own live power cap (POST /api/power {{\"gpu\":N,\"cap\":W}});\n\
-                 whatever the backend reports is truth, and a boot-time systemd unit\n\
-                 (not this panel) owns setting caps at startup.\n\
+                 whatever the backend reports is truth. A STARTUP GPU power limit is a\n\
+                 panel ExecStart value (--gpu-power-limit / services.fah-panel.gpuPowerLimit):\n\
+                 the panel applies it at every start, so the limit persists across reboots.\n\
                  The CPU max-temperature slider (POST /api/cpu-target) is live state too:\n\
                  the sampler moves cpufreq scaling_max_freq to hold the package below the\n\
                  target, and a panel start releases any ceiling from a prior run. The\n\
@@ -1357,6 +1362,10 @@ fn main() {
 
     if cpu_target != 0.0 && !(30.0..=110.0).contains(&cpu_target) {
         eprintln!("fah-panel: --cpu-target must be 0 (off) or 30–110 °C");
+        std::process::exit(2);
+    }
+    if gpu_power_limit < 0.0 {
+        eprintln!("fah-panel: --gpu-power-limit must be 0 (off) or a positive W value");
         std::process::exit(2);
     }
 
@@ -1413,6 +1422,32 @@ fn main() {
         cpu_info: cpu_info_json(&cpu),
     });
     let infos = backend.infos();
+    // Startup GPU power limit: the panel's ExecStart state, like cpuTempTarget.
+    // Per discovered GPU because the cap range comes from infos() (a cap
+    // whose range does not cover the limit, or a card with no cap support,
+    // is skipped with a log line). The live slider (POST /api/power) stays
+    // the per-session override for the running service.
+    if gpu_power_limit > 0.0 {
+        for gi in infos.iter() {
+            if gi.cap_max <= 0.0 || !(gi.cap_min..=gi.cap_max).contains(&gpu_power_limit) {
+                log(&format!(
+                    "fah-panel: gpu {} [{:.0}-{:.0}W] cannot take startup limit {:.0} W (unsupported or out of range)",
+                    gi.index, gi.cap_min, gi.cap_max, gpu_power_limit
+                ));
+                continue;
+            }
+            match backend.set_cap(gi.index, gpu_power_limit) {
+                Ok(msg) => log(&format!(
+                    "fah-panel: gpu {} power cap set to {:.0} W: {}",
+                    gi.index, gpu_power_limit, msg
+                )),
+                Err(e) => log(&format!(
+                    "fah-panel: gpu {} startup power limit {:.0} W failed: {e}",
+                    gi.index, gpu_power_limit
+                )),
+            }
+        }
+    }
     let desc = infos
         .iter()
         .map(|g| {
@@ -1426,12 +1461,13 @@ fn main() {
         .collect::<Vec<_>>()
         .join(", ");
     log(&format!(
-        "fah-panel: host={host} backend={} driver={} gpus={{{desc}}} ram=\"{}\" listen={listen} cpu_threads={} cpu_throttle={}",
+        "fah-panel: host={host} backend={} driver={} gpus={{{desc}}} ram=\"{}\" listen={listen} cpu_threads={} cpu_throttle={} gpu_power_limit={}",
         infos.first().map(|g| g.kind).unwrap_or("?"),
         infos.first().map(|g| g.driver.clone()).unwrap_or_default(),
         sh.ram,
         cpu.cur_freq.len(),
         throttle.available(),
+        gpu_power_limit,
     ));
     if infos.iter().all(|g| g.cap_max == 0.0) {
         log("fah-panel: warning: no power-cap range right now (device not up yet? each slider stays hidden until /api/health sees one)");
