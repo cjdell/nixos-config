@@ -1310,3 +1310,503 @@ renders from the module with the 0.2.15 engine, conditions and all), the files
 are on disk and hash-verified, but **`ai.strataModel` stays `ud-iq4-xs-v31`** —
 Flash-Next serves :8080 until the switch is deliberately made; a switch that
 changes the engine pin restarts the live engine with the same model regardless.
+## Strata (Qwen3.8-Flash-Next on the R9700 — LIVE AGAIN since 2026-11-04)
+
+⚠️ **Re-enabled 2026-11-04**, the same day the Avalon section above briefly
+took over `:8080` and every nginx location this one owns. `./strata.nix` is
+imported again (its packs, the ROCm-10 runtime input and the audit diff were
+untouched throughout — `ai.strataModel` never moved off `ud-iq4-xs`);
+flipping engines again = swap the `./strata.nix` / `./avalon.nix` imports in
+`hosts/zen3-nixos/ai/default.nix` **and** restore the matching era's
+`gpu-mode.sh` + `sd-server.nix` (formerly `sd-gate.nix`) from git history. Everything below is live
+procedure plus the incident history.
+
+The serving engine is **Strata** (a separate stack from llama.cpp), pinned at
+**0.2.13.1+main-13eedf55** (tag `628f7495` + main `13eedf55`, engine **0.1.59.1**) —
+**reverted back to it on 2026-11-20 16:24** after the **2026-11-20 prefill stalls**
+hit 0.2.15 (engine 0.1.61) and 0.2.17 (engine 0.1.63). Full evidence pack, the
+ruled-out table and a ready-to-file upstream report:
+**`docs/strata-prefill-stall-2026-11-20.md`**.
+The signature: `exit -6` from Strata's own 60 s no-progress watchdog (issue #29)
+during a full re-read of a 148–289 K-token prompt, always at **layers 18–22**, while
+the stall report says `the prompt's GPU work (GPU 0) was still running`, the host
+thread is idle, the 15 CPU-pool workers are parked and 0 of 80 threads wait on disk —
+with **no** amdgpu error (no ring timeout, no reset, no VM fault, no overdrive
+failure). Sampled live during two hangs: **60–80 W, `gpu_busy 100`, `mem_busy 0`,
+`mclk 1258`** (perf level `high` in one capture), i.e. a GPU kernel spinning with no
+memory traffic — so the `mclk 96 MHz`/80 W state seen under `auto` is a *symptom* of
+the spin, not a clock fault: it reproduced with `power_dpm_force_performance_level=high`
+and survived a reboot. Synthetic repetitive prompts (99.8 % cache hit) never trip it;
+real agent traffic does. Refuted one by one (all with a control run):
+`STRATA_SELECT_WMMA=0`, `STRATA_PREFILL_ISSUER=0`, `--prompt-cache-every 0`,
+`--conversation-cache-mib 0`, and the engine bump itself. 0.2.15's own release notes
+list our hardware as KNOWN problems — *"Radeon gfx1201: DFlash2 chosen by hand can
+stall on the prompt"* and *"Radeon R9700 on Linux: one engine start stalled on its
+first prompt … stopped itself after 60 seconds without progress"*. Mitigations left in
+place: **`STRATA_WATCHDOG_S=180`** (a stall that would have finished is not failed;
+a truly stuck request holds the single slot 3 min) and the conversation cache **off**
+(`--conversation-cache-mib 0`, since the failing requests were cache misses anyway).
+**The 0.2.17 port exists and built** (commit `c905142`, engine 0.1.63, store
+`ny7zm62zxg32s2psahv14cvyjdk6cp97-strata-0.2.17`) — keep the notes below if it is
+re-tried:
+**0.2.16 moved the tree into `engine/ app/ terminal/ tools/`, so the package differs
+from the 0.2.13.1-era one:** `cmakeDir = "../engine"` (nixpkgs' cmake hook `cd`s into
+`build/` first, so the path is relative to `build/`), the picture reader builds from
+`terminal/tools/vision`, `serve/ data/ strata_cli/ strata_control/ tools/` are copied
+from `terminal/` into `share/strata`, and **`-DSTRATA_PREFILL_MMQ` is gone** (upstream
+ships `tools/check_no_mmq.py`; the prompt path is Strata's own kernels). Three
+consequences: **`strata-kernel-audit.diff` is NOT applied** — it must be re-based onto
+`engine/src/...` (audit only, everything behind `STRATA_KERNEL_AUDIT`; re-base before the
+next #879 capture); **`--expert-profile` now names
+`/home/cjdell/Strata/expert-profile.bin`** — 0.2.17 ships no profile in `terminal/data`,
+but 0.1.63 still *hard-requires* a static one for the resident CPU-expert tier
+(`--resident-budget-gib` asks for it; without one the engine exits 2 with
+`--resident-cpu-experts requires --mmap-experts and a static --expert-profile`), so the
+0.2.15 file (196 KB, 24576 ranked pairs — verified accepted) lives beside the pack;
+regenerate it from our own traffic with `--expert-profile-save` (#477); and
+**`STRATA_ROUTE_TAIL_SKIP=7` is still ON by default** on this path despite the 0.2.17
+note ("off by default"), checked in the engine log — so answers did not move.
+Second family live on the same engine: **Qwen3.6-35B-A3B** — see the
+`qwen36-ud-q4-k-xl` bullet below. Previous pins: 0.2.15 (`c7757280`, 2026-11-16 →
+11-20), main-13eedf55 (2026-11-13 → 11-18, engine 0.1.59.1) and the v0.2.13.1
+release `628f7495` (2026-11-10; from 0.2.11
+`c3b3f503` via 0.2.12 `146df3c4` — the engine went 0.1.57 → 0.1.58 → **0.1.59.1**
+across those two, so that was a real engine bump, not a docs tag; the
+`.1` tag itself is a Control-only Intel-Arc hotfix whose sole build-relevant line
+is `project(strata VERSION …)`). 0.2.0 split the repo into
+**app + Terminal + engine** — and 0.2.13 re-cut the engine build by backend
+(`cmake/backends/{cpu,cuda,hip}.cmake`, `add_executable(strata)` now lives in
+`cmake/strata_gpu_engine.cmake:483`) and **vendored the ggml it compiles into
+`third_party/strata-ggml`**, so `strata-package.nix` no longer passes
+`-DSTRATA_GGML_DIR` (verified with `diff -r`: every common source of llama.cpp
+`3cf03257`'s `ggml/` is byte-identical there — only the two CMakeLists are trimmed,
+plus Strata's own `ggml-cuda-tq/` folder; the `VERSION.txt` pin is the same commit).
+Since v0.2.15 the picture reader builds from the vendored `tools/vision` (0.2.17
+moved it to `terminal/tools/vision`, built from Strata's own tower — keep that note
+for the port; on the current 0.2.13.1 build it is the `llama`-based `tools/vision`
+again, so `strata-vision` is built with `LLAMA_DIR`, `strata --families` → `qwen4exp
+qwen35moe`).
+0.2.0's split also means `serve/server.py` imports the
+Terminal's `strata_control/` + `strata_cli/` Python packages, which `installPhase`
+therefore ships too (without them the service dies at import). Built and **live since
+2026-11-20 16:24 (0.2.13.1+main-13eedf55)** — `ExecStart` names
+`/nix/store/<hash>-strata-0.2.13.1+main-13eedf55` and `/v1/status` reports
+`"engine": "0.1.59.1"`):
+`hosts/zen3-nixos/ai/strata.nix` + `strata-package.nix` (imported by
+`hosts/zen3-nixos/ai/default.nix`, gated on `config.ai.strata`), systemd unit
+`strata`, OpenAI-compatible on `127.0.0.1:8080/v1`. Model
+`qwen3.8-flash-next-unsloth-ud-iq4-xs-v31` — Unsloth's **Dynamic v3.1** re-cut of
+UD-IQ4_XS, live since 2026-11-05 15:20 (see the pack bullet below; the old
+three-shard UD-IQ4_XS and the GSQ-RCO IQ3_S GGUFs have been deleted, so the
+`iq3s` / `ud-iq4-xs` entries in `models` are re-downloadable schema only). Docs:
+[`docs/strata.md`](docs/strata.md).
+
+**One request at a time** (`/v1/status` → `concurrency.serving: 1`): Strata's batching
+(`"parallel"` / `--batch N`) is available but off by default — since 2026-11-10 toggled by
+**`strata-batch on|off|status`** (PATH command; `/var/lib/strata/batch-mode` picks the run
+config at every service start, absent/garbage = solo, survives reboot/`gpu-mode`/rebuilds).
+Measured on 0.2.13.1 with it ON, then switched back off: slots cost **2.34 GiB** VRAM +
+85 MiB×2 DFlash2 slot-drafters (`STRATA_BATCH_DF2` is the 0.2.13.1 default with our
+explicit `--draft dflash2` — the October "slots lose the drafts" analysis is obsolete),
+shrinking the expert cache 24.54→21.99 GiB (−10.3 %) plus ~10 GiB **pinned RAM**; a *lone*
+stream in batch mode decodes **39.2 vs 56.9 tok/s (−31 %)**, and two concurrent streams
+manage only 14.7–26.6 each — less aggregate than one solo stream. Lazy batching inside the
+engine is impossible (slots are carved at startup, before the cache is sized, never handed
+back); the toggle is the lazy version, outside it. Analysis + 2026-11-10 addendum:
+[`docs/strata-batching.md`](docs/strata-batching.md).
+
+⚠️ **The whole card is a lease, not an allocation:** `gpu-mode sd|game`
+(see the GPU-modes section) **stops `strata.service` outright** — do not
+"restart it for good measure" while testing SD or gaming, that reloads the
+model and eats the VRAM for minutes. The serve layer's `POST /v1/unload`
+(model leaves VRAM, auto-reloads on the next request) and the `before_load`
+config key (a shell command run before every (re)load — ours stops
+`sd-server`, the Flux unit; until 2026-11-06 it stopped `sd-gate`, and the
+gate's reverse eviction over `/v1/unload` died with it) are what let the
+two servers hand the card without fighting.
+
+⚠️ **0.1.43 and 0.1.44 change answers on our card** — three RDNA4 defaults now apply that
+did not in 0.1.42: `STRATA_ROUTE_TAIL_SKIP=7` (stays off only from 90 % of experts in the GPU
+cache; we are at 43 %, so it is ON; KL ~0.003–0.006), the measured PCIe share
+(`STRATA_PCIE_FRAC_DEFAULT=old` reverts), and **new in 0.1.44: `STRATA_HC_Q8`** — the
+hyper-connection projections are read as Q8_0 instead of BF16 on gfx1200/gfx1201 (R9700 decode
++2.5–4 %, mean KL 0.0003–0.0010, "answers can differ in near-ties"); for our `--compat-bf16`
+pack the engine requantizes the pack's BF16 copy to Q8_0 at load. Revert with
+`STRATA_HC_Q8=0`, or `STRATA_GFX12_DEFAULTS=0` for that **and** the new 16384 prompt chunk
+(`STRATA_GFX12_CHUNK=0` keeps 8192; 0.1.44's #2090 guard already falls back to 8192 when free
+RAM cannot cover the extra slot loan + 6 GiB). All three are documented in a comment in
+`hosts/zen3-nixos/ai/strata.nix`. Upstream's R9700 rows: 0.1.43 decode +2–10 % / prompt
++12–14 %; 0.1.44 adds +2.5–4 % from HC_Q8. Details: `docs/strata.md` "0.1.43".
+
+⚠️ **0.2.12 changes answers on our card too** — `STRATA_GDN_CHUNKED`, on by default for
+gfx12: the **chunked GDN (gated-delta) scan** replaces the recurrent one on the prompt path
+(upstream R9700: 32K +6.1 %, 64K +6.7 %; its "R9700 32K prompts +8.6–11.6 %" headline is
+largely this). 0.2.12 gated it at chunks of 30,000+ tokens; **0.2.13 made it the engine's own
+default and dropped the gate** — `generate.cpp:3821-3830` calls
+`apply_gdn_chunked_default(true, all_gfx12)` ("Linux, every visible card gfx12: the chunked
+GDN scan from the first chunk (was the launcher's GDN_STACK_GFX12)"), so here every prompt
+chunk takes it. ⚠️ It leaves **no evidence in the log or the environment**: the engine
+`setenv`s it in-process before `apply_arch_defaults`, which deliberately suppresses the
+"prompt chunks of 30,000+ tokens use the chunked GDN scan" banner (upstream says so in that
+block's comment), and a post-exec `setenv` is invisible in `/proc/<pid>/environ` anyway — the
+only check is the A/B (`STRATA_GDN_CHUNKED=0`). Different kernel, so it is the first suspect
+for "the model answered differently after 2026-11-10", at any depth (before this bump the
+only answer-changing gfx12 default was `STRATA_SELECT_WMMA` above 28,672 tokens, and that
+banner *does* print). The other 0.2.13 line that reads like it moves us does not: the
+hipBLASLt tuning table stopped being applied on gfx1201 by default (`gemm.cu:319`), but our
+build has never installed a `tuning/` folder next to the binary, so we have always been on
+plain hipBLAS. Also from 0.2.12: **Auto no longer picks DFlash2 on gfx1201** (see the DFlash2
+bullet), and 0.2.13 vendored the ggml (see the pin paragraph above). Measured on this box
+after the 2026-11-10 deploy: **60–78 tok/s decode at ~200K context**, expert cache 95–98 %
+hits, DFlash2 acceptance 74–76 % (0.2.11 measured 67.9 tok/s on the same traffic).
+
+❌ **`STRATA_PF_FUSED_Q50` — measured on 2026-11-10 and left OFF** (it looks attractive because
+`moe_fused_iq.cu:1940` names our pack: "Q5_0 down (UD-IQ4_XS-v31: 33 of 48 layers)", and
+upstream's R9700 headline is prompts 2K +44 % / 8K +40 %; `=1` routes those layers' down
+projection through the fused int8 prompt kernel instead of gather + FP16 dequantize +
+hipBLASLt, prompt path only — it cannot blind the #879 audit, whose `native_expert_grouped`
+probes are on the decode side, `verify.cpp:2375`). Local A/B, cold prompts, median tok/s:
+**8.7K 2161 → 2672 (+24 %), 36K 2671 → 2804 (+5 %), 109K 3113 → 3293 (+5.8 %)**, decode
+unchanged, a deep-needle retrieval probe correct in all 9 runs. It is not worth it because
+**this box barely prefills**: across 58,154 logged requests the cold-read size is p50 223 /
+p90 1.9K / p99 34K tokens (91 % under 4K — the 16 GiB conversation cache and KV reuse eat the
+rest), so that curve is **0.08 s saved per request on average** (4,561 s off a 38,402 s
+prefill lifetime, 670 requests saving >1 s). A permanent arithmetic change on 33 of 48 expert
+layers per prompt is a bad trade for ~2–3 minutes a week, especially while #879 is open — we
+want the prompt-path kernel mix unchanged when comparing a future capture. The A/B is one env
+line, and `scripts/strata-pf-ab.sh` is the bench that made this call (cold prompts by a unique
+first line, byte-identical per arm because the needle value derives from depth+rep, deep-needle
+retrieval as the quality gate; it also works for `STRATA_SELECT_WMMA`, `STRATA_MMQ_KQ`,
+`STRATA_PREFILL_CPU_SHARE`). One more reason it cannot pay here: reads at that size are
+overhead-dominated — a 1.2K-token cold read runs at only ~670 tok/s, so at p50 the prefill is
+almost entirely fixed cost.
+
+- **DFlash2 is LIVE as the drafter since 2026-11-04** (`"drafting": "dflash2"` in
+  `strata.nix`'s `configFile`): 0.2.10 made it the `auto` pick for Qwen3.8-Flash-Next on
+  CUDA/HIP/Metal/SYCL — incoai's block drafter (packed from their pinned safetensors by
+  `strata_control/drafting_fetch.ensure()`, pack sha checked against upstream's PINNED
+  bytes), which serve's `drafting.apply()` starts **instead of** the MTP head (strips
+  `--mtp`/`--spec-min-p`/our `--spec`, adds `--draft dflash2 --draft-model <pack>
+  --draft-fallback none --spec N --draft-conf 0.5`; N is `SPEC_WINDOW` = **6 on
+  0.2.10 through 0.2.13.1** (this file once said 8 — stale; the live `ExecStart`
+  carries `--spec 6`), re-check per bump — `WIDE_WINDOW` 8 is reserved for
+  `gfx1151`/big-Blackwell, so our gfx1201 keeps 6).
+  ⚠️ **Since 0.2.12 that is an explicit choice, not the default:** upstream added
+  `AUTO_MTP = {("hip","gfx1201"): "the DFlash2 prompt stall (11 of 50 engines on
+  0.2.11); PE-RDNA4's fix is pending"}` — on an R9700, `auto` now starts the **MTP**,
+  because "DFlash2 chosen by hand can stall on the prompt (11 of 50 engines on 0.2.11).
+  The engine stops itself and the next request restarts it", still listed as **not
+  looked at again in 0.2.13**. A saved `"drafting": "dflash2"` still starts DFlash2
+  (upstream says so in that comment's own words), which is what we run: +2–2.5 % decode
+  over MTP here, and no stall in the 6 days since 2026-11-04. So the failure mode to
+  recognise is a prefill that never finishes and then the *next* request starts clean —
+  it looks exactly like the #29 watchdog class in `docs/strata-hang.md`; check for it
+  there before blaming KV streaming again. `"drafting": "mtp"` remains the one-line
+  revert (and is what `auto` would now choose for us).
+  The packs live in
+  `/home/cjdell/Strata/dflash2/` (`data_dir` derives from our `--mtp` arg) — the
+  **selq4** pack (339 MB, selector codebooks Q4_0, "about 174 MiB less") is the one
+  `pack_path()` picks because our HIP engine reads it. Its pins are byte-identical
+  from 0.2.10 through 0.2.13.1 (`CONVERTED_BYTES` 339,694,592 / sha `4a42b982…`,
+  REPO/REVISION `a22a1744`), so a bump costs no re-download. Strata's **tuned**
+  drafter (0.34 GB, `…strata1.q4_0-selq4.pack`, +2.4–5 % where measured) is new in
+  0.2.12 and deliberately **not** ours: `SET_DEFAULTS ("hip","unsloth-ud-iq4_xs-v31")`
+  is `tuned=True` but gated `where="gfx1151"`, `tuned_applies()` returns
+  `arch == "gfx1151"`, and the table's comment says "NOT enabled: … gfx1201 / R9700
+  (the DFlash2 prompt stall is open)" — so leave it alone until that stall is fixed. A/B on identical 700-token prompts
+  (6+6 samples): **decode 60.6 vs 59.1 mean (+2–2.5 %, upstream claims +6.6/+4.2 on
+  IQ3_S), draft acceptance 71–78 % vs MTP's 68.7 %, and expert slots UP 10608→10717** —
+  the VRAM-contention worry never materialised, the selq4 drafter costs less than the MTP
+  draft path it replaces; live agent traffic shows 95–98 % cache hits.
+  ⚠️ **Name gate:** `drafting.py::_SUPPORTED_NAME` accepts only `qwen3.8-flash-next` +
+  `-gyro-*`/`-unsloth-*`/a `(q|iq|tq)N` quant suffix, so the pack was renamed
+  **`qwen3.8-flash-next-unsloth-ud-iq4-xs`** on 2026-11-04 (`modelName` in
+  `strata.nix`; `...-v31` since 2026-11-05, which stays inside the `-unsloth-`
+  class) — the old
+  `...-ud-iq4-xs` shape silently answered `Drafting: MTP (DFlash2 is for
+  Qwen3.8-Flash-Next only)`. The name is cosmetic at runtime (serve routes by engine) but
+  `/v1/models` and `/metrics` echo it (and it is the id the `strata` provider in
+  `users/cjdell/opencode.nix` declares), so **it must keep matching that regex on any
+  future rename or Strata bump**. `--draft-fallback none` means a drafter that cannot
+  start FAILS the service start rather than silently running MTP — if strata ever
+  crash-loops on boot after a bump, `"drafting": "mtp"` is the one-line revert.
+- **One pack live, two kept as schema: `config.ai.strataModel`** (`hosts/zen3-nixos/ai/default.nix`
+  sets `"ud-iq4-xs-v31"`; the option default is `"iq3s"`). `hosts/zen3-nixos/ai/strata.nix`
+  carries `models.iq3s` / `models.ud-iq4-xs` / `models.ud-iq4-xs-v31` (GGUF + pack
+  paths, `--ple-gguf` only for the 2-shard pack, `--resident-budget-gib 55` for the
+  old UD one and **`56` for v31** = setup.py's `int(arena_gb 60.4 / 1.0737)` cap).
+  The live pack is Unsloth **UD-IQ4_XS "Dynamic v3.1"** (93.7 GB / **4 shards**, rev
+  `d9620119…`, fetched by `scripts/fetch-strata-udiq4xs-v31.sh`, packed by
+  `scripts/repack-strata-udiq4xs-v31.sh` — same **`--compat-bf16` REQUIRED** recipe;
+  35 layers put gate/up/down in different shards, so `native_experts.txt` is the
+  **v4 per-role** form and engine ≥ 0.1.57 is a hard requirement
+  (`UNSLOTH_V31_ENGINE = (0, 1, 57)`, `setup.py:434` — still that value on 0.2.13.1,
+  which builds 0.1.59.1). It is a different file from the October three-shard
+  UD-IQ4_XS: 345 of 1224 tensors re-typed, 33 expert layers on the new Q5_0 down
+  format, experts_bpw unchanged at 3.999 — so the old decode analysis applies
+  (**60-64 tok/s at 92-94 % hits** on 0.2.7+; ~1,250 tok/s prefill; 393216 ctx).
+  **Live since 2026-11-05 15:20**; the old three-shard GGUFs + `pack/ud-iq4-xs`
+  and the GSQ-RCO IQ3_S GGUFs + `pack/iq3s` were deleted as it went live, so
+  `"iq3s"`/`"ud-iq4-xs"` now only compile if you re-fetch first (their scripts
+  stay). Analysis, quant mix and measurements: [`docs/strata.md`](docs/strata.md)
+  "UD-IQ4_XS" + "Dynamic v3.1".
+- **Second family, selectable since 2026-11-18: `models.qwen36-ud-q4-k-xl` —
+  Qwen3.6-35B-A3B** ("the 35B a3b": 35B MoE / 3B active / 256 experts / top-8,
+  arch `qwen35moe` — the code dir is src/qwen35/ and the engine file q36_engine.cu,
+  which is why sources spell both 3.5 and 3.6; the catalog name is **3.6**, there is
+  no Qwen3.5-35B-A3B entry). An **own-path engine**: reads ONE GGUF in place
+  (`/home/cjdell/Models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`,
+  22.85 GB, Unsloth's MTP-GGUF rev `5bc3e238…`, pins from setup.py's QWEN36_FILES —
+  fetched by `scripts/fetch-strata-qwen36-35b-a3b.sh`), so **no iq_pack, no expert
+  profile, no PLE shard, no `--resident-budget-gib`** — the engine places the
+  experts itself, and drafting is the MTP block INSIDE the file: on this path
+  `--mtp N` is a draft COUNT per step, not the Flash-Next draft-LAYER folder
+  (doctor.py: "--mtp 2 is the draft depth, not a folder (#3298)"). The only
+  hand-prepared part is the tokenizer pack (`tools/strata_tokenizer.py`, round-trip
+  checked — `scripts/repack-strata-qwen36-35b-a3b.sh`, built 2026-11-18). Run line =
+  setup.py's install_own_path step 7 verbatim: `--native <gguf> --max-context
+  131072 --prefill auto --mtp 2`. **Why 128K, and why solo:** own_path_fit costs
+  KV at 47,104 B/token (fp32 of the 10 attention layers + MTP, plus the engine's
+  full-context fp16 K/V — `--kv int8` does NOT exist here) and 128K is what keeps
+  every expert in the R9700's VRAM at this quant; upstream's measurement ON THIS
+  CARD: "a 32 GB R9700 at 128K: 4 slots left 15 of 256 experts per layer, decode
+  81 tok/s against ~180" — so the entry runs no `parallel` and `configFileBatch`
+  carries `parallel = 1` for this family (strata-batch on|off stays a valid
+  command, it just changes nothing), and expected solo decode is **~180 tok/s**
+  vs Flash-Next's 60-78, at 128K-not-384K context and a 4x smaller model. The
+  config JSON gains `arch = "qwen35moe"` (serve's FAMILY_MODEL_NAMES gate) and
+  deliberately NO `drafting` key — the DFlash2 gate is Qwen3.8-only and
+  drafting.supported_model() skips other families by design; a stray key could
+  reshape the run line, and on this path that breaks the `--mtp` count. Vision:
+  `mmproj-F16.gguf` (same qwen3vl_merger family, the CPU-reader rationale
+  unchanged). `model_name` must keep the `qwen3.6-35b-a3b-ud-q4_k_xl` shape
+  (own_path_fit parses the size back out of it). Serving it needs the 0.2.15
+  engine (`--families` → `qwen4exp qwen35moe`); switching = one
+  `ai.strataModel` line + rebuild + restart, same ConditionPathExists contract.
+- **Third Flash-Next pack, selectable since 2026-11-22: `models.coder-iq1m` —
+  Qwen3.8-Flash-Next Coder** (`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF`,
+  rev `5348543e…`, IQ1_M, 58.4 GB in two shards — shard 2 is the SAME PLE
+  table, sha `316b46f3…`): ISTA's expert-pruned coder, **256 of the 512
+  experts per layer kept** (code/tools/vision ones), stored like IQ3_S at
+  3.5 bpw — "IQ1_M" is the file's average bpw, not a tensor type, so no new
+  kernels and no engine floor past MIN_ENGINE (the pinned 0.1.59.1 reads it).
+  setup.py: "needs ~32 GB of RAM, faster; weaker outside coding" — arena 23.4
+  GB, so every expert is RAM-resident **without** `--resident-budget-gib`.
+  Two things made it not a copy-paste entry: it ships its **own expert
+  profile** (`expert-profile-coder.bin` in the package, 12,288 pairs — half
+  the ranking; `models.<k>.profile` selects it via `expertProfileFor`), and
+  **DFlash2 must NOT be configured for it** — `drafting.py`
+  `SUPPORTED_FAMILIES = qwen/gyro/unsloth`: "Coder … no DFlash2 acceptance
+  numbers for them, they start the MTP" — so the entry sets `dflash2 = false`
+  and its config carries no `drafting` key; the shared
+  `/home/cjdell/Strata/mtp/rt` runtime drafts it like the IQ3_S era.
+  `selectable = true` puts it in the swap table under id
+  **`qwen3.8-flash-next-coder-iq1m`** (upstream's own spelling is `…iq1_m`;
+  nothing parses the tail — DFlash2 rejects both alike). Prepare with
+  `scripts/fetch-strata-coder-iq1m.sh` + `scripts/repack-strata-coder-iq1m.sh`
+  (plain `iq_pack.py`, NO `--compat-bf16` — that flag is for Unsloth files'
+  Q8_0 dense side; the MTP runtime and mmproj are the ones already on disk).
+- **Model choice via the API — `strata-swap`, live on `:8080` since 2026-11-18.**
+  The engine is still one-model-per-process; what changed is the front.
+  `strata-swap.py` (system unit `strata-swap`, root because it drives
+  `systemctl`, loopback-only) owns **127.0.0.1:8080 — which every nginx
+  location already proxied — so no client URL changed**; the engines moved
+  behind it (primary `strata.service` → `:8091`; since 2026-11-22 one unit
+  per **selectable** model instead of the old single `strata-second`:
+  `strata-<key>.service` → `:8092+` in attr-name order, for every `models`
+  entry marked `selectable = true` other than `config.ai.strataModel` — today
+  `strata-coder-iq1m` (8092) and `strata-qwen36-ud-q4-k-xl` (8093), all built
+  by the same `finalize (runConfigBaseFor mm …)` path so no config can
+  drift; the 11-22 refactor left the primary's exec + run-config
+  byte-identical to the live system). Its contract (full rationale in the
+  file header — the shim was already table-driven, so the generalization cost
+  it zero code):
+  `GET /v1/models` advertises **every selectable** id (the non-live ones
+  listed `"unloaded"` — serve's own loads-on-use form); a request whose
+  `model` **exactly** names a non-live engine triggers a SWAP — **wait for the
+  live engine's `activity.in_flight` to drain** (up to `SWAP_DRAIN_SECS`,
+  default 180 s; still busy → 409 `busy`, **nothing stopped**) → stop live
+  unit → wait
+  `amd-smi` free VRAM (`vram_min_mib`: flash-next + coder 30000 / q36 25000;
+  NOTE the
+  amd-smi 7.2.4 `metric -m --json` shape is `gpu_data[0].mem_usage.free_vram`,
+  not a flat list — the flat read silently returned None = gate skipped until
+  fixed the same day) → `systemctl start strata-<key>` → poll `/v1/status`
+  `loaded:true` (≤25 min,
+  inside nginx's 3600 s location timeout) → forward the buffered request. A
+  failed bring-up **rolls the stopped unit back** and 503s; with nothing live
+  the shim **never starts an engine** (503 `gpu-mode llm`) — the lease
+  invariant stays gpu-mode's. Unknown/absent `model` = untouched pass-through
+  to whatever is live, which is what keeps Recallium's stale DB row and every
+  name-blind client on the live model. A **liveness completion** (answer
+  budget ≤ `SWAP_PROBE_MAX_TOKENS`=4 **and** ≤ `SWAP_PROBE_MAX_CHARS`=1024
+  chars of message text, no tools) is likewise forwarded to the live engine
+  even when it names another model — "are you still there" gets a *nod*, never
+  a reload (2026-11-23: two clients naming different models had been turning
+  every turn into a ~30 s reload and every reload into a SIGTERM'd request;
+  the drain + nod are the fix, both logged as `WAIT`/`BUSY`/`NOD`). Consequences to remember: the first
+  request after a name change pays the model load (measured 2026-11-18, warm
+  page cache: flash→q36 26 s, q36→flash 45 s; cold cache = minutes — the shim
+  waits `loaded:true` up to 25 min); a swap interrupts
+  the other model's in-flight streams (journal line `SWAP <id> -> <id>`);
+  name-blind traffic follows whichever model is live — llama-swap-era
+  semantics, back with a Nix-built table (`swapConfig`) over the selectable
+  models. `gpu-mode llm` restores the **primary** and stops every running
+  partner first (warning + prompt if a turn is in flight);
+  `gpu-mode sd|game` stop ALL LLM units — the list is
+  `config.ai.strataEngineUnits` (primary first), baked into the command by
+  `gpu-mode.nix` as `GPU_MODE_LLM_UNITS`, so a new selectable model needs no
+  gpu-mode edit; a reboot always comes back on
+  `ai.strataModel` (only `strata.service` has wantedBy). `strata-batch` still
+  means flash-next-batching; on the ownPath partner the batch2 config is
+  `parallel = 1`, a documented no-op.
+- **A client that hangs up now cancels the request (`CANCEL` in the shim's
+  log).** `_proxy()` runs the upstream leg in a worker thread and watches the
+  *client* socket with `select`+`MSG_PEEK` every 0.5 s; on EOF it
+  `shutdown(SHUT_RDWR)`s the upstream, and llama-server stops the task. This
+  matters because a prefill can run for many minutes before the first response
+  byte exists, so a blocking read can never notice a dead client — on
+  2026-11-23 an orphaned 102K prefill ground for 8 minutes after its clients
+  were cut off at the firewall. Two traps worth keeping in the code: plain
+  `close()` from another thread sends **no FIN** while a read is in flight (use
+  `shutdown()`), and llama.cpp itself polls nothing during compute —
+  `req.is_connection_closed` exists in httplib but the slot loop never calls
+  it, so the FIN is the only signal. Measured: cancel within ~4 s, task
+  released at 4 108 of 74 K tokens. **Known gap:** the same check is not wired
+  into the swap wait in `route()`, so a client that dies during a model swap is
+  only noticed once the swap finishes.
+- **A long-context reply can collapse to one repeated token (or a thinking-only
+  turn with no answer).** This is the **fp16-overflow #606 class**, not a model
+  quality issue: a `q8_1` activation block stores its scale and 32-value sum as
+  fp16 (`max 65504`), and a block sum or scale can round to `+inf`, giving
+  `inf * 0 = NaN` in the dot product (`ggml-org/llama.cpp#23606` is the same).
+  The int8 KV cache has the same shape (a 64-value group's `amax/127` as fp16).
+  **0.1.40 fixed upstream the two fused-SwiGLU sites our 0.1.39 build clamped
+  itself**, and **0.1.41's #1448 clamped the remaining three emit sites** — incl. the
+  opt-in S26 swiglu kernel (`iq_kernels.cu` `s26_swiglu_q8_1_kernel`, our clamp (1),
+  now byte-identical upstream, so that `postPatch` block is gone) and the two
+  `STRATA_QFUSE` sites we had left alone (`fused_gr.cu gr_q8_tail`,
+  `verify_kernels.cu gdn_q8_1_store`). What is still ours, still unclamped upstream:
+  the int8 KV scale — `kv_q8.cu:55` (decode) and `kv_append_kernel`,
+  `prefill/kernels.cu:2558` (was 2509 in 0.2.11, 2257 in 0.2.7.1, 2199 in 0.2.1.1, 1702 in 0.1.44.1, 1691 in 0.1.43, 1340 in 0.1.42) — both
+  live here because we run `--kv int8`. Still unclamped on 0.2.13.1 (re-checked on
+  `628f7495`: `kv_q8.cu:55` has not moved and that file still contains no `65504` at all,
+  and the prefill target is still exactly once — `hf_sat` now sits at `:69` above it), so
+  both `postPatch` clamps are still needed and both
+  `--replace-fail` targets are still unique.
+  Full incident history, the exact sites, and verification
+  commands: [`docs/strata-degeneration.md`](docs/strata-degeneration.md).
+- **The recurring strata "core dumps" are not crashes — they are the engine's hang
+  watchdog (upstream #29) killing itself after 60 s without GPU progress**, and each one is
+  followed by an amdgpu MES queue-teardown failure and a MODE1 GPU reset (`VRAM is lost due to
+  GPU reset!`). Always **prefill**, always `waiting for the GPU (attention, router)`, at 49K–186K
+  tokens. The cores are useless (stripped binary, no build-id, 41 threads parked in libc stubs)
+  and were **32 GB each on `/`** — `LimitCORE = 0` is now set in
+  `hosts/zen3-nixos/ai/strata.nix`. ⚠️ `NRestarts=0` does **not** mean healthy: `bin/strata-server`
+  restarts the engine child in-process, so systemd never sees the failure. Top fix candidate:
+  `HSA_USERPTR_FOR_PAGED_MEM=0` (upstream #750 = two R9700s on ROCm 7.2; the build-time
+  nixpkgs ROCm moved 7.2.3 → 7.2.4 with the 0.2.13.1 deploy, but that scope is headers and
+  link libs only — the engine maps its whole HIP runtime from `rocm10-runtime.nix`, proof:
+  `sudo cat /proc/$(pgrep -f '[b]in/strata --serve')/maps | grep -c rocm10-runtime`) is
+  applied in `configFile`'s `env` since 2026-10-08 — verify with
+  `sudo tr '\0' '\n' < /proc/$(pgrep -f '[b]in/strata --serve')/environ | grep -i userptr`.
+  Full write-up: [`docs/strata-hang.md`](docs/strata-hang.md).
+- **`hosts/zen3-nixos/ai/strata-kernel-audit.diff`** (`patches = [...]`, applied before
+  `postPatch`) is **audit only — the guard is upstream now.** 0.1.43 shipped #1892: a
+  finiteness guard on by default behind the *same* `STRATA_NAN_GUARD` switch our patch had
+  invented, which emits nothing for the poisoned window, drops every cached state, re-reads
+  the prompt from token 0 and retries the request once in `serve/server.py`
+  (`non-finite logits (#879)`). Our guard only failed the window, and two guards behind one
+  env var is a coin toss, so ours was dropped on 2026-10-12 and the file renamed from
+  `strata-nan-guard.diff`. What remains is what upstream still cannot get: **where the
+  poison is born** — per-stage first-non-finite (layer/row/col/raw bits) probes across the
+  MoE path plus a dump in `Verifier::run` that rides on upstream's `nf_mask_` and prints
+  *every* fire. It is allocated and launched **only** with `STRATA_KERNEL_AUDIT=1` (set in
+  `strata.nix`) because each probe is an extra node in the captured verify graph. Re-based
+  onto 0.2.10 on 2026-11-04: **3 of 19 hunks were rejected** by upstream context changes
+  and re-placed by hand (all three pure context shifts: a `strata::dispatch::notef()`
+  inserted between the `hits_in_combine` compute and `moe_hit_add`; the `tap_on_` gate
+  widened to `(!batch_rec_ || tap_batch_)` for DFlash2; and `native_expert_set_expdec`
+  growing a tri-state `on < 0` — the trailing context line of the iq_kernels.cu hunk).
+  The other 16 landed with offsets only. Regenerated from the patched tree: 19 hunks,
+  280 additions, 0 deletions, byte-identical added lines, `--fuzz=0` with **no offsets**
+  (`patch -p1 --fuzz=0` and `git apply --check` both clean). Re-based onto **0.2.11** on
+  2026-11-05 with **zero rejects**: the file regenerated from the patched tree is the
+  0.2.10 one with byte-identical added lines and only 4 hunk headers moved — a pure
+  **+3-line drift in `src/kernels/cuda/iq_kernels.cu`** (the `native_expert_grouped`
+  region). Re-based onto **0.2.13.1** on 2026-11-10, again with **zero rejects and no
+  hand-placed hunks**: 19 hunks, 280 additions, byte-identical added lines, `patch -p1
+  --fuzz=0` with no offsets and `git apply --check` clean on `628f7495`; the drift is
+  `verify.cpp` +3 (two hunks +4, the `run()`-tail dump +10), `verify.hpp` +19 and three
+  of `iq_kernels.cu`'s four hunks +7 — and that +7 is the whole file's diff between
+  0.2.11 and 0.2.13.1 (the `STRATA_EXPERT_V2K` block at `:6306-6326` gaining Windows
+  gfx1151), which is why hunk #1 did not move. Two clean re-bases in a row: the next
+  bump is again an offset check first, a hand-place only if `iq_kernels.cu` or
+  `verify.cpp` actually changes under the anchors. (Earlier re-bases: onto
+  0.2.7.1 on 2026-10-29, 6 hand-placed — `topk_scratch_` in verify.hpp, the `sh_fork`
+  `note_prio_tail` body, the `grouped()` trailing `true` + `ar_on()` branch (never live
+  at our 43 % cache), the `tap_on_` block after `stamp(l, 24`, `tap_write`/
+  STRATA_LOGITS_DUMP at the run()-tail dump site, the `g_exp_phase == 3` early-return;
+  onto 0.2.1.1 on 2026-10-20, 5 hunks.)
+  Its two anchors are intact: upstream's `nf_mask_` (`Verifier::note_nonfinite` in
+  `verify.cpp`) and the `hits_in_combine` gate the routed-total probe checks.
+  **#879 is closed but not dead** — closed 2026-10-13 as a stale-tracker sweep, and on
+  2026-10-19 a fresh repro landed (engine 0.1.45, RTX 3080, an 18,442-token agent prompt with
+  48 tools → fires every time; `STRATA_PREFILL_MMQ=0` answers the same body; birth in
+  layer 1's MoE gate/up on the MMQ prompt path, types 22/42 = IQ4_XS gate/up — our pack's
+  family; we build with `-DSTRATA_PREFILL_MMQ=ON`), so the audit stays needed.
+  **Never re-apply an old file with fuzz** — `--fuzz=3`
+  "succeeds" and puts the arena carve inside the `mapped()` chain and the input audit
+  inside the PLE `try` block.
+- **Two incidents, two sites.** Incident 1 (`!` ×256, ~156K context) was fixed
+  by commit `437a753` (fused-SwiGLU `q8_1` store in `native_mmvq.cu` — upstream
+  fixed the same site in 0.1.40, so that clamp no longer exists here). Incident
+  2 (`索` ×256, 132.9K context, Pi session `01a1099d-927e-76ba-87c0-9abc71fa1df9`)
+  hit **despite** `437a753` — the fix here also clamps the int8 KV scale
+  (`kv_q8.cu`, `prefill/kernels.cu`) and the gfx906-only fused gate/up store
+  (`iq_kernels.cu`, latent on gfx1201). Incident 3 (`!` ×255 at ~100K, in the
+  *thinking* channel) fired **with every clamp in place**, which is what proved the
+  root cause is a GPU routed-expert data-path defect (#879), not an fp16 scale.
+- **A Pi session "crash" here is usually a folded reply, not an engine crash.**
+  The reply comes back with `finish_reason: "length"` (repeat guard ends it
+  after 256) and too few tokens, so Pi treats it as a recoverable truncated
+  response: it omits the turn and starts a compact-and-retry loop that never
+  recovers. Look in `bili.log` for a *degenerate terminal turn* retry before
+  assuming Pi or the host died — there is no `crashes.json`, OOM, or coredump.
+- **The engine does not run on nixpkgs' ROCm — it runs on a store-built ROCm
+  10.0.0.** `hosts/zen3-nixos/ai/rocm10-runtime.nix` fetches the ROCm 10.0.0
+  (TheRock) runtime and `strata.nix` puts it first with
+  `lib_dirs = [ "${rocm10}/lib" ]`; `serve/server.py`'s `child_env()` PREPENDS
+  that to `LD_LIBRARY_PATH`, overriding the build's RUNPATH to nixpkgs' ROCm
+  7.2.3. That swap — not any clamp — is what stopped the #879 poison (0 fires in
+  1911 requests vs 2/1399 on 7.2.3), so **do not "simplify" it back to
+  `pkgs.rocmPackages`**: nixpkgs only has 7.2.3 (`rocmPackages_8/_9/_10` do not
+  exist) and 7.2.x is the version that fires. Two stages on purpose: a
+  fixed-output `curl` of the one 8 GB ROCm layer of
+  `rocm/dev-ubuntu-24.04:10.0.0-full` (an OCI blob's sha256 *is* its manifest
+  digest, so no skopeo/dockerTools needed) and then a `lib/*`-only tar extract —
+  changing the filter costs a re-extract, never a second 8 GB download. Don't
+  trim the 16 GB to the ~2 GB the engine maps: it dlopens by SONAME and a
+  missing one fails at runtime. Until 2026-10-14 this lived at
+  `/opt/rocm-10.0/lib`, laid down by hand by `scripts/setup-rocm10-libs.sh`,
+  with an `ExecStartPre test -e` guard because `child_env()` silently drops a
+  missing dir (that guard is gone — a store path cannot be missing).
+  `/opt/rocm` → `pkgs.rocmPackages.clr` (a tmpfiles symlink in
+  `ai/default.nix`) is a different, unrelated thing. Verify with
+  `sudo cat /proc/$(pgrep -f '[b]in/strata --serve')/maps | grep -c rocm10-runtime`.
+- **Verify the running engine, don't assume:**
+  `systemctl show strata -p ExecStart` and `readlink /proc/$(pgrep -f '[b]in/strata --serve')/exe`
+  must show the store path from the latest build (the build is offline and the
+  host has no gcc, so it cannot be rebuilt on the box). `bin/strata-server` is a
+  tiny wrapper — compare the native `bin/strata` when diffing builds.
+- **Deploy:** edit `strata-package.nix`, `nix build .#strata --no-link`, then
+  `sudo nixos-rebuild switch --flake .` (zen3-nixos has autoRollback commented
+  out — no `nixos-confirm`). The switch restarts `strata`; the model load takes
+  ~30 s and can make the box sluggish for 1–3 min.
+
+
+
+---
+
+> Archived from AGENTS.md (2026-11-24). The short version lives in AGENTS.md; this file holds the full backstory.
+

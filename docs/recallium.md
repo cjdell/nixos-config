@@ -413,3 +413,91 @@ PGPASSWORD=recallium_password psql -h 127.0.0.1 -p 5433 -U recallium -d recalliu
   status (the *ollama account* row itself stays `inactive` in that response —
   only the config's `health_status` matters, which sits in
   `llm_provider_configs`).
+## Recallium (memory server, live on zen3-nixos)
+
+Recallium (`recalliumai/recallium` container, rootful podman like `diamcp`) is a
+memory server for AI agents: MCP + web UI + Postgres. Its LLM processing runs on
+the **Strata engine** (no cloud) — the same Qwen3.8-Flash-Next the rest of this
+box uses, reached over loopback. It was **disabled from 2026-09-26 to 2026-10-15**
+while llama-swap was torn down, and is live again since 2026-10-15 22:41 BST with
+its LLM pointed at Strata. Full usage docs: `docs/recallium.md`.
+
+- **UI:** `http://192.168.49.50:9001`, `http://192.168.49.50/recallium/` or
+  `https://recallium.ai.chrisdell.info/`
+- **MCP:** `http://192.168.49.50/recallium-mcp` or
+  `https://recallium-mcp.ai.chrisdell.info/` (Streamable HTTP, protocol
+  2025-11-25)
+- **REST:** `http://127.0.0.1:8001/api/...` or
+  `https://recallium.ai.chrisdell.info/api/...`; Postgres on `127.0.0.1:5433`
+  (user `recallium` / `recallium_password`, db `recallium_memories`)
+- **Chain:** container (OpenAI provider, fixed `base_url`
+  `http://host.containers.internal/recallium-llm`) → nginx `/recallium-llm/`
+  (in `hosts/zen3-nixos/ai/recallium.nix`) → **`recallium-llm-shim` on
+  `127.0.0.1:8090`** → **Strata on `127.0.0.1:8080/v1`** — the same upstream
+  `https://strata.ai.chrisdell.info/` serves, hit on loopback instead of
+  hairpinning TLS. The shim (`hosts/zen3-nixos/ai/recallium-llm-shim.py`,
+  `recallium-llm-shim.service`) exists because Recallium asks for
+  `max_tokens=2000` and Strata's `answer_room` spends 1488 of it thinking, so
+  every insight answer came back truncated and `json_repair`-patched (25/25 on
+  the 2026-11-17 nightly run, ~87 s each). The 2000 is compiled into the image
+  (`PROTECTED_BUILD`), so the shim adds
+  `chat_template_kwargs.enable_thinking=false` to `/chat/completions` bodies and
+  streams the rest untouched. Switching backend = edit that one location block
+  + `nixos-rebuild switch`; no DB change (see docs/recallium.md). The old
+  `ollama-bridge` (`:11434`) is legacy — Recallium no longer uses it, and
+  `config.ai.recalliumGpu` is now read only by the disabled `llama-swap.nix`.
+  ⚠️ Two things that location must keep or every Recallium LLM call breaks:
+  **`proxy_set_header Host 127.0.0.1;`** (Strata's DNS-rebinding guard 403s the
+  container's `Host: host.containers.internal` — `recommendedProxySettings`
+  forwards the client's Host verbatim; `127.0.0.1` is allowed by default, the
+  public names are what `allowed_hosts` in `strata.nix` carries) and
+  **`client_max_body_size 32m;`** (nginx's 1 MiB default 413s a whole-session
+  metadata prompt).
+- **Active model:** whatever the :8080 engine serves — Strata's
+  `qwen3.8-flash-next-unsloth-ud-iq4-xs-v31` (renamed 2026-11-04 for the DFlash2
+  name gate, `-v31` on 2026-11-05 with the Dynamic v3.1 pack; see the Strata
+  section) via `config.ai.strataModel` again since
+  2026-11-04 (the brief Avalon interlude served `--alias qwen3.8-flash-next`).
+  Recallium's DB row still says
+  `Qwen3-4B-Instruct-2507-Q4_K_M` (config id 1002, model id 1006, provider
+  account id 3) and that is **harmless**: Strata routes by engine, not by the
+  requested name, so an unknown/absent model name still gets the loaded model
+  (verified). Changing `ai.strataModel` needs no Recallium change at all.
+
+Operational essentials:
+
+- `POST /api/memories/` **always returns 500** (upstream response-schema bug) —
+  the row is still created; read it back via `GET /api/memories/{id}`.
+- There is **no API to change the LLM model** — edit `llm_provider_configs` in
+  Postgres directly, then `sudo podman restart recallium` (see docs/recallium.md
+  for the exact SQL). **Gotcha:** `active_llm_config_id` in `/api/setup/status`
+  reads the first ACTIVE row of `llm_failover_priority`, NOT
+  `llm_provider_configs.is_active` — repoint that row too or the status (and
+  routing) won't change.
+- **Zombie generations:** if a model is slow/looping, Recallium's 120 s client
+  timeout disconnects but the engine keeps generating — and Strata serves ONE
+  slot, so the orphan blocks every other request. llama-swap's
+  `POST :8081/api/models/unload` is gone; Strata's `POST /v1/unload` answers
+  `409 a request is running or queued` instead of interrupting it (there is no
+  cancel), so the last resort is `sudo systemctl restart strata` — a multi-minute
+  model reload.
+- **Memory enrichment costs ~27 s per memory** on Strata (`llm_enrichment`
+  25.1 s of it) and queues behind interactive traffic; `MEMORY_PROCESSOR_MAX_WORKERS
+  = 8` in the container is embedding/tag parallelism, not LLM concurrency.
+- `LFM2.5-2.6B-Q8_0` PGLoops on Recallium's JSON metadata prompt (see the
+  llama-swap UI at `http://192.168.49.50/ui/#/logs`); don't switch it back.
+- Setup is complete (`active_llm_config_id: 1002`); `mcp_tools_enabled: false` in
+  `/api/setup/status` is cosmetic and does not block MCP.
+- **The `recallium-healthcheck` oneshot must always exit 0.** Its timer's
+  `OnBootSec` has long passed, so it fires the instant it is installed — during
+  `switch-to-configuration`, alongside `podman-recallium` itself — and a curl
+  exit 7 (container still booting) under `set -e` failed the unit, which made
+  the whole activation report `status 4` even though everything applied. It now
+  skips containers younger than 180 s and treats "not running" as "start it".
+
+
+
+---
+
+> Archived from AGENTS.md (2026-11-24). The short version lives in AGENTS.md; this file holds the full backstory.
+

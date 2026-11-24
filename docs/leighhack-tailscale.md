@@ -768,3 +768,68 @@ for anyone else during their bad minutes.
   commented-out `nixos-container` version of this same bridge (superseded by the VM)
 * `hosts/grafton-router/services/adguard.nix` — the `int.leighhack.org` DNS forward
 * `hosts/grafton-router/services/hackspace-tunnel.nix` — the health timer
+## grafton-router has TWO tailscale connections (and only one is monitored)
+
+`tailscale status` on grafton-router shows the **grafton** tailnet (our headscale
+at `tailscale.home.chrisdell.info`, `100.64.0.0/24`, magicDNS `grafton.tailscale`).
+The **leighhack** tailnet (theirs, `tailscale.leighhack.org`, `10.3.0.0/16`,
+`int.leighhack.org`) is a *different* connection: it runs inside the
+`grafton-hackspace-client` microVM and is reached via a hand-written
+`ip route 10.3.0.0/16 via 192.168.49.15`. **A perfectly healthy
+`tailscale status` says nothing about leighhack.** When leighhack is down, what
+actually breaks is DNS: `adguard.nix` forwards `[/int.leighhack.org/]10.3.1.1:53`,
+so the symptom is "a page won't load", not "a VPN is down".
+
+Full write-up: **`docs/leighhack-tailscale.md`**. Diagnose with
+`sudo ~/nixos-config/scripts/check-hackspace-tailscale.sh` (walks route → VM →
+tailscale session → tunnel → DNS and names the failing layer). `hackspace-tunnel-check.service`
+probes it every 2 min and pushes to the phone via `notifications.gateway`.
+Since 2026-11-19 there is an **IPv6** path through this VM — as of
+2026-11-23 only for the **tailnet-only ULA**: `networking/interface.nix` routes
+`fd99:dead:beef::/48` via the VM's link-local, while the hackspace's **public**
+`2001:8b0:1d14::/48` now goes straight over Zen. Their nginx `…225::1` is
+publicly routable and leigh keeps a standing firewall allow for the Grafton
+IPv6 ranges; the via-VM route for the /48 was **deleted** because `gw`↔VM
+tunnel flaps stall *established* TCP (SYN-ACK fine, data silent) — the one
+failure browsers never fall back from: that was the 2026-11-22/23 "Pixel hangs,
+then Mac hangs unless IPv4 forced" saga, and the old claim that forwarded v6
+was masqueraded to the VM's fd7a address was false (masq rule counter 0 — LAN
+clients crossed the tailnet with their own `2a02:…` source). The health check's
+v6 layers now report HTTP 403 on `*.int` as "**their** allow row broke", and a
+reappearing `ip -6 route show 2001:8b0:1d14::/48` means someone re-attached
+the probe to the tunnel's flaps. Both directions of the history (the 794×403
+of 2026-11-19 and this) are in `docs/leighhack-tailscale.md` — read it before
+re-routing or re-pinning anything against that /48.
+
+The 2026-10 outage, in one paragraph: the VM had **no disk**, so
+`/var/lib/tailscale` was RAM-only and every restart had to re-register; nixpkgs'
+`tailscaled-autoconnect.service` is `set -e`, `Type=notify`, and has **no
+`Restart=`**, so on 2026-10-09 one registration attempt that never completed
+killed the connection permanently — the host journal shows
+`Starting tailscaled-autoconnect.service...` with no matching `Started` line,
+whereas working boots get it 3 s later. The node was therefore **absent from the
+hackspace's headscale**, not route-unapproved, and nothing retried for 5 days.
+**Nothing in the config had changed** (VM module last edited 09-28, secrets
+09-22); the key is reusable and worked first try, and the node is not ephemeral.
+It "always used to work" because the VM ran for weeks without restarting — every
+restart had always been a one-shot gamble against someone else's server.
+
+Fixed by: persistent `microvm.volumes` image for `/var/lib/tailscale` (so
+re-registering isn't needed at all — verified, same node `Created` survived a
+rebuild), `Restart=on-failure` on autoconnect, root `authorizedKeys` + a router→VM
+deploy key (there was previously **no way in**: password-only root, no VSOCK,
+serial on qemu stdio) plus `tcpdump`/`dig`/`jq`, and the health timer.
+
+**The return path is theirs.** The VM advertises `192.168.49.0/24`; if their
+headscale has not enabled it for the current node, packets leave and die on the
+way back — "tailscale down" from the router, "all fine" inside the VM. After a
+*fresh* registration this took **~20 min** to settle on 2026-10-15 (a recovery
+effect, not the outage cause), which is why the health check waits ~10 min before
+paging. **Never restart the VM and immediately conclude it failed.**
+
+
+
+---
+
+> Archived from AGENTS.md (2026-11-24). The short version lives in AGENTS.md; this file holds the full backstory.
+
