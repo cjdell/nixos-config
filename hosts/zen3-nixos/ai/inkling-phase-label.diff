@@ -1,0 +1,24 @@
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -5963,11 +5963,20 @@
+             # #984: while a thinking budget applies, the thinking line shows it, not the request's max_tokens
+             limit = (f"budget {s['thinking_budget']} (max {s.get('max_tokens')})"
+                      if s["phase"] == "thinking" and s.get("thinking_budget") else f"max {s.get('max_tokens')}")
++            # `phase` is the string set at ADMISSION ("reading the prompt") until an event surfaces - reasoning ->
++            # "thinking", content -> "answering" (_note).  A tool call's arguments never surface while they are being
++            # written (inkling_dialect: a `tool_json`/`tool_text` channel accumulates into tool_acc and yields ONE
++            # content event when it closes), so a big write_file call printed
++            #   "reading the prompt: 6,470 of max 32000 tokens, 20.0 tok/s decode, 344 s total"
++            # - a read that had finished 5 minutes earlier, beside a decode rate (2026-11-24, this lane).  This
++            # branch only ever runs once the first token exists, so the honest word here is "generating"; the
++            # request's own counters (generated, decode rate, seconds) are the same either way.
++            phase = "generating" if s.get("phase") == "reading the prompt" else s["phase"]
+             # two clocks, labelled: the rate is decode only (its clock starts at the first generated token), the
+             # seconds are the whole request (read/restore included) - printing them unlabelled read as if the
+             # generated tokens had taken that long (2026-11-24: a 109K restore + 836 tokens showed "3.6 tok/s, 702 s"
+             # for 1.19 tok/s end to end).
+-            print(f"[strata] {s['phase']}: {s['generated']} of {limit} tokens, {rate:.1f} tok/s decode, "
++            print(f"[strata] {phase}: {s['generated']} of {limit} tokens, {rate:.1f} tok/s decode, "
+                   f"{el:.0f} s total", flush=True)
+         return now
+ 

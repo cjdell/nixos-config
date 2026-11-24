@@ -97,7 +97,38 @@ let
   rocm10 = pkgs.callPackage ./rocm10-runtime.nix { };
 
   models = "/home/cjdell/Models/Inkling-2-Mini-GGUF";
-  model = "${models}/Inkling-2-Mini-UD-Q4_K_XL.gguf";
+  # Strata's NATIVE pack, not the Unsloth GGUF, from 2026-11-24 23:05 — the
+  # depth wedges are a headroom problem and the GGUF is what consumed the
+  # headroom.  Shape of every wedge on the GGUF (three in one evening, all at
+  # 107-122K prompt length, one slot and two slots alike): the read finishes
+  # (`reading the prompt: 107,605 of 107,605 tokens`), no first token follows
+  # for 230-300 s, GPU pinned at 100 % GFX / 145 W / umc 27 % with the engine
+  # reporting 4 threads and ONE core at 104 % CPU, while `vram` reads ~22.8 GiB
+  # used / ~9.7 GiB free and GTT is at noise.  What makes it a headroom problem
+  # is the arena:
+  #   expert arena budget 26.00 GiB -> 25.64 GiB      (restart 1)
+  #   expert arena budget 26.60 GiB -> 26.23 GiB      (restart 2)
+  #   expert arena budget 26.90 GiB -> 26.53 GiB      (restart 3)
+  # `--info` on the GGUF says build=GGUF-NVFP4 and the engine's log says
+  # "native lossless GGUF_RAW GPU kernels active for 512/3072 experts (zero
+  # S_K transcode)" — the engine expands a 17.63 GB GGUF into a 26.5 GiB arena,
+  # leaving ~4 GiB of a 31.86 GiB card for K/V plus the depth-proportional
+  # prefill scratch.  fp8 K/V bought reuse back at 118K (reused 118,162;
+  # prefill 6,067 ms vs 157,253 ms) and the lane still wedged.
+  #
+  # These are the engine's own packs, and they are what every published Inkling
+  # number is measured on.  SQ-20 (18.02 GiB) is upstream's "matched the
+  # original exactly in every test" pick — 0.00000 KL, 100 % top-1 — and on a
+  # 24 GiB card it already runs entirely in VRAM, so on this 32 GiB card it
+  # leaves ~12 GiB for K/V + scratch against the GGUF's ~4 GiB.  SQ-10
+  # (9.75 GiB, 92.35 % top-1) is the pack upstream's own R9700 row was measured
+  # with (99.0-106.5 t/s decode, 3,982 t/s prompt) and the fallback if SQ-20
+  # still wedges: it maximises headroom at a real quality cost.  SQ-15
+  # (13.36 GiB, 96.68 %) sits between them.  Files: scripts/fetch-inkling-strata.sh.
+  #
+  # REVERT to the GGUF in one line: "${models}/Inkling-2-Mini-UD-Q4_K_XL.gguf"
+  # (still on disk; it is the llama.cpp lane's model too).
+  model = "${models}/Inkling-2-Mini-SQ-20.strata";
   vision = "${models}/Inkling-2-Mini-Vision.strata";
   drafter = "${models}/mtp.safetensors";
   drafterAlt = "${models}/dspark-Inkling-2-Mini-Q8_0.gguf";
@@ -194,26 +225,25 @@ let
       # contaminated card).  Its documented upside is only +2-2.5 % decode, so it stays off until that
       # A/B is run cleanly; `drafting = "dspark"` is the one-line revert.
       drafting = "off";
-      # TWO slots, for cache separation rather than throughput: a title/probe
-      # call that continues nothing is routed to the *other* slot instead of
-      # overwriting the agent's conversation where it sits (serve/inkling's
-      # _inkling_route; upstream sent every non-continuing request to slot 0,
-      # "a side request (20 tokens) replaced the cached chat (78361 tokens)",
-      # 2026-11-24). The second slot is only a K/V allocation when it actually
-      # runs something. A request that CONTINUES a busy slot's conversation now
-      # waits for that slot instead of taking the other one (CONTINUATION_WAIT_S,
-      # see ./inkling-conversation-park.diff): one conversation resident twice
-      # is ~218K tokens of K/V against a ~178K budget, which is what made both
-      # slots thrash.
+      # ONE slot, from 2026-11-24 22:30: the second slot is the only thing that has produced every stall on this
+      # lane, and this box runs ONE conversation.  The failures, all measured here in the last two hours, are one
+      # shape: a second ~110-120K context resident beside the live one - 218-232K tokens of K/V against a 163,840
+      # pool - so the LIVE request cannot hold its own K/V, nobody makes progress, and the GPU spins at 100 % /
+      # 118-166 W (0.2 tok/s decode, or a read that finishes and never emits a first token for 300 s).  The second
+      # copy was never a second chat in any capture: the route trace showed the same conversation's PREVIOUS TURN
+      # held in the other slot (e.g. `slots held [115931, 0], prefix per slot [115780, 0]`).  Engine-side parking
+      # (STRATA_INK_PARK=1, still set below) is what should hand that idle slot's K/V back, and in this build it
+      # never fires - zero `[ink-ckpt] parked slot` lines in a full evening - so the slot just sits on the pool.
       #
-      # Conversation PARKING (engine-side: parks idle slots to pinned host RAM)
-      # is OFF by default in this build.  The 400-800 s "reading the prompt"
-      # stalls that motivated that were measured while orphan engines held the
-      # card (see ExecStopPost below), so parking has NOT been shown to be slow
-      # on a clean one - it restores in ~0.5 s for 16.7K.  STRATA_INK_PARK=1
-      # turns it back on and it needs a clean re-test before it is default again;
-      # the serve-side routing above is independent of it and stays on.
-      parallel = 2;
+      # What this costs: a title/probe call that continues nothing now overwrites the agent's cached conversation
+      # (upstream's complaint: "a side request (20 tokens) replaced the cached chat (78361 tokens)"), so the turn
+      # after one pays a cold read (~150 s at 110K) instead of reusing.  That is the deliberate trade: one cold read
+      # per side call is cheaper than a dead lane, and at this depth reuse of the main conversation is the only
+      # thing that makes turns fast (`reused ≈ 122K`, prefill ~1 s, with fp8 K/V).
+      #
+      # REVERT to 2 only together with a working idle-slot park or a pool that holds two contexts, or the stalls
+      # come straight back.  `parallel = 2` was chosen for cache separation, not throughput.
+      parallel = 1;
       env = {
         HIP_VISIBLE_DEVICES = "0"; # only the R9700 is HIP-visible (gfx803 is out of ROCm)
         # Park an IDLE slot's K/V in pinned host RAM (engine-side `park_slot`) instead of leaving ~115K tokens of a
@@ -246,7 +276,7 @@ in
   ];
 
   systemd.services."inkling-2-mini" = {
-    description = "Strata strata-inkling 0.2.21 server (Inkling-2-Mini UD-Q4_K_XL, DSpark) on the R9700 — strata-swap lane";
+    description = "Strata strata-inkling 0.2.21 server (Inkling-2-Mini SQ-20 pack, DSpark) on the R9700 — strata-swap lane";
     documentation = [
       "https://huggingface.co/strata-engine/Inkling-2-Mini-Strata"
       "https://github.com/Niko1221/Strata/releases/tag/v0.2.21"
