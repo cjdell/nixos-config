@@ -90,6 +90,14 @@ stdenv.mkDerivation (finalAttrs: {
   # 0.2.17 in git: c905142).
   cmakeDir = "../engine";
 
+  # Conversation parking: one slot's K/V in the card at a time, every other
+  # conversation in pinned host RAM (the qwen lane's --conversation-cache-*
+  # behaviour, which the inkling shape engine does not have). Upstream keeps
+  # one conversation per slot and only checkpoints the SWA ring; the diff
+  # saves the global-visit K/V too, reallocates pages on restore, and parks
+  # idle slots. See the file header for the measurements it exists for.
+  patches = [ ./inkling-conversation-park.diff ];
+
   nativeBuildInputs = [
     cmake
     pkg-config
@@ -146,9 +154,15 @@ stdenv.mkDerivation (finalAttrs: {
     # strata_control + strata_cli at module scope; tools/ holds
     # inkling_tokenizer.py (reachable via server.py's sys.path insert of
     # ROOT/tools; ./inkling.nix's tokenizer oneshot uses it too).
-    cp -r ${finalAttrs.src}/terminal/serve ${finalAttrs.src}/terminal/tools \
-          ${finalAttrs.src}/terminal/data ${finalAttrs.src}/terminal/strata_control \
-          ${finalAttrs.src}/terminal/strata_cli $out/share/strata/
+    #
+    # Relative to the build dir, NOT ${finalAttrs.src}: `patches` are applied
+    # to the unpacked tree, so ${finalAttrs.src}/terminal/... would install the
+    # PRISTINE Python and silently drop this package's server.py hunks (the
+    # C++ half is compiled from the build dir, so a mixed build compiled the
+    # engine patch and shipped the unpatched serve).
+    cp -r ../terminal/serve ../terminal/tools \
+          ../terminal/data ../terminal/strata_control \
+          ../terminal/strata_cli $out/share/strata/
 
     # Pi's agent-level retry classifies from the error TEXT; prefix
     # post-stream failures with "server error" so a dead/restarted engine

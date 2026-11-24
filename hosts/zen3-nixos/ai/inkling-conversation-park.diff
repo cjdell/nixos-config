@@ -1,0 +1,566 @@
+diff --git a/engine/src/inkling2/hip/ink_hip_backend.hip.cpp b/engine/src/inkling2/hip/ink_hip_backend.hip.cpp
+index f17df80..c8299b5 100644
+--- a/engine/src/inkling2/hip/ink_hip_backend.hip.cpp
++++ b/engine/src/inkling2/hip/ink_hip_backend.hip.cpp
+@@ -1672,7 +1672,11 @@ public:
+         PromptCkpt& ck = ckpts_[slot];
+         ck.valid = false;
+         // The SWA ring holds positions [seq_len - swa_win, seq_len) (and older ones up to the ring size) only when nothing past seq_len has been fed.
+-        if (slots_[slot].seq_len != seq_len) return false;
++        if (slots_[slot].seq_len != seq_len) {
++            if (std::getenv("STRATA_INK_CKPT"))
++                std::fprintf(stderr, "[ink-ckpt] save slot %d failed: resident seq_len %d != %d\n", slot, slots_[slot].seq_len, seq_len);
++            return false;
++        }
+         const int n_pools = static_cast<int>(swa_pools_.size());
+         const int mpp = swa_pools_[0].max_pages_per_slot;
+         const bool fp8 = swa_pools_[0].is_fp8;
+@@ -1723,6 +1727,44 @@ public:
+             }
+         }
+         if (!ok) { (void)hipGetLastError(); return false; }
++        // Global-visit K/V (the bulk of a long conversation's cache). A parked slot's pages are freed, so unlike the
++        // SWA-only checkpoint this copy is required to bring the conversation back.
++        if (!glob_pools_.empty()) {
++            const int ng = static_cast<int>(glob_pools_.size());
++            const int gmpp = glob_pools_[0].max_pages_per_slot;
++            const bool gfp8 = glob_pools_[0].is_fp8;
++            const size_t gpage_b = static_cast<size_t>(kKvPageTokens) * glob_pools_[0].kv_dim * (gfp8 ? 1u : 2u);
++            const size_t gsc_page_b = static_cast<size_t>(kKvPageTokens) * sizeof(float);
++            for (const VisitKvPool& kvp : glob_pools_)
++                if (kvp.max_pages_per_slot != gmpp || kvp.is_fp8 != gfp8 || kvp.kv_dim != glob_pools_[0].kv_dim) return false;
++            if (!ck.alloc_host_global(static_cast<size_t>(ng) * gmpp * gpage_b,
++                                      gfp8 ? static_cast<size_t>(ng) * gmpp * gsc_page_b : 0)) return false;
++            ck.gphys.assign(static_cast<size_t>(ng) * gmpp, -1);
++            for (int i = 0; i < ng && ok; ++i) {
++                const VisitKvPool& kvp = glob_pools_[i];
++                const int32_t* row = kvp.h_pt.data() + static_cast<size_t>(slot) * gmpp;
++                for (int lp = 0; lp < gmpp && ok;) {
++                    const int32_t ph = row[lp];
++                    if (ph < 0) { ++lp; continue; }
++                    int n = 1;
++                    while (lp + n < gmpp && row[lp + n] == ph + n) ++n;
++                    for (int k = 0; k < n; ++k) ck.gphys[static_cast<size_t>(i) * gmpp + lp + k] = ph + k;
++                    const size_t hp = static_cast<size_t>(i) * gmpp + lp;
++                    ok = ok && hipMemcpyAsync(ck.h_gk + hp * gpage_b, static_cast<const uint8_t*>(kvp.k_pool.dev_ptr) + static_cast<size_t>(ph) * gpage_b,
++                                              n * gpage_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    ok = ok && hipMemcpyAsync(ck.h_gv + hp * gpage_b, static_cast<const uint8_t*>(kvp.v_pool.dev_ptr) + static_cast<size_t>(ph) * gpage_b,
++                                              n * gpage_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    if (gfp8) {
++                        ok = ok && hipMemcpyAsync(ck.h_gks + hp * gsc_page_b, static_cast<const uint8_t*>(kvp.k_scales.dev_ptr) + static_cast<size_t>(ph) * gsc_page_b,
++                                                  n * gsc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                        ok = ok && hipMemcpyAsync(ck.h_gvs + hp * gsc_page_b, static_cast<const uint8_t*>(kvp.v_scales.dev_ptr) + static_cast<size_t>(ph) * gsc_page_b,
++                                                  n * gsc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    }
++                    lp += n;
++                }
++            }
++            if (!ok) { (void)hipGetLastError(); return false; }
++        }
+         k_sconv_snapshot_pair<<<dim3((kv_dim + 255) / 256, c_.n_visits), 256, 0, stream_>>>(
+             reinterpret_cast<const uint16_t*>(d_sconv_k_all_.dev_ptr),
+             reinterpret_cast<const uint16_t*>(d_sconv_v_all_.dev_ptr),
+@@ -1745,41 +1787,65 @@ public:
+     bool restore_prompt_checkpoint(int slot, int seq_len) override {
+         if (slot < 0 || slot >= max_slots_ || slot >= static_cast<int>(ckpts_.size()) || !slots_[slot].allocated) return false;
+         PromptCkpt& ck = ckpts_[slot];
+-        if (!ck.valid || ck.seq_len != seq_len || swa_pools_.empty()) return false;
++        if (!ck.valid || ck.seq_len < seq_len || swa_pools_.empty()) return false;
+         const int n_pools = static_cast<int>(swa_pools_.size());
+         const int mpp = swa_pools_[0].max_pages_per_slot;
+         if (ck.phys.size() != static_cast<size_t>(n_pools) * mpp) { ck.valid = false; return false; }
+-        // The slot must still map the saved pages: only free_slot unmaps them, and grow_pool keeps page indices.
+-        for (int i = 0; i < n_pools; ++i) {
+-            const int32_t* row = swa_pools_[i].h_pt.data() + static_cast<size_t>(slot) * mpp;
+-            for (int lp = 0; lp < mpp; ++lp) {
+-                const int32_t want = ck.phys[static_cast<size_t>(i) * mpp + lp];
+-                if (want >= 0 && row[lp] != want) { ck.valid = false; return false; }
+-            }
+-        }
+         const bool fp8 = swa_pools_[0].is_fp8;
+         const size_t page_b = static_cast<size_t>(kKvPageTokens) * swa_pools_[0].kv_dim * (fp8 ? 1u : 2u);
+         const size_t sc_page_b = static_cast<size_t>(kKvPageTokens) * sizeof(float);
+         bool ok = true;
++        // Pages are reallocated when they are no longer mapped (after park_slot freed them), so the saved map is read
++        // as "logical page lp holds this content" and written into whatever physical page lp maps to now.
++        std::string perr;
+         for (int i = 0; i < n_pools && ok; ++i) {
+-            const VisitKvPool& kvp = swa_pools_[i];
+-            for (int lp = 0; lp < mpp && ok;) {
+-                const int32_t ph = ck.phys[static_cast<size_t>(i) * mpp + lp];
+-                if (ph < 0) { ++lp; continue; }
+-                int n = 1;
+-                while (lp + n < mpp && ck.phys[static_cast<size_t>(i) * mpp + lp + n] == ph + n) ++n;
++            VisitKvPool& kvp = swa_pools_[i];
++            for (int lp = 0; lp < mpp && ok; ++lp) {
++                if (ck.phys[static_cast<size_t>(i) * mpp + lp] < 0) continue;
++                if (!kvp.ensure_page(slot, lp, stream_, perr)) { ok = false; break; }
++                const int32_t ph = kvp.h_pt[static_cast<size_t>(slot) * mpp + lp];
++                if (ph < 0) { ok = false; break; }
+                 const size_t hp = static_cast<size_t>(i) * mpp + lp;
+-                ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.k_pool.dev_ptr) + ph * page_b, ck.h_k + hp * page_b,
+-                                          n * page_b, hipMemcpyDefault, stream_) == hipSuccess;
+-                ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.v_pool.dev_ptr) + ph * page_b, ck.h_v + hp * page_b,
+-                                          n * page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.k_pool.dev_ptr) + static_cast<size_t>(ph) * page_b, ck.h_k + hp * page_b,
++                                          page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.v_pool.dev_ptr) + static_cast<size_t>(ph) * page_b, ck.h_v + hp * page_b,
++                                          page_b, hipMemcpyDefault, stream_) == hipSuccess;
+                 if (fp8) {
+-                    ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.k_scales.dev_ptr) + ph * sc_page_b, ck.h_ks + hp * sc_page_b,
+-                                              n * sc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
+-                    ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.v_scales.dev_ptr) + ph * sc_page_b, ck.h_vs + hp * sc_page_b,
+-                                              n * sc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.k_scales.dev_ptr) + static_cast<size_t>(ph) * sc_page_b, ck.h_ks + hp * sc_page_b,
++                                              sc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.v_scales.dev_ptr) + static_cast<size_t>(ph) * sc_page_b, ck.h_vs + hp * sc_page_b,
++                                              sc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
+                 }
+-                lp += n;
++            }
++            ok = ok && kvp.sync_pt(stream_, perr);
++        }
++        if (ok && !glob_pools_.empty()) {
++            const int ng = static_cast<int>(glob_pools_.size());
++            const int gmpp = glob_pools_[0].max_pages_per_slot;
++            const bool gfp8 = glob_pools_[0].is_fp8;
++            const size_t gpage_b = static_cast<size_t>(kKvPageTokens) * glob_pools_[0].kv_dim * (gfp8 ? 1u : 2u);
++            const size_t gsc_page_b = static_cast<size_t>(kKvPageTokens) * sizeof(float);
++            if (static_cast<int>(ck.gphys.size()) != ng * gmpp) ok = false;
++            for (int i = 0; i < ng && ok; ++i) {
++                VisitKvPool& kvp = glob_pools_[i];
++                for (int lp = 0; lp < gmpp && ok; ++lp) {
++                    if (ck.gphys[static_cast<size_t>(i) * gmpp + lp] < 0) continue;
++                    if (!kvp.ensure_page(slot, lp, stream_, perr)) { ok = false; break; }
++                    const int32_t ph = kvp.h_pt[static_cast<size_t>(slot) * gmpp + lp];
++                    if (ph < 0) { ok = false; break; }
++                    const size_t hp = static_cast<size_t>(i) * gmpp + lp;
++                    ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.k_pool.dev_ptr) + static_cast<size_t>(ph) * gpage_b, ck.h_gk + hp * gpage_b,
++                                              gpage_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.v_pool.dev_ptr) + static_cast<size_t>(ph) * gpage_b, ck.h_gv + hp * gpage_b,
++                                              gpage_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    if (gfp8) {
++                        ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.k_scales.dev_ptr) + static_cast<size_t>(ph) * gsc_page_b, ck.h_gks + hp * gsc_page_b,
++                                                  gsc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                        ok = ok && hipMemcpyAsync(static_cast<uint8_t*>(kvp.v_scales.dev_ptr) + static_cast<size_t>(ph) * gsc_page_b, ck.h_gvs + hp * gsc_page_b,
++                                                  gsc_page_b, hipMemcpyDefault, stream_) == hipSuccess;
++                    }
++                }
++                ok = ok && kvp.sync_pt(stream_, perr);
+             }
+         }
+         if (!ok) { (void)hipGetLastError(); ck.valid = false; return false; }
+@@ -1814,6 +1880,34 @@ public:
+         return true;
+     }
+ 
++    // Conversation parking: copy this slot's K/V to pinned host RAM and hand its card pages back, so N conversations
++    // cost one slot's VRAM. restore_prompt_checkpoint() reallocates the pages and copies them back.
++    bool park_slot(int slot) override {
++        if (std::getenv("STRATA_INK_CKPT"))
++            std::fprintf(stderr, "[ink-ckpt] park_slot(%d): allocated=%d seq_len=%d\n", slot,
++                         slot >= 0 && slot < max_slots_ && slots_[slot].allocated,
++                         slot >= 0 && slot < max_slots_ ? slots_[slot].seq_len : -1);
++        if (slot < 0 || slot >= max_slots_ || !slots_[slot].allocated) return false;
++        if (slots_[slot].seq_len <= 0) return true;   // nothing resident to park (already parked, or never used)
++        if (!save_prompt_checkpoint(slot, slots_[slot].seq_len)) return false;
++        for (auto& p : swa_pools_) p.free_slot_pages(slot);
++        for (auto& p : glob_pools_) p.free_slot_pages(slot);
++        std::string perr;
++        for (auto& p : swa_pools_) if (!p.sync_pt(stream_, perr)) return false;
++        for (auto& p : glob_pools_) if (!p.sync_pt(stream_, perr)) return false;
++        slots_[slot].seq_len = 0;                     // its K/V is in host RAM now; the checkpoint holds the length
++        slots_[slot].dspark_len = 0;
++        slots_[slot].has_snap = false;
++        if (std::getenv("STRATA_INK_CKPT"))
++            std::fprintf(stderr, "[ink-ckpt] parked slot %d (%d tokens) in host RAM\n", slot,
++                         slot < static_cast<int>(ckpts_.size()) ? ckpts_[slot].seq_len : 0);
++        return true;
++    }
++
++    bool slot_resident(int slot) const override {
++        return slot >= 0 && slot < max_slots_ && slots_[slot].allocated && slots_[slot].seq_len > 0;
++    }
++
+     // Largest batch forward_batch_chunk takes in one go: the TDR / VRAM guard cap, and the SWA ring margin when the
+     // batch could overwrite in-window keys: some slot reaches position swa_ring_ (the ring wraps) and its positions in
+     // this batch span more than swa_span_cap_. Split sub-batches then hold <= swa_span_cap_ tokens, so each slot's
+@@ -5915,36 +6009,52 @@ private:
+         int seq_len = 0;
+         int dspark_len = 0;
+         std::vector<int32_t> phys;  // [n_swa_visits * pages_per_slot] SWA page map when saved, -1 = unmapped
++        std::vector<int32_t> gphys; // [n_global_visits * pages_per_slot] global-visit page map when saved, -1 = unmapped
+         uint8_t* h_k = nullptr;     // pinned host copies of the slot's SWA ring pages [n_swa_visits * pages_per_slot][page]
+         uint8_t* h_v = nullptr;
+         uint8_t* h_ks = nullptr;    // FP8 KV: per-token scales of the same pages
+         uint8_t* h_vs = nullptr;
++        uint8_t* h_gk = nullptr;    // pinned host copies of the slot's global-visit pages (parked conversations need them)
++        uint8_t* h_gv = nullptr;
++        uint8_t* h_gks = nullptr;
++        uint8_t* h_gvs = nullptr;
+         size_t kv_bytes = 0;
+         size_t sc_bytes = 0;
++        size_t gkv_bytes = 0;
++        size_t gsc_bytes = 0;
+         GpuBuffer sc_k, sc_v, sc_attn, sc_mlp;  // ShortConv state [n_visits, 3, C]
+ 
+         static void host_free(uint8_t*& p) noexcept { if (p) { (void)hipHostFree(p); p = nullptr; } }
+-        bool alloc_host(size_t kvb, size_t scb) noexcept {
+-            if (kvb == kv_bytes && scb == sc_bytes && h_k) return true;
+-            host_free(h_k); host_free(h_v); host_free(h_ks); host_free(h_vs);
+-            kv_bytes = sc_bytes = 0;
+-            if (hipHostMalloc(reinterpret_cast<void**>(&h_k), kvb, hipHostMallocDefault) != hipSuccess ||
+-                hipHostMalloc(reinterpret_cast<void**>(&h_v), kvb, hipHostMallocDefault) != hipSuccess ||
+-                (scb && hipHostMalloc(reinterpret_cast<void**>(&h_ks), scb, hipHostMallocDefault) != hipSuccess) ||
+-                (scb && hipHostMalloc(reinterpret_cast<void**>(&h_vs), scb, hipHostMallocDefault) != hipSuccess)) {
+-                (void)hipGetLastError();
+-                host_free(h_k); host_free(h_v); host_free(h_ks); host_free(h_vs);
+-                return false;
++        static bool alloc_pair(uint8_t*& k, uint8_t*& v, uint8_t*& ks, uint8_t*& vs, size_t& have_kv, size_t& have_sc,
++                               size_t kvb, size_t scb) noexcept {
++            if (kvb == have_kv && scb == have_sc && k) return true;
++            host_free(k); host_free(v); host_free(ks); host_free(vs);
++            have_kv = have_sc = 0;
++            if (kvb && hipHostMalloc(reinterpret_cast<void**>(&k), kvb, hipHostMallocDefault) != hipSuccess) {
++                (void)hipGetLastError(); host_free(k); return false;
++            }
++            if (kvb && hipHostMalloc(reinterpret_cast<void**>(&v), kvb, hipHostMallocDefault) != hipSuccess) {
++                (void)hipGetLastError(); host_free(k); host_free(v); return false;
++            }
++            if (scb && hipHostMalloc(reinterpret_cast<void**>(&ks), scb, hipHostMallocDefault) != hipSuccess) {
++                (void)hipGetLastError(); host_free(k); host_free(v); host_free(ks); return false;
++            }
++            if (scb && hipHostMalloc(reinterpret_cast<void**>(&vs), scb, hipHostMallocDefault) != hipSuccess) {
++                (void)hipGetLastError(); host_free(k); host_free(v); host_free(ks); host_free(vs); return false;
+             }
+-            kv_bytes = kvb;
+-            sc_bytes = scb;
++            have_kv = kvb;
++            have_sc = scb;
+             return true;
+         }
++        bool alloc_host(size_t kvb, size_t scb) noexcept { return alloc_pair(h_k, h_v, h_ks, h_vs, kv_bytes, sc_bytes, kvb, scb); }
++        bool alloc_host_global(size_t kvb, size_t scb) noexcept { return alloc_pair(h_gk, h_gv, h_gks, h_gvs, gkv_bytes, gsc_bytes, kvb, scb); }
+         void release() noexcept {
+             host_free(h_k); host_free(h_v); host_free(h_ks); host_free(h_vs);
+-            kv_bytes = sc_bytes = 0;
++            host_free(h_gk); host_free(h_gv); host_free(h_gks); host_free(h_gvs);
++            kv_bytes = sc_bytes = gkv_bytes = gsc_bytes = 0;
+             free_gpu_buffer(sc_k); free_gpu_buffer(sc_v); free_gpu_buffer(sc_attn); free_gpu_buffer(sc_mlp);
+             phys.clear();
++            gphys.clear();
+             valid = false;
+         }
+     };
+diff --git a/engine/src/inkling2/ink_backend.h b/engine/src/inkling2/ink_backend.h
+index 4cdc6ec..c2ec1fd 100644
+--- a/engine/src/inkling2/ink_backend.h
++++ b/engine/src/inkling2/ink_backend.h
+@@ -101,6 +101,19 @@ public:
+         return false;
+     }
+ 
++    // Conversation parking (one card's worth of K/V for N conversations): copy this slot's K/V, ShortConv state and
++    // DSpark length to pinned host RAM and free its card pages, so another slot can use them. A later
++    // restore_prompt_checkpoint(slot, seq_len) brings the parked conversation back (its pages are reallocated).
++    virtual bool park_slot(int slot) {
++        (void)slot;
++        return false;
++    }
++    // false while the slot's K/V sits in host RAM after park_slot (its token prefix is still known).
++    virtual bool slot_resident(int slot) const {
++        (void)slot;
++        return true;
++    }
++
+     // Separate shared-prefix snapshot; valid only while this slot's global KV prefix is intact.
+     virtual bool supports_shared_checkpoint() const { return false; }
+     virtual bool save_shared_checkpoint(int slot, int seq_len) {
+diff --git a/engine/src/inkling2/ink_serve.h b/engine/src/inkling2/ink_serve.h
+index 82becb6..551fb0b 100644
+--- a/engine/src/inkling2/ink_serve.h
++++ b/engine/src/inkling2/ink_serve.h
+@@ -668,10 +668,39 @@ inline int run_serve_loop(const ServeConfig& cfg, InkModelFile& mf, InkBackend&
+             rq.active = false;
+             return false;
+         }
++        // Conversation parking: keep one slot's K/V in the card at a time. Every other slot that is not mid-request
++        // hands its pages back and keeps its conversation in pinned host RAM (restore_prompt_checkpoint below brings
++        // it back), so N conversations cost one slot's VRAM instead of N. Only idle slots are parked: a slot that is
++        // actively batched must keep its pages.
++        //
++        // OFF BY DEFAULT since 2026-11-24.  A restore is NOT free for a long conversation: it re-allocates every page
++        // through ensure_page and copies the global-visit K/V back, and on the live lane that turned into a stall -
++        // a request sat in "reading the prompt" for 400-800 s with the GPU at 100 % "busy", ~120 W and ~0 % memory
++        // activity (the docs/strata-hang.md spin signature), while the same prompt read from token 0 runs at
++        // ~820 t/s (~128 s for 105K tokens, measured on this card).  Parking also made the *second* pass of a
++        // request (the thinking budget's wrap-up) land in the other slot, putting one conversation's K/V on the
++        // card twice.  So the stock behaviour - a slot keeps its pages, a displaced conversation re-reads - is both
++        // predictable and faster here.  STRATA_INK_PARK=1 turns parking back on for measurement; the parking path
++        // itself (park_slot/restore_prompt_checkpoint in ink_hip_backend.hip.cpp) is unchanged and still tested.
++        static const bool park_enabled = [] {
++            const char* v = std::getenv("STRATA_INK_PARK");
++            return v && *v && v[0] != '0';
++        }();
++        if (park_enabled) {
++            for (int s = 0; s < P; ++s) {
++                if (s == rq.slot || reqs[s].active) continue;
++                if (std::getenv("STRATA_INK_CKPT"))
++                    std::fprintf(stderr, "[ink-ckpt] prepare slot %d -> park slot %d\n", rq.slot, s);
++                backend.park_slot(s);
++            }
++        }
+         // Prefix reuse check (#6627): prefer full cached_prefix match, else restore prompt-end checkpoint!
+         // Because prompt_ckpt_prefix is saved at prompt_len - 1 before generation, BOTH multi-turn follow-ups
+         // (even if hidden thinking or stop tokens differed) AND exact repeats reuse the full prior prompt!
+         int reuse = 0;
++        // Parked conversations keep their token prefixes but not their pages (park_slot), so only the prompt-end
++        // checkpoint can bring one back; a cached_prefix/full match would claim tokens that are no longer resident.
++        const bool resident = backend.slot_resident(rq.slot);
+         if (pg.images.empty()) {
+             int full_match = 0;
+             if (!rq.cached_prefix.empty() && static_cast<int>(rq.cached_prefix.size()) < rq.prompt_len) {
+@@ -692,7 +721,13 @@ inline int run_serve_loop(const ServeConfig& cfg, InkModelFile& mf, InkBackend&
+                 std::equal(rq.shared_prefix.begin(), rq.shared_prefix.end(), rq.prompt_ids.begin())) {
+                 shared_match = pg.pin;
+             }
+-            if (shared_match > full_match && shared_match > ckpt_match &&
++            if (!resident) {
++                // The pages were parked in host RAM: restore them (allocating card pages) when the checkpoint matches.
++                if (ckpt_match > 0 && backend.restore_prompt_checkpoint(rq.slot, ckpt_match)) {
++                    reuse = ckpt_match;
++                    rq.cached_prefix = rq.prompt_ckpt_prefix;
++                }
++            } else if (shared_match > full_match && shared_match > ckpt_match &&
+                 backend.restore_shared_checkpoint(rq.slot, shared_match)) {
+                 reuse = shared_match;
+                 rq.cached_prefix = rq.shared_prefix;
+@@ -711,6 +746,9 @@ inline int run_serve_loop(const ServeConfig& cfg, InkModelFile& mf, InkBackend&
+             } else if (full_match > 0) {
+                 reuse = full_match;
+             }
++            if (std::getenv("STRATA_INK_CKPT"))
++                std::fprintf(stderr, "[ink-ckpt] slot %d: resident=%d full=%d ckpt=%d shared=%d -> reuse=%d of %d\n",
++                             rq.slot, (int)resident, full_match, ckpt_match, shared_match, reuse, rq.prompt_len);
+         }
+         if (reuse == 0) {
+             backend.reset_slot(rq.slot);
+@@ -1122,8 +1160,16 @@ inline int run_serve_loop(const ServeConfig& cfg, InkModelFile& mf, InkBackend&
+                         rq.prompt_ckpt_prefix.assign(rq.prompt_ids.begin(), rq.prompt_ids.begin() + rq.prefill_pos);
+                     }
+                 }
+-                if (rq.is_solo || !rq.admitted) {
+-                    const double ppts = step_ms > 0.0 ? (prefill_fed[s] * 1000.0 / step_ms) : 0.0;
++                {
++                    // A MEAN over the tokens this request actually read, not this step's share: the old
++                    // `prefill_fed * 1000 / step_ms` was ONE step's rate, and under --parallel 2 a step is shared with
++                    // the other slot's work, so the value was a sliver of a step - and the line was only emitted while
++                    // the request was solo, so the serve repeated the last value for the whole read and called it
++                    // prefill_tok_s_mean (2026-11-24: two 109K reads reported a flat 16.9 t/s while the card was doing
++                    // ~900).  The reused prefix (a parked conversation restored from host RAM) was never read, so it is
++                    // not in the numerator; prompt_ms holds only the steps that fed tokens.
++                    const double fed = static_cast<double>(rq.prefill_pos - rq.reused_tokens);
++                    const double ppts = (rq.prompt_ms > 0.0 && fed > 0.0) ? (fed * 1000.0 / rq.prompt_ms) : 0.0;
+                     proto("PP %d %d %.1f %.1f", rq.prefill_pos, rq.prompt_len, rq.prompt_ms, ppts);
+                 }
+             }
+diff --git a/terminal/serve/server.py b/terminal/serve/server.py
+index 701d7f2..47f1b3c 100644
+--- a/terminal/serve/server.py
++++ b/terminal/serve/server.py
+@@ -1642,7 +1642,10 @@ class StrataEngine:
+         if len(f) >= 5 and isinstance(self.last, dict):
+             admission_ms = self.last.get("decode_ms")
+             self.last = {**self.last, "finish": f[3],
+-                         "decode_ms": admission_ms + float(f[4]) if admission_ms is not None else None,
++                         # (admission_ms is None when the admission DONE carried no clock: count BDONE's own, not
++                         # nothing - the batch path lost its whole decode_ms here and the monitor divided the
++                         # tokens by ~0 time)
++                         "decode_ms": (admission_ms or 0.0) + float(f[4]),
+                          "generated": int(f[2]) if f[2].isdigit() else None}
+             for tok in f[5:]:                                # read=<ms>: the turn's read in the slot itself (slot_read)
+                 key, eq, value = tok.partition("=")
+@@ -2008,7 +2011,10 @@ class StrataEngine:
+                       f"prefix per slot {held}", flush=True)
+             if held[best] >= self.INKLING_ROUTE_MIN:
+                 return best
+-            if (not self.slot_busy[0] and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN and len(prompt) < self.SIDE_REQUEST_MIN):
++            if (not self.slot_busy[0] and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN):
++                # A request that continues nothing keeps slot 0's conversation for its next turn: a client's title or
++                # probe (upstream's rule, short only) AND a second agent's chat, which upstream sent to slot 0 and so
++                # wiped the first conversation. With conversation parking the other slot's chat goes to host RAM.
+                 free = [b for b in range(1, self.batch) if not self.slot_busy[b]]
+                 if free:
+                     return min(free, key=lambda b: (bool(self.slot_held[b]), len(self.slot_held[b]) >= self.SIDE_REQUEST_MIN,
+@@ -2180,11 +2186,13 @@ class StrataEngine:
+                         # that gave way (BYIELD) and needs them to go on, so waiting with them is a deadlock - long,
+                         # long, short at 0.25 s steps under parallel: 2 (ENGINE_REVIEW finding 1, reproduced in 0.1.41).
+                         pick_t0 = time.monotonic()      # (Inkling: how long a pass may wait for its own conversation's slot, see pick_slot)
++                        # fixed for the whole wait: a continuation gets CONTINUATION_WAIT_S (one copy of a conversation may be
++                        # resident), anything else OWN_SLOT_WAIT_S (a different chat takes the free slot and parks it)
++                        patience = pick_t0 + self.slot_patience(prompt)
+                         while True:
+                             deadline = getattr(cancel, "_strata_queue_deadline", None)
+                             if deadline is not None and time.monotonic() >= deadline:
+                                 raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+-                            patience = pick_t0 + self.OWN_SLOT_WAIT_S
+                             with self.slot_cv:
+                                 slot = self.pick_slot(prompt, patience_until=patience)
+                                 if slot is not None:
+@@ -2556,6 +2564,32 @@ class StrataEngine:
+         return i
+ 
+     OWN_SLOT_WAIT_S = 5.0     # Inkling: a pass that continues a slot's request (a thinking budget's second pass) waits this long for that slot to be released
++    # ... and a request that CONTINUES the conversation a busy slot is running waits this long for that slot instead of
++    # taking another one.  Taking another slot puts the same conversation's K/V on the card twice: two 109K chats are
++    # ~218K tokens of K/V where a 32 GiB card holds ~178K with the 17.63 GB UD-Q4_K_XL pack, so both slots thrash -
++    # measured on zen3 2026-11-24: 0.1-8 tok/s each, 100 % "GFX busy" at 122 W with 0 % memory activity, against ~985
++    # t/s for the same request alone.  Bounded so a genuinely stuck request cannot hold a later turn hostage for ever;
++    # the wait loop re-checks every second, and a client that leaves cancels its request (ClientGone).
++    CONTINUATION_WAIT_S = 600.0
++
++    def _continues_busy(self, prompt: list[int]) -> bool:
++        """True when `prompt` continues the conversation a BUSY slot is running - the thinking budget's next pass, or
++        a client's next turn (or retry) while the previous one still generates.  The slot's running prompt or its held
++        tokens must be a COMPLETE prefix of it: a boundary two conversations merely share (a system prompt, the tools
++        of one client) says nothing about whose it is, so a partial match is not a continuation."""
++        for b in range(self.batch):
++            if not self.slot_busy[b]:
++                continue
++            for held in (self.slot_prompt[b], self.slot_held[b]):
++                if held and len(prompt) > len(held) and prompt[:len(held)] == held:
++                    return True
++        return False
++
++    def slot_patience(self, prompt: list[int]) -> float:
++        """How long this request may wait for the slot that holds the conversation it continues (see pick_slot)."""
++        if not getattr(self, "inkling_engine", False) or self.batch <= 1:
++            return self.OWN_SLOT_WAIT_S
++        return self.CONTINUATION_WAIT_S if self._continues_busy(prompt) else self.OWN_SLOT_WAIT_S
+ 
+     def drafter_in_slot_zero(self) -> bool:
+         """Inkling-2-Mini started with its DSpark drafter (Qwen and every other engine: never; their slot choice is untouched)."""
+@@ -2567,11 +2601,13 @@ class StrataEngine:
+         conversations other slots hold stay for their next turns.  None: every slot is busy."""
+         if patience_until is not None and getattr(self, "inkling_engine", False) and time.monotonic() < patience_until:
+             # a second pass of a request (the thinking budget's wrap-up: the prompt plus what the first pass wrote plus the wrap-up) arrives while
+-            # the first pass's slot is still being released: it waits for that slot, instead of taking the only free one (the chat's) and wiping it
++            # the first pass's slot is still being released: it waits for that slot, instead of taking the only free one (the chat's) and wiping it.
++            # The same rule holds for a client's next turn arriving while the previous turn still generates - and for `slot_held`, not just the
++            # running prompt, because a pass's own prompt is the whole point: both are the conversation, and only one copy of it may be resident.
+             for b in range(self.batch):
+-                sp = self.slot_prompt[b]
+-                if self.slot_busy[b] and sp and len(prompt) > len(sp) and prompt[:len(sp)] == sp:
+-                    return None
++                for sp in (self.slot_prompt[b], self.slot_held[b]):
++                    if self.slot_busy[b] and sp and len(prompt) > len(sp) and prompt[:len(sp)] == sp:
++                        return None
+         free = [b for b in self.slot_order if not self.slot_busy[b]]
+         if not free:
+             return None
+@@ -2589,6 +2625,16 @@ class StrataEngine:
+         agreed = {}
+         held_prefix = lambda b: self._slot_prefix(b, prompt, agreed)
+         best = max(free, key=held_prefix)
++        # Inkling + conversation parking: a request that continues nothing must not take slot 0 away from the
++        # conversation it holds (a client's title/probe, or a second agent's chat). It goes to another free slot;
++        # the engine parks that slot's own conversation to host RAM and restores it on the way back
++        # (inkling-conversation-park.diff).
++        if (getattr(self, "inkling_engine", False) and self.batch > 1 and 0 in free
++                and held_prefix(best) < self.INKLING_ROUTE_MIN
++                and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN):
++            others = [b for b in free if b != 0]
++            if others:
++                return min(others, key=lambda b: (bool(self.slot_held[b]), self.slot_used[b]))
+         if self.drafter_in_slot_zero() and 0 in free and (best == 0 or held_prefix(best) < self.SLOT0_PREFIX_MAX):
+             # the DSpark drafter exists only for slot 0 (the engine's spec step and tap ingest are slot 0 only), so a lone request drafts only there. Nothing
+             # worth keeping (a held start of fewer than SLOT0_PREFIX_MAX tokens re-prefills in well under a second) beats slot 0; a real conversation keeps its slot
+@@ -4218,7 +4264,10 @@ class Service:
+         self.allowed_hosts: list[str] = []
+         self.host_names: set[str] = set(LOOPBACK_NAMES)
+         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
+-        self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
++        # (time, generated) samples for the live tok/s window.  RATE_WINDOW_S is 2 s: at the 100-130 tok/s this engine
++        # reaches the old maxlen=32 held ~0.3 s of it, so the window was really "the last 32 tokens" and the rate
++        # flapped between a burst and the request's mean.  256 covers 2 s up to 128 tok/s (and more when slower).
++        self.rate = collections.deque(maxlen=256)
+         # "parallel" (the engine's batch slots): every running request's own status and rate window; self.status
+         # then says busy while any runs and shows the newest one
+         self.live_reqs: dict[int, tuple[dict, collections.deque]] = {}
+@@ -5838,8 +5887,12 @@ class Service:
+             # #984: while a thinking budget applies, the thinking line shows it, not the request's max_tokens
+             limit = (f"budget {s['thinking_budget']} (max {s.get('max_tokens')})"
+                      if s["phase"] == "thinking" and s.get("thinking_budget") else f"max {s.get('max_tokens')}")
+-            print(f"[strata] {s['phase']}: {s['generated']} of {limit} tokens, {rate:.1f} tok/s, "
+-                  f"{el:.0f} s", flush=True)
++            # two clocks, labelled: the rate is decode only (its clock starts at the first generated token), the
++            # seconds are the whole request (read/restore included) - printing them unlabelled read as if the
++            # generated tokens had taken that long (2026-11-24: a 109K restore + 836 tokens showed "3.6 tok/s, 702 s"
++            # for 1.19 tok/s end to end).
++            print(f"[strata] {s['phase']}: {s['generated']} of {limit} tokens, {rate:.1f} tok/s decode, "
++                  f"{el:.0f} s total", flush=True)
+         return now
+ 
+     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None,
+@@ -5993,7 +6046,7 @@ class Service:
+         # window (self.status says busy while any runs); one at a time they are self.status / self.rate, as before
+         par = bool(getattr(self.engine, "batch", 0))
+         st = {} if par else self.status
+-        rate = collections.deque(maxlen=32) if par else self.rate
++        rate = collections.deque(maxlen=256) if par else self.rate     # RATE_WINDOW_S of samples, see self.rate
+         request_id = uuid.uuid4().hex[:12]
+         setattr(cancel, "_strata_request_id", request_id)
+         deadline = time.monotonic() + self.queue_timeout_s if self.queue_timeout_s is not None else None
+@@ -6433,6 +6486,21 @@ class Service:
+                         if st.get("busy") and not timed_out:
+                             last = request_stats(segments)          # only this request's own DONEs count
+                             started = st.get("started", time.time())
++                            # The monitor's averages need a time for EVERY request, and the batch path can drop them:
++                            # _apply_bdone merges BDONE's clock over the admission DONE's and sets decode_ms to None
++                            # when that admission line carried none, and prompt_ms stays 0 for a prompt that was
++                            # almost all reused.  A request with tokens but no time divided the totals' tokens by
++                            # almost no time, so "Decode avg"/"Prefill avg" climbed without bound - measured on the
++                            # inkling lane 2026-11-24: 1,027 t/s decode and 8,392 t/s prefill where the same engine
++                            # did 53 and 1,379.  Fall back to this server's own clocks (what a client waited through).
++                            ft0 = st.get("first_token")
++                            pm = last.get("prompt_ms") or 0.0
++                            dm = last.get("decode_ms") or 0.0
++                            if ft0:
++                                if pm <= 0.0:
++                                    pm = max(0.0, (ft0 - started) * 1000.0)
++                                if dm <= 0.0:
++                                    dm = max(0.0, (time.time() - ft0) * 1000.0)
+                             cvec = (getattr(self.engine, "info", {}) or {}).get("cvec", 0)
+                             loaded = str(cvec) not in ("0", "", "None")
+                             hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
+@@ -6459,9 +6527,9 @@ class Service:
+                                 "reasoning_recoveries": recovery_count,
+                                 "reasoning_repeat_coverage": round(repeat_coverage, 3),
+                                 "engine_generated": last.get("generated"),
+-                                "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
+-                                "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
+-                                if n and (last.get("generated") or 0) >= 2 and last.get("decode_ms") else None,
++                                "prompt_ms": round(pm, 1), "decode_ms": round(dm, 1) if dm > 0.0 else None,
++                                "decode_tok_s": round(last["generated"] / (dm / 1000), 1)
++                                if n and (last.get("generated") or 0) >= 2 and dm > 0.0 else None,
+                                 "hit_rate": hit_rate, "pcie_share": pcie_share, "ram_blobs": last.get("ram_blobs"),
+                                 "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
+                                 # #457: the speculative drafts from the DONE line (None: the engine did not say)
+@@ -6473,13 +6541,12 @@ class Service:
+                                 t["prompt_tokens"] += seen
+                                 t["reused"] += last.get("reused") or 0
+                                 t["output_tokens"] += n
+-                                t["prompt_ms"] += last.get("prompt_ms") or 0.0
+-                                t["decode_ms"] += last.get("decode_ms") or 0.0
++                                t["prompt_ms"] += pm
++                                t["decode_ms"] += dm
+                                 t["drafts_offered"] += last.get("drafts_offered") or 0
+                                 t["drafts_accepted"] += last.get("drafts_accepted") or 0
+-                                ft0 = st.get("first_token")             # this request's own (#465: one per request)
+-                                self.latencies.observe(ft0 - started if ft0 else None, n,
+-                                                       (last.get("decode_ms") or 0.0) / 1000, time.time() - started)
++                                self.latencies.observe(ft0 - started if ft0 else None, n,      # ft0: this request's own (#465)
++                                                       dm / 1000, time.time() - started)
+                                 fresh = getattr(self.engine, "last", None)
+                                 if fresh is not None and fresh is not before:      # the engine's clock for THIS request
+                                     timings = request_timings(seen, n, last)

@@ -110,8 +110,8 @@ let
     print(inkling_tokenizer.convert_files(tj, ct, out))
   '';
 
-  # What adopt.py's inkling branch writes for a GGUF build, by hand. No
-  # `parallel` >1 and no expert caps: solo slot, everything on the card.
+  # What adopt.py's inkling branch writes for a GGUF build, by hand, plus the
+  # conversation-parking contract (see inkling-conversation-park.diff).
   runConfig = pkgs.writeText "strata-inkling.json" (
     builtins.toJSON {
       exe = "${strataInkling}/bin/strata-inkling";
@@ -122,7 +122,15 @@ let
         "--native"
         model
         "--max-context"
-        "131072"
+        # 144K, and the ceiling is the PACK, not the setting. Measured on this
+        # card 2026-11-24 (fp16 KV, chunk 2048, one slot resident): a
+        # conversation costs ~0.059 MiB per token and the model + pools sit at
+        # ~21.5 GiB, so 32,624 - 22,060 = 10.5 GiB of K/V is ~178K tokens all
+        # in. 131072 was too tight for an agent session; 163840 leaves under
+        # 1 GiB free and the pools never give it back. The 17.63 GB
+        # UD-Q4_K_XL stays all-resident here - a smaller pack (SQ-10, 10.5 GB)
+        # is what buys 256K.
+        "147456"
         # FP16, NOT FP8 (measured 2026-11-24 on this card, --bench, gen 128).
         # fp8 is a shallow-depth trick and a depth penalty: at a 512-token
         # prompt it is faster (95.1 vs 53.2 t/s) but from ~4K it loses, and by
@@ -131,8 +139,8 @@ let
         #   @65536: fp8 23.0  fp16 40.3
         #   @98304: fp8 22.6  fp16 34.6
         # The engine's own auto rule (fp8 only when free VRAM is short) would
-        # have picked fp16 here too; we forced fp8 for a capacity reason that
-        # does not exist on a 32 GiB card with all experts resident.
+        # have picked fp16 here too, and parking means only one slot's K/V is
+        # ever resident, so fp16 fits with room.
         "--kv"
         "fp16"
         # The HIP dispatch guard allows 8192 for a >=36 CU block, but the
@@ -141,7 +149,7 @@ let
         # 1024 -> 1137, 2048 -> 1348, 4096 -> 1346 (plateau). At 32768 the
         # same 2048 setting gives 1219 vs 738 at the default; at 65536, 1083
         # vs 640. Each chunk costs SWA ring positions (win 1024 + chunk), so
-        # 2048 keeps the ring at 3072 of the 131072 context.
+        # 2048 keeps the ring at 3072 positions.
         "--chunk"
         "2048"
         "--vision"
@@ -160,19 +168,36 @@ let
         "llama.ai.chrisdell.info"
         "llm.ai.chrisdell.info"
       ];
-      drafting = "dspark";
-      # TWO slots, and the second one exists for the cache, not throughput.
-      # With one slot the serve layer says it out loud (2026-11-24, live):
-      #   "a side request (20 tokens) replaced the cached chat (78361 tokens);
-      #    --parallel 2 keeps it"
-      # i.e. every title/probe/classification call evicted the agent's 78-94K
-      # conversation, and the next real turn re-read the whole thing from token
-      # 0 (~150-200 s). With two slots serve/inkling's _inkling_route sends a
-      # short request that continues nothing to the *other* slot and leaves the
-      # conversation where it is. A lone request still takes the solo path
-      # (GEN, slot 0, DSpark drafts), so single-stream speed is unchanged; the
-      # cost is a second KV/SWA pool. Measured at 4096 tokens: par2 41.3/slot
-      # vs par1 56.1, i.e. only when two requests really run together.
+      # DSpark OFF for now.  Measured on a CLEAN card 2026-11-24 with this line off, same engine build:
+      #   397-token prompt   prefill  765 t/s   decode 63.6 t/s
+      #   20,394-token prompt prefill 1380 t/s   decode 53.2 t/s   (64 tokens, 16.0 s)
+      # The 0.2-11 tok/s decodes measured earlier the same day were NOT the drafter: they were orphan
+      # engine processes holding 20+ GiB (a stop had left them behind, see ExecStopPost below), so the
+      # live engine's experts were being read from host RAM - the GPU then sat at 100 % "busy", ~120 W
+      # and 0 % memory activity, the docs/strata-hang.md spin signature.  DSpark was never A/B'd on a
+      # clean card with enough output tokens (the 69.7 vs 0.2 figures came from 4-token answers and a
+      # contaminated card).  Its documented upside is only +2-2.5 % decode, so it stays off until that
+      # A/B is run cleanly; `drafting = "dspark"` is the one-line revert.
+      drafting = "off";
+      # TWO slots, for cache separation rather than throughput: a title/probe
+      # call that continues nothing is routed to the *other* slot instead of
+      # overwriting the agent's conversation where it sits (serve/inkling's
+      # _inkling_route; upstream sent every non-continuing request to slot 0,
+      # "a side request (20 tokens) replaced the cached chat (78361 tokens)",
+      # 2026-11-24). The second slot is only a K/V allocation when it actually
+      # runs something. A request that CONTINUES a busy slot's conversation now
+      # waits for that slot instead of taking the other one (CONTINUATION_WAIT_S,
+      # see ./inkling-conversation-park.diff): one conversation resident twice
+      # is ~218K tokens of K/V against a ~178K budget, which is what made both
+      # slots thrash.
+      #
+      # Conversation PARKING (engine-side: parks idle slots to pinned host RAM)
+      # is OFF by default in this build.  The 400-800 s "reading the prompt"
+      # stalls that motivated that were measured while orphan engines held the
+      # card (see ExecStopPost below), so parking has NOT been shown to be slow
+      # on a clean one - it restores in ~0.5 s for 16.7K.  STRATA_INK_PARK=1
+      # turns it back on and it needs a clean re-test before it is default again;
+      # the serve-side routing above is independent of it and stays on.
       parallel = 2;
       env = {
         HIP_VISIBLE_DEVICES = "0"; # only the R9700 is HIP-visible (gfx803 is out of ROCm)
@@ -191,6 +216,10 @@ in
       unit = "inkling-2-mini";
       port = port;
       vramMinMiB = 25000; # after the strata stop: experts+trunk+KV+drafter want ~23 GiB free
+      # (NOT raised to cover the "expert arena 25.54 -> 24.84 GiB: only 27.75 GiB free" line - that is the engine's
+      # own trunk+vision+drafter already resident when it sizes the arena, not another program: with the card
+      # completely idle, amd-smi read 32,567 MiB free and the engine still reported the same 27.75 GiB
+      # (measured 2026-11-24).  The arena is 24.84 GiB in normal operation.)
     }
   ];
 
@@ -241,6 +270,17 @@ in
       Restart = "on-failure";
       RestartSec = 5;
       TimeoutStopSec = 120;
+      # A stop/restart has left the ENGINE behind: systemd reported the unit
+      # "Deactivated successfully" while strata-inkling --serve kept its
+      # 20+ GiB, so the next engine started with no room, its experts went to
+      # host RAM and decode collapsed to 0.2-11 tok/s (2026-11-24: two orphan
+      # engines plus a stray bench held 31.9 of 32.6 GiB with 700 MiB free,
+      # which read exactly like a broken drafter and cost a day of chasing).
+      # The pattern names the FULL deployed argv (bin/ + the model path) on
+      # purpose: a short one like 'strata-inkling --serve' also matches an
+      # operator's `pgrep -af ...`/`grep` line, and the first version of this
+      # killed the shell that ran the stop.  The `-` ignores "no match".
+      ExecStopPost = "-${pkgs.procps}/bin/pkill -f 'bin/strata-inkling --serve --native /home/cjdell/Models/Inkling-2-Mini-GGUF'";
       # Engine watchdog aborts (#29) used to dump 32 GB cores on / here.
       LimitCORE = 0;
     };
