@@ -1,0 +1,47 @@
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -2011,7 +2011,12 @@
+                       f"prefix per slot {held}", flush=True)
+             if held[best] >= self.INKLING_ROUTE_MIN:
+                 return best
+-            if (not self.slot_busy[0] and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN):
++            # ONLY while this prompt FITS beside what slot 0 holds: a held conversation the prompt cannot reuse at all
++            # is a victim to overwrite, not a cache worth protecting.  Measured on zen3 2026-11-24 22:09: slot 0 held
++            # 139,365 tokens, an 88,642-token prompt with prefix match 0 was routed to slot 1 instead, and its read
++            # never started - 228K tokens against a 163,840 pool, 100 % GFX at 129 W, 0 progress until a restart.
++            if (not self.slot_busy[0] and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN
++                    and self._fits_with(len(prompt), len(self.slot_held[0]))):
+                 # A request that continues nothing keeps slot 0's conversation for its next turn: a client's title or
+                 # probe (upstream's rule, short only) AND a second agent's chat, which upstream sent to slot 0 and so
+                 # wiped the first conversation. With conversation parking the other slot's chat goes to host RAM.
+@@ -2598,6 +2603,11 @@
+         resident = self._resident_tokens()
+         return bool(ctx and resident and len(prompt) + resident > int(ctx * self.FIT_MARGIN))
+ 
++    def _fits_with(self, prompt_len: int, held: int) -> bool:
++        """Can a prompt of `prompt_len` be resident beside `held` tokens (see FIT_MARGIN)?"""
++        ctx = int(getattr(self, "max_context", 0) or 0)
++        return not ctx or prompt_len + held <= int(ctx * self.FIT_MARGIN)
++
+     def _continues_busy(self, prompt: list[int]) -> bool:
+         """True when `prompt` continues the conversation a BUSY slot is running - the thinking budget's next pass, or
+         a client's next turn (or retry) while the previous one still generates.  The slot's running prompt or its held
+@@ -2682,10 +2692,17 @@
+         # (inkling-conversation-park.diff).
+         if (getattr(self, "inkling_engine", False) and self.batch > 1 and 0 in free
+                 and held_prefix(best) < self.INKLING_ROUTE_MIN
+-                and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN):
++                and len(self.slot_held[0]) >= self.SIDE_REQUEST_MIN
++                and self._fits_with(len(prompt), len(self.slot_held[0]))):
+             others = [b for b in free if b != 0]
+             if others:
+                 return min(others, key=lambda b: (bool(self.slot_held[b]), self.slot_used[b]))
++        # The prompt cannot coexist with what `best` holds AND cannot reuse any of it: overwrite that slot (the engine
++        # drops the stale conversation as it admits) instead of taking a fresh slot and starving both on the pool.
++        if (getattr(self, "inkling_engine", False) and best not in (None,)
++                and held_prefix(best) < self.INKLING_ROUTE_MIN
++                and self.slot_held[best] and not self._fits_with(len(prompt), len(self.slot_held[best]))):
++            return best
+         if self.drafter_in_slot_zero() and 0 in free and (best == 0 or held_prefix(best) < self.SLOT0_PREFIX_MAX):
+             # the DSpark drafter exists only for slot 0 (the engine's spec step and tap ingest are slot 0 only), so a lone request drafts only there. Nothing
+             # worth keeping (a held start of fewer than SLOT0_PREFIX_MAX tokens re-prefills in well under a second) beats slot 0; a real conversation keeps its slot
