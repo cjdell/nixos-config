@@ -34,7 +34,7 @@ usage() {
 gpu-mode — give the R9700 to exactly one thing at a time
 
   gpu-mode            who holds the card right now (default)
-  gpu-mode llm        Strata (boot default: Pi sessions, Recallium,
+  gpu-mode llm        Strata (the primary model: Pi sessions, Recallium,
                       strata.ai / llm.ai / 192.168.49.50 endpoints). Starts the
                       PRIMARY model (config.ai.strataModel); every other
                       selectable model in the strata-swap table (the Coder
@@ -57,8 +57,8 @@ that load is multi-minute (~60 GiB of RAM; the box is sluggish while it runs).
 'gpu-mode sd' likewise waits until sd-server answers /v1/models: loading the
 18 GB of flux weights takes a minute or two (fast once the page cache is warm).
 
-A reboot always restores llm mode (strata.service is the only unit with
-wantedBy; sd-server is started by gpu-mode alone).
+Nothing loads at boot (no engine has wantedBy) — the first request pays
+the model load, or 'gpu-mode llm' starts the primary explicitly.
 EOF
 }
 
@@ -242,7 +242,7 @@ mode_game() {
   $SUDO systemctl stop "${LLM_UNITS[@]}" sd-server
   wait_free 20000 60
   echo "the card is yours: 32 GiB of VRAM, plus the ~60 GiB of RAM Strata held."
-  echo "gpu-mode llm gives it back to the AI stack; a reboot restores llm mode too."
+  echo "gpu-mode llm gives it back to the AI stack."
 }
 
 cmd="${1:-status}"

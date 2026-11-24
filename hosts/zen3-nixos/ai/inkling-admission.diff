@@ -1,0 +1,55 @@
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -2572,6 +2572,30 @@
+     # the wait loop re-checks every second, and a client that leaves cancels its request (ClientGone).
+     CONTINUATION_WAIT_S = 600.0
+ 
++    # Inkling, 2026-11-24 (zen3): the card holds ~178K tokens of K/V at fp16 with the 17.63 GB UD-Q4_K_XL pack, while
++    # one slot may read up to --max-context.  Two big prompts admitted together therefore cannot both be resident: each
++    # read evicts the other's pages and BOTH stall after their first chunk - measured here with two cold 115K reads
++    # (one conversation, one turn apart, 506 tokens of difference): slot 0 sat at "2,048 of 115,216 tokens" for 154 s,
++    # GPU 100 % at 2.28 GHz / 141-166 W, and only a unit restart cleared it.  A request that does not fit beside what
++    # the busy slots already read waits for room instead, bounded like the continuation wait above.
++    FIT_MARGIN = 0.9                 # of max_context: the pool is sized ~1.05-1.1x it, and graphs/SWA share the card
++    FIT_WAIT_S = 600.0
++
++    def _resident_tokens(self) -> int:
++        """K/V the BUSY slots have spoken for: the running prompt, or (after a turn) what the slot holds."""
++        n = 0
++        for b in range(self.batch):
++            if self.slot_busy[b]:
++                n += max(len(self.slot_prompt[b]), len(self.slot_held[b]))
++        return n
++
++    def does_not_fit(self, prompt: list[int]) -> bool:
++        """True when `prompt` cannot be resident beside what the busy slots already read (see FIT_MARGIN): admitting it
++        anyway makes both reads stall.  False when nothing is resident - a lone prompt is the engine's own business."""
++        ctx = int(getattr(self, "max_context", 0) or 0)
++        resident = self._resident_tokens()
++        return bool(ctx and resident and len(prompt) + resident > int(ctx * self.FIT_MARGIN))
++
+     def _continues_busy(self, prompt: list[int]) -> bool:
+         """True when `prompt` continues the conversation a BUSY slot is running - the thinking budget's next pass, or
+         a client's next turn (or retry) while the previous one still generates.  The slot's running prompt or its held
+@@ -2589,6 +2613,8 @@
+         """How long this request may wait for the slot that holds the conversation it continues (see pick_slot)."""
+         if not getattr(self, "inkling_engine", False) or self.batch <= 1:
+             return self.OWN_SLOT_WAIT_S
++        if self.does_not_fit(prompt):
++            return self.FIT_WAIT_S
+         return self.CONTINUATION_WAIT_S if self._continues_busy(prompt) else self.OWN_SLOT_WAIT_S
+ 
+     def drafter_in_slot_zero(self) -> bool:
+@@ -2608,6 +2634,12 @@
+                 for sp in (self.slot_prompt[b], self.slot_held[b]):
+                     if self.slot_busy[b] and sp and len(prompt) > len(sp) and prompt[:len(sp)] == sp:
+                         return None
++        # Fitting (see FIT_MARGIN): a second big read beside this one stalls both, so wait for room.  Bounded by the
++        # same patience - past it we admit anyway rather than hold a request for ever, and a client that leaves still
++        # cancels its own (ClientGone).  Callers that pass no patience (the coalescer's probe) are left alone.
++        if (patience_until is not None and getattr(self, "inkling_engine", False) and self.batch > 1
++                and time.monotonic() < patience_until and self.does_not_fit(prompt)):
++            return None
+         free = [b for b in self.slot_order if not self.slot_busy[b]]
+         if not free:
+             return None

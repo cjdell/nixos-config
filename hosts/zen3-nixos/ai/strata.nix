@@ -312,7 +312,7 @@ let
   # already points there) and behind it one serve process per SELECTABLE model
   # lives on loopback:
   #
-  #   strata.service         config.ai.strataModel       127.0.0.1:8091   (wantedBy)
+  #   strata.service         config.ai.strataModel       127.0.0.1:8091   (shim-only)
   #   strata-<key>.service   every other selectable      127.0.0.1:8092..  (shim-only)
   #
   # A models-map entry joins the table when it says `selectable = true` (the
@@ -320,9 +320,10 @@ let
   # would only turn a request naming them into a confusing swap failure). The
   # primary is always the table's first entry — MODELS[0] is the shim's own
   # boot/default convention — so `ai.strataModel` alone still decides what a
-  # reboot serves. Partners never start at boot (no wantedBy) and the shim
-  # only ever SWAPS between table entries while one is already live — it never
-  # starts an engine onto the off-lease card (./gpu-mode.nix owns that lease).
+  # reboot serves. Nothing starts at boot (no wantedBy on any engine) and the
+  # shim only ever SWAPS between table entries while one is already live — it
+  # never starts an engine onto the off-lease card (./gpu-mode.nix owns that
+  # lease). The first request pays the model load.
   # A request whose `model` names none of them (absent included) goes to the
   # live engine untouched, which is how Recallium's name-blind calls keep
   # working. The partners keep their table positions by attr-name sort order,
@@ -1091,7 +1092,10 @@ in
   systemd.services.strata = {
     description = "Strata (Qwen3.8-Flash-Next across GPU VRAM, RAM and CPU)";
     after = [ "network.target" ];
-    wantedBy = [ "multi-user.target" ];
+    # Swap-only, like the partners: NO wantedBy, so nothing loads at boot.
+    # strata-swap starts it on a `model` mismatch; gpu-mode llm starts it
+    # explicitly. The boot default is "nothing loaded" — the first request
+    # pays the model load.
     # Don't crash-loop before the hand-run model prep has produced a pack.
     # The mmproj is a second such precondition: with a `vision` section the
     # serve layer starts the encoder BEFORE the engine and a missing file takes
@@ -1139,7 +1143,8 @@ in
     description = "Strata model-selection shim (every selectable model on :8080, swap on mismatch)";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" ];
-    wants = [ "strata.service" ];
+    # No wants = [ "strata.service" ]: the shim must not pull the engine in
+    # at boot. Nothing loads until a request names a model (or gpu-mode llm).
     environment.SWAP_CONFIG = toString swapConfig;
     # Liveness completions (answer budget <= 4 tokens AND <= 1024 chars of
     # message text) are answered by the LIVE engine instead of reloading a

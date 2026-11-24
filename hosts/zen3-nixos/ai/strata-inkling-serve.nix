@@ -26,6 +26,8 @@ runCommand "strata-inkling-serve" { nativeBuildInputs = [ patch ]; } ''
   cp -r ${strataInkling}/share/strata $out/share/strata
   chmod -R u+w $out/share/strata
   patch -p1 --fuzz=0 -d $out/share/strata < ${./inkling-metrics.diff}
+  patch -p1 --fuzz=0 -d $out/share/strata < ${./inkling-admission.diff}
+  patch -p1 --fuzz=0 -d $out/share/strata < ${./inkling-pick-debug.diff}
 
   cp ${strataInkling}/bin/strata-server $out/bin/strata-server
   chmod u+w $out/bin/strata-server

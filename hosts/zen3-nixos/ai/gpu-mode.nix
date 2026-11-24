@@ -7,15 +7,15 @@
 
 # `gpu-mode` — one command that hands the R9700 to exactly one thing:
 #
-#   gpu-mode llm     Strata (the boot default)
+#   gpu-mode llm     Strata (the primary model; nothing loads at boot)
 #   gpu-mode sd      the Flux-schnell sd-server (./sd-server.nix)
 #   gpu-mode game    stop everything, 32 GiB of VRAM free for gaming
 #   gpu-mode         status: who holds the card right now
 #
-# The lease is enforced by which units are RUNNING: strata.service has
-# wantedBy (./strata.nix), sd-server.service deliberately has none
-# (./sd-server.nix) — only gpu-mode starts it, and it waits for the model to
-# actually load. If an LLM reload ever lands next to a running sd lease,
+# The lease is enforced by which units are RUNNING: no engine has wantedBy
+# (./strata.nix) — nothing loads at boot; only gpu-mode or a swap request
+# starts one, and gpu-mode waits for the model to actually load. sd-server
+# deliberately has none (./sd-server.nix) — only gpu-mode starts it. If an LLM reload ever lands next to a running sd lease,
 # Strata's `before_load` hook stops sd-server first (./strata.nix), so the
 # two never fight over VRAM. See ./gpu-mode.sh for the script's own
 # documentation.

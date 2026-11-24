@@ -1,0 +1,26 @@
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -2596,6 +2596,23 @@
+         return bool(getattr(self, "inkling_engine", False) and (getattr(self, "info", None) or {}).get("drafting") == "dspark")
+ 
+     def pick_slot(self, prompt: list[int], patience_until: float | None = None) -> int | None:
++        """The slot decision, and the state it was made from (STRATA_DEBUG).  Inkling kept landing in the slot that did
++        NOT hold its prefix (measured 2026-11-24 21:51: `_inkling_route` reported `prefix per slot [115780, 0]` yet the
++        request ran in slot 1 and read 116,536 tokens from scratch, `reused: 0`, 128.8 s).  This line says what the
++        admission saw when it chose, so the routing and the admission can be compared instead of guessed at."""
++        slot = self._pick_slot(prompt, patience_until)
++        if os.environ.get("STRATA_DEBUG"):
++            try:
++                agreed = {}
++                pref = [self._slot_prefix(b, prompt, agreed) for b in range(self.batch)]
++            except Exception:                        # a debug line never breaks an admission
++                pref = None
++            print(f"[strata] pick: prompt {len(prompt)} tokens, held {[len(x) for x in self.slot_held]}, "
++                  f"busy {[bool(x) for x in self.slot_busy]}, prefix {pref}, "
++                  f"-> {'wait' if slot is None else f'slot {slot}'}", flush=True)
++        return slot
++
++    def _pick_slot(self, prompt: list[int], patience_until: float | None = None) -> int | None:
+         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
+         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
+         conversations other slots hold stay for their next turns.  None: every slot is busy."""

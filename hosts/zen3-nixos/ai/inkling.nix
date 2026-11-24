@@ -142,18 +142,22 @@ let
         # smaller SQ-10 pack (10.5 GB) or parking on, since 32,624 MiB total
         # minus 18,623 of weights is ~165K tokens of K/V in all.
         "163840"
-        # FP16, NOT FP8 (measured 2026-11-24 on this card, --bench, gen 128).
-        # fp8 is a shallow-depth trick and a depth penalty: at a 512-token
-        # prompt it is faster (95.1 vs 53.2 t/s) but from ~4K it loses, and by
+        # FP8 K/V, switched from fp16 on 2026-11-24 22:00 (see the measurements below: fp16 is the faster format at
+        # depth, and that is not why it was dropped).  fp16 at 116K leaves the card with nothing for the prefill
+        # scratch: arena 25.64 GiB + K/V ~31.5-31.9 GB of 32.6 GB, so the depth-proportional scratch went to
+        # host-mapped memory - measured GTT 5,296 MiB at 111K against 95 MiB at 20K - and a spilled scratch is not
+        # retained between turns, which killed prefix reuse outright: `reused: 0`, prefill 128,783 ms on EVERY turn
+        # of a 116K conversation (the 99K turns just before it were `reused ~99.9%`, prefill 700-1,700 ms).  22 t/s
+        # decode with a working cache beats 32 t/s behind a two-minute cold read, and fp8 halves K/V (~2 GB back at
+        # 116K).  REVERT THIS if depth decode matters more than reuse for the session in hand: `"fp8"` -> `"fp16"`.
+        # Original fp16 rationale (measured 2026-11-24 on this card, --bench, gen 128): fp8 is a shallow-depth trick
+        # and a depth penalty - at a 512-token prompt it is faster (95.1 vs 53.2 t/s) but from ~4K it loses, and by
         # the depth a real agent session sits at it is ~35% slower:
         #   @32768: fp8 37.8  fp16 48.5
         #   @65536: fp8 23.0  fp16 40.3
         #   @98304: fp8 22.6  fp16 34.6
-        # The engine's own auto rule (fp8 only when free VRAM is short) would
-        # have picked fp16 here too, and parking means only one slot's K/V is
-        # ever resident, so fp16 fits with room.
         "--kv"
-        "fp16"
+        "fp8"
         # The HIP dispatch guard allows 8192 for a >=36 CU block, but the
         # engine's default `--chunk` is 512 and that is what actually gates
         # prefill. Measured at 8192-token prompts: 512 -> 874 t/s,
@@ -212,6 +216,13 @@ let
       parallel = 2;
       env = {
         HIP_VISIBLE_DEVICES = "0"; # only the R9700 is HIP-visible (gfx803 is out of ROCm)
+        # Park an IDLE slot's K/V in pinned host RAM (engine-side `park_slot`) instead of leaving ~115K tokens of a
+        # finished conversation in the pool: measured on zen3 2026-11-24 21:45 (two ~115K conversations, one idle and
+        # one live) the live slot could not keep its prefix, so EVERY turn was a cold re-read - `reused: 0`,
+        # prompt_ms 127,967 for a 142 s turn - while the idle slot held 115,638 tokens of the 163,840 pool.  The
+        # 2026-11-24 reason it was turned off ("400-800 s reading the prompt") is void: those measurements were taken
+        # while orphan engines held the card (see ExecStopPost below), and parking itself restores in ~0.5 s for 16.7K.
+        STRATA_INK_PARK = "1";
       };
       before_load = "${pkgs.systemd}/bin/systemctl stop sd-server";
     }
@@ -241,6 +252,12 @@ in
       "https://github.com/Niko1221/Strata/releases/tag/v0.2.21"
     ];
     after = [ "network.target" ];
+    # The serve layer's own routing trace (`_inkling_route`: prompt length, each slot's held tokens, busy flags and the
+    # prefix match per slot) - the line that names WHY a request took the slot it took, without which every
+    # wrong-slot/cold-reread report has to be guessed from /slots afterwards.
+    environment = {
+      STRATA_DEBUG = "1";
+    };
     # Swap-only, like the strata partners: strata-swap starts it when a
     # request names it; NO wantedBy, so the boot default stays Strata.
     # Runs as root because /home/cjdell is 700 (the llama-log-viewer reason).
