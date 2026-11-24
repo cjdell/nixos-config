@@ -547,6 +547,14 @@
         (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-package.nix
           { };
 
+      # Build the Inkling-2-Mini shape engine (Strata 0.2.21, strata-inkling
+      # + serve) on its own: nix build .#strata-inkling
+      # (hosts/zen3-nixos/ai/inkling.nix callPackages the same file; the
+      # model/companion files are NOT built - scripts/fetch-inkling-strata.sh).
+      packages.x86_64-linux.strata-inkling =
+        (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-inkling-package.nix
+          { };
+
       # Build Avalon's llama-server (the Qwen3.8-Flash-Next fork) on its own:
       #   nix build .#avalon
       # (the NixOS module in hosts/zen3-nixos/ai/avalon.nix callPackages the

@@ -2,175 +2,195 @@
   config,
   lib,
   pkgs,
-  llamaCppPkgs,
   ...
 }:
 
-# Inkling-2-Mini on the R9700 — the llama.cpp lane of the strata-swap table.
+# Inkling-2-Mini on the R9700 — the STRATA swap lane.
 #
-# Thinking Machines' Inkling 2 Mini (released 2026-11-20, Apache 2.0): 26.2B
+# Thinking Machines' Inkling 2 Mini (released 2026-11-20, Apache 2.0): 26.4B
 # MoE / 3.4B active (5.4B effective — layers 6-17 of 24 run THREE times with
 # shared weights, so 48 layer-visits per token), 8 of 128 experts per layer,
 # hybrid local/global attention (4 global layers of 24, sliding window 1024
-# for the rest — the model card's 1M ctx comes cheap in KV: ~16.9 KB/token
-# with q8_0 KV, because 40 of the 48 expanded cache layers are window-bounded),
-# natively multimodal (ViT via mmproj). The GGML arch is `inkling2_loop`.
+# for the rest), natively multimodal. The GGML arch is `inkling2_loop`.
 #
-# WHY llama.cpp AND NOT STRATA. Strata is not a general GGUF engine: its
-# kernels and pack pipeline are written for the Qwen3.8-Flash-Next family
-# (qwen4exp) plus the Qwen3.6 own-path. A looped transformer with per-expert
-# NVFP4 scales matches neither family — the engine has no inkling2 path at
-# all. So this lane is stock llama.cpp (Vulkan build, like ./lfm3.nix — the
-# R9700 goes through RADV, and it is pinned to the R9700 the same way the
-# llama-swap/lfm3 units are: MESA_VK_DEVICE_SELECT=1002:7551! so Vulkan0 is
-# always the leased card).
+# WHY STRATA NOW (this changed 2026-11-22/24 — the lane used to be llama.cpp
+# because Strata could not run this arch at all): Strata 0.2.19 shipped
+# `strata-inkling`, a dedicated shape engine for exactly this model
+# (engine/src/inkling2 + a first-class HIP backend listing gfx1200/gfx1201),
+# with native DSpark drafting (the thing llama.cpp still lacks — mainline PR
+# ggml-org/llama.cpp#32218 open), 1..64 continuous batching, and direct
+# GGUF_RAW loading of the Unsloth file already on disk (both GGUF layouts
+# accepted since 0.2.21). 0.2.21 (2026-11-24) is what we run: it fixes the
+# long-context/small-card decode collapses reported on the pack repo
+# ("RTX 5070 12 GB SQ-10: 68 instead of 12.5 tok/s"). Reference points:
+# upstream's own R9700 row (SQ-10): 99-106 t/s decode, 3,982 t/s prefill;
+# the community RDNA4 benchmark bundled in that tree (RX 9070 XT 16 GB,
+# SQ-10, 0.2.20): 62 t/s short / 44 t/s at 16K depth, 2.3K t/s prefill,
+# 13.2 GiB VRAM — versus this card's llama.cpp lane at 33-36 t/s decode and
+# 551 t/s on a live 53.6K prefill (see git history of this file, the
+# 2026-11-23 measurements).
 #
-# HOW IT JOINS THE SWAP. The table itself lives in ./strata.nix (swapConfig);
-# `ai.swapEngines` (./default.nix) lets an engine built OUTSIDE that file
-# carry an entry, which strata-swap routes by `model` exactly like the Strata
-# partners: request "inkling-2-mini-ud-q4_k_xl" on :8080 -> drain the live
-# engine -> stop it -> wait for free VRAM -> start inkling.service -> wait
-# /slots -> forward. Its unit joins ai.strataEngineUnits, so `gpu-mode
-# sd|game` stops it too and `gpu-mode llm` evicts it back to the primary. It
-# has NO wantedBy: a reboot still serves config.ai.strataModel.
+# WHY A SEPARATE 0.2.21 BUILD AND NOT A BUMP OF ./strata.nix: our own upstream
+# issue #6420 — the layers 18-22 prefill spin that forced the revert to
+# 0.2.13.1 (docs/strata-prefill-stall-2026-11-20.md) — is STILL OPEN
+# (2026-11-24, no maintainer reply). The Flash-Next engine on 0.1.67 would
+# re-expose every agent session here to it. strata-inkling is a separate
+# binary and a separate serve instance, so this lane runs the new tree and
+# ./strata.nix keeps running the proven one; flip ./strata.nix's pin to
+# 0.2.21 only after #6420 is fixed or a soak says otherwise.
 #
-# THE FILES. scripts/fetch-inkling-2-mini.sh puts them at
-# /home/cjdell/Models/Inkling-2-Mini-GGUF and pins rev + size + sha256.
-# They MUST be the Mainline_Support/ (`inkling2_loop`) layout renamed —
-# the repo's root UD files use Unsloth's looped layout, which mainline
-# reads as `inkling2` (unsupported), and the llama-cpp input must be
-# >= upstream b12611 (#32704: loop passes 2/3 lost the per-expert NVFP4
-# scales — SILENT garbage, ppl ~130, no load error). ConditionPathExists
-# keeps the unit down until the fetch ran, as everywhere else here.
+# HOW IT JOINS THE SWAP: unchanged from the llama era — ai.swapEngines entry,
+# id `inkling-2-mini-ud-q4_k_xl` on :8094, and strata-swap routes by `model`
+# (drain -> stop live -> wait VRAM -> start this unit -> wait /v1/status
+# loaded:true -> forward). kind now defaults to "strata": the 0.2.21 serve
+# layer answers /v1-status style exactly like the main lane (loaded,
+# activity.in_flight), so the shim needs nothing special and gpu-mode's
+# lease list (ai.strataEngineUnits) is unchanged — same unit name.
 #
-# VRAM: weights + KV + idle graphs, sized to the depth sessions ACTUALLY reach.
-# Measured on this box's 32624 MiB (headless R9700, console is the RX 580),
-# 2026-11-23, at -c 131072 / -b 1024 -ub 512 / q8_0 KV:
+# THE FILES: the GGUF stays where scripts/fetch-inkling-2-mini.sh put it
+# (Mainline_Support layout, = Strata's ALT_GGUF pin, so both engines read
+# the same bytes). scripts/fetch-inkling-strata.sh adds the strata-side
+# companions, all size+sha pinned: tokenizer.json + chat_template.jinja
+# (serve's chat dialect — the unit's ExecStartPre turns them into
+# tokenizer/vocab.json once via the package's tools/inkling_tokenizer.py),
+# Inkling-2-Mini-Vision.strata (the engine reads images ONLY from this
+# shard — the mmproj-F16.gguf beside the GGUF is llama.cpp's projector and
+# stays that way), mtp.safetensors (Thinking Machines' BF16 DSpark drafter,
+# which a dspark_f32_widen=1 engine drafts 3-7x/step from), and
+# dspark-Inkling-2-Mini-Q8_0.gguf (Unsloth's Q8_0 drafter at the pinned
+# pre-re-upload commit — serve/inkling_kind.py's fit_dspark() falls back to
+# it automatically if the engine cannot read the BF16 one). ConditionPath-
+# Exists keeps the unit down until the fetch ran, as everywhere here.
 #
-#   weights (UD-Q4_K_XL)      16800 MiB   all 48 visits GPU-resident (-ngl 99;
-#                                         17.6 GB is why Q4_K_XL, not Q8_K_XL)
-#   KV @ 131072 ctx, q8_0      2280 MiB   8 full-history CACHE layers (physical
-#                                         5, 11, 17, 23 — the loop makes 11 and
-#                                         17 into 3 cache layers each) x K,V x
-#                                         8 kv-heads x 128 x 1.0625 B q8_0 =
-#                                         17408 B/token; + 42.5 MiB fixed for
-#                                         the 20 windowed (1024-cell) layers
-#   mmproj F16 (vision)         640 MiB
-#   graphs/slack              ~3200 MiB
-#   --------------------------------------------------------------
-#   idle                      22941 MiB used, 9683 free, GTT 530
+# RUN LINE = what `strata launch` writes for this build (adopt.py) + the
+# community RDNA4 bench's shape: --native <gguf> --max-context 131072 --kv
+# fp8 (HIP supports fp16/fp8 only; fp8 = 16 KiB/token on the 8 global
+# visits, ~2.2 GB at 128K) --vision <Vision.strata> --dspark <mtp>. With
+# UD-Q4_K_XL the fit table puts 15.80 GB expert bodies + a 2.45 GB BF16
+# trunk on the card — all 48 visits GPU-resident at ~21 GB + KV, comfortably
+# on the 32 GiB card; no --vram-experts-gb/--ram-experts-gb override, the
+# planner on a 32 GiB card has nothing to spill (the 9070 XT bench NEEDED
+# them on 16 GiB; we do not). Drafting is pinned "dspark" instead of the
+# "auto" default: "auto" runs a ~3 min measured probe (1.10x gain gate) at
+# the first start of a placement, and we want the deterministic thing here
+# (0.2.21 also added a startup drafter probe — every first start of a new
+# setup costs ~3 min extra; that is one-time).
 #
-# 128K is a deliberate sizing choice, not a model limit (1M native): live agent
-# sessions here reach ~96K, and every 128K of reserved window costs 2.2 GB of KV
-# — exactly the headroom the prefill scratch needs. At 384K (6.6 GB KV) a 53.6K
-# prompt measured 431 t/s with 2.6-4.8 GB spilled to GTT; at 128K the same
-# prompt measures **551 t/s**. The fleet's other 32 GB lanes sit at 40-65K for
-# the same reason.
-#
-# THE PREFILL SCRATCH IS DEPTH-PROPORTIONAL — the thing to know about this lane.
-# While a graph runs, the Vulkan attention working set grows with the tokens in
-# it (~140-300 KB per token of depth: +7.7 GB at a 53.6K prompt, ~16 GB at 95K)
-# and it is NOT a function of batch shape — `-b 512 -ub 512` measured
-# byte-identical in speed AND residency to `-b 1024 -ub 512`. Whatever does not
-# fit in free VRAM silently lands in GTT. Two reasons it grows with depth: the
-# FA kernels materialise per-op scratch, and with a QUANTISED KV cache EVERY
-# graph re-dequantises the WHOLE cache to f16 before attention (ggml-vulkan's
-# `use_dequant_kv`: `k_quant && v_quant` -> a full-depth f16 copy, per global
-# layer visit). That is why a ~700-token turn at 92K depth costs 28 s while the
-# same turn shallow costs ~1 s. A/B'd 2026-11-23 and REJECTED as the cause:
-# `q8_0/f16` (which makes kv_raw true and skips that copy) measured 21.77 t/s at
-# d90000 against 21.85 for `q8_0/q8_0` — identical, so the dequant copy is not
-# what costs the depth. It is the backend's attention path (see the HIP note
-# below), not the cache layout.
-#   * keep prompt prefixes stable so LCP reuse skips the re-read entirely;
-#   * shrink -c if sessions get shallower: 2.2 GB of KV per 128K.
-# -c sweep at the old 384K setting (same line, nothing else changed): 524288 ->
-# 29717 used / 2907 free; 655360 -> 32562 / 62 (+0.9 GB GTT); 786432 -> 32533 /
-# 91 (+4.6); 917504 -> 32564 / 60 (+8.3). All load; past ~600K the marginal KV
-# itself goes to GTT. UD-IQ4_XS is 1.8 GiB smaller but measured identical in
-# speed — AGENTS.md.
-#
-# PREFILL RATES — clean card, ONE server, 2026-11-23. The BACKEND matters more
-# than any flag at depth, so both are listed (pp4096 except where noted):
-#
-#   depth        Vulkan        HIP (deployed)
-#   d 0        1069 (pp512)    1012
-#   d 3.5K      877 (live)     —
-#   d 32K       505 (pp2048)   269
-#   d 65K       —              170
-#   d 90K        21.9          134
-#   decode      34.2 @ d0      27 @ 32K, 25 @ 65K
-#
-# WHY HIP. Vulkan's flash-attention path falls off a cliff between 84K (106 t/s
-# instantaneous, from a live 95K session log) and 88K (22 t/s) — and it is NOT
-# memory or KV type: at d90000 `q8_0/q8_0` and `q8_0/f16` measured 21.85 vs
-# 21.77 t/s, `GGML_VK_DISABLE_COOPMAT2` changed nothing (21.86), and the GPU sat
-# at 48 % busy / 294 W peak while HIP does the same prompt at 97 % busy / 207 W.
-# HIP's curve is smooth and stays >100 t/s across the whole 128K window. The
-# price is shallow speed (269 vs 505 at 32K) — the right trade for a lane whose
-# live sessions grow past 70K, because Vulkan's failure mode there is unusable
-# (22 t/s) while HIP's is merely slower. Package: `llamaCppPkgs.rocm`, built
-# with `rocmGpuTargets = "gfx1201"` in flake.nix (same llama.cpp pin as Vulkan;
-# without that target ROCm has no compatible kernels for this card).
-#
-# BATCH SIZE: `-b 1024 -ub 512`, and `-ub 512` is a SHARP optimum on both
-# backends — not a plateau. Re-swept on the HIP build 2026-11-23 (pp2048, -r 2,
-# q8_0 KV, GGML_CUDA_DISABLE_GRAPHS=1) — full 49 152-token cold prefill /
-# pp2048 @d65K / pp2048 @d90K:
-#   1024/512 (this)   329.8 / 171.7 / 134.3
-#   2048/512            —   / 171.9 /  —      (-b is irrelevant, as before)
-#   2048/1024         331.8 / 171.5 / TIMEOUT (>600 s)
-#   16384/2048          —   / TIMEOUT / —
-#    2048/384         284.4 /  —    / TIMEOUT
-#    2048/288         239.9 /  —    / TIMEOUT
-# `-ub 1024` measures +10 % (748 vs 679) on a shallow 2K prompt and buys nothing
-# on a real prefill, so that gain is an artefact; every value but 512 collapses
-# at depth. Community RDNA4 advice points the other way (llama.cpp discussion
-# #21043: `-ub 2048` = +29 % prefill, `-b 16384 -ub 2048` = +48 %, dead band at
-# 65-256) and the usual R9700 configs are 2048/512 or 2048/1024 — none of it
-# transfers to `inkling2_loop`. Vulkan-era numbers kept for the same reason:
-# -ub 1024 at 53.6K = 128 vs 431 t/s, -ub 256 = 481 @ 32K, -b 4096 hangs
-# llama-bench, q4_0 KV = 471 @ 32K. And -c 393216 vs 131072 on that 53.6K
-# prompt: 431 vs 551 t/s — the reserved-but-unused KV was the scratch's headroom.
-#
-# WHY IT STILL DECAYS WITH DEPTH (and why the Qwen3.8 lane does not): upstream's
-# best published Inkling figure on an R9700 is 893 t/s at 16K, also decaying, so
-# "1000 t/s across a long context" is not reachable on llama.cpp for
-# `inkling2_loop`. Architecturally this is a LOOPED transformer (24 physical
-# layers, 6-17 run 3x = 48 visits per token, 8-of-128 MoE, mostly
-# sliding-window attention) paying a per-visit cost in a generic backend; the
-# Qwen3.8-Flash-Next lane is flat because most of its layers are
-# gated-delta-net (linear attention: constant state, no depth term) and Strata
-# has hand-fused kernels for them. Full comparison in AGENTS.md.
-#
-# --parallel 1 (llama-server's default): the whole pool to one conversation;
-# a second client queues instead of halving both streams (the strata-batch
-# lesson, docs/strata-batching.md). No DSpark drafter: mainline support is
-# still an open PR (ggml-org/llama.cpp#32218).
-#
-# Sampling follows the model card (temp 1.0, top-p 1.0, top-k off, min-p 0) —
-# these are ALSO embedded in the GGUF (general.sampling.*), restated here so
-# the run line is self-describing. Reasoning effort is per-request via
-# chat_template_kwargs (template default: high).
+# A/B against the old llama lane without reverting the unit (stop this unit
+# first — two ~17 GB models do not share 32 GB; and grep pgrep for a second
+# llama-server/strata before believing any GTT number, AGENTS.md): the old
+# run line is in this file's git history (llamaCppPkgs.rocm, -b 1024 -ub 512,
+# q8_0 KV, 33-36 t/s decode / 551 t/s live 53.6K prefill, 2026-11-23).
 
 let
+  strataInkling = pkgs.callPackage ./strata-inkling-package.nix { };
+  # The same store-built ROCm 10.0.0 runtime ./strata.nix puts first in
+  # LD_LIBRARY_PATH (its header explains why it is not nixpkgs'). Verify a
+  # boot with: sudo cat /proc/$(pgrep -f 'strata-inkling --serve')/maps | grep -c rocm10
+  rocm10 = pkgs.callPackage ./rocm10-runtime.nix { };
+
   models = "/home/cjdell/Models/Inkling-2-Mini-GGUF";
   model = "${models}/Inkling-2-Mini-UD-Q4_K_XL.gguf";
-  mmproj = "${models}/mmproj-F16.gguf";
+  vision = "${models}/Inkling-2-Mini-Vision.strata";
+  drafter = "${models}/mtp.safetensors";
+  drafterAlt = "${models}/dspark-Inkling-2-Mini-Q8_0.gguf";
+  tokenizerDir = "${models}/tokenizer";
+  share = "${strataInkling}/share/strata";
   port = 8094; # engine slots: 8091 strata, 8092 coder, 8093 q36, 8094 inkling
   alias = "inkling-2-mini-ud-q4_k_xl";
+
+  # argv: <out_dir> <tokenizer.json> <chat_template.jinja>. A file rather
+  # than an inline `-c` so the ExecStartPre line stays one shell word of
+  # Nix-interpolated paths (see the ExecStartPre comment below).
+  tokenizerScript = pkgs.writeText "inkling-tokenizer.py" ''
+    import sys
+    sys.path.insert(0, ${builtins.toJSON share} + "/tools")
+    import inkling_tokenizer
+    out, tj, ct = sys.argv[1:4]
+    print(inkling_tokenizer.convert_files(tj, ct, out))
+  '';
+
+  # What adopt.py's inkling branch writes for a GGUF build, by hand. No
+  # `parallel` >1 and no expert caps: solo slot, everything on the card.
+  runConfig = pkgs.writeText "strata-inkling.json" (
+    builtins.toJSON {
+      exe = "${strataInkling}/bin/strata-inkling";
+      backend = "hip";
+      arch = "inkling2_loop"; # serve routes the whole Inkling dialect by this (serve/inkling_kind.py)
+      cwd = share;
+      args = [
+        "--native"
+        model
+        "--max-context"
+        "131072"
+        # FP16, NOT FP8 (measured 2026-11-24 on this card, --bench, gen 128).
+        # fp8 is a shallow-depth trick and a depth penalty: at a 512-token
+        # prompt it is faster (95.1 vs 53.2 t/s) but from ~4K it loses, and by
+        # the depth a real agent session sits at it is ~35% slower:
+        #   @32768: fp8 37.8  fp16 48.5
+        #   @65536: fp8 23.0  fp16 40.3
+        #   @98304: fp8 22.6  fp16 34.6
+        # The engine's own auto rule (fp8 only when free VRAM is short) would
+        # have picked fp16 here too; we forced fp8 for a capacity reason that
+        # does not exist on a 32 GiB card with all experts resident.
+        "--kv"
+        "fp16"
+        # The HIP dispatch guard allows 8192 for a >=36 CU block, but the
+        # engine's default `--chunk` is 512 and that is what actually gates
+        # prefill. Measured at 8192-token prompts: 512 -> 874 t/s,
+        # 1024 -> 1137, 2048 -> 1348, 4096 -> 1346 (plateau). At 32768 the
+        # same 2048 setting gives 1219 vs 738 at the default; at 65536, 1083
+        # vs 640. Each chunk costs SWA ring positions (win 1024 + chunk), so
+        # 2048 keeps the ring at 3072 of the 131072 context.
+        "--chunk"
+        "2048"
+        "--vision"
+        vision
+        "--dspark"
+        drafter
+      ];
+      tokenizer = tokenizerDir;
+      model_name = alias;
+      log = "/var/lib/inkling/inkling.log";
+      lib_dirs = [ "${rocm10}/lib" ];
+      # Same shim path as the main lane: forwarded agent traffic keeps the
+      # public Host header, so the serve DNS-rebinding guard needs the names.
+      allowed_hosts = [
+        "strata.ai.chrisdell.info"
+        "llama.ai.chrisdell.info"
+        "llm.ai.chrisdell.info"
+      ];
+      drafting = "dspark";
+      # TWO slots, and the second one exists for the cache, not throughput.
+      # With one slot the serve layer says it out loud (2026-11-24, live):
+      #   "a side request (20 tokens) replaced the cached chat (78361 tokens);
+      #    --parallel 2 keeps it"
+      # i.e. every title/probe/classification call evicted the agent's 78-94K
+      # conversation, and the next real turn re-read the whole thing from token
+      # 0 (~150-200 s). With two slots serve/inkling's _inkling_route sends a
+      # short request that continues nothing to the *other* slot and leaves the
+      # conversation where it is. A lone request still takes the solo path
+      # (GEN, slot 0, DSpark drafts), so single-stream speed is unchanged; the
+      # cost is a second KV/SWA pool. Measured at 4096 tokens: par2 41.3/slot
+      # vs par1 56.1, i.e. only when two requests really run together.
+      parallel = 2;
+      env = {
+        HIP_VISIBLE_DEVICES = "0"; # only the R9700 is HIP-visible (gfx803 is out of ROCm)
+      };
+      before_load = "${pkgs.systemd}/bin/systemctl stop sd-server";
+    }
+  );
 in
 {
-  # strata-swap routing entry (consumed in ./strata.nix's swapConfig; the
-  # shim's kind="llama" branch probes llama-server's /slots instead of
-  # Strata's /v1/status — ./strata-swap.py).
+  # strata-swap routing entry (consumed in ./strata.nix's swapConfig). The
+  # kind is now the default "strata": this lane's serve layer answers
+  # /v1/status loaded/in_flight like the main lane.
   ai.swapEngines = [
     {
       id = alias;
       unit = "inkling-2-mini";
       port = port;
-      vramMinMiB = 25000; # after the strata stop: weights+KV alone need ~27 GB
-      kind = "llama";
+      vramMinMiB = 25000; # after the strata stop: experts+trunk+KV+drafter want ~23 GiB free
     }
   ];
 
@@ -178,56 +198,51 @@ in
   ai.strataEngineUnits = [ "inkling-2-mini" ];
 
   systemd.services."inkling-2-mini" = {
-    description = "llama.cpp HIP (ROCm) server (Inkling-2-Mini UD-Q4_K_XL) on the R9700 — strata-swap lane";
-    documentation = [ "https://huggingface.co/unsloth/Inkling-2-Mini-GGUF" ];
+    description = "Strata strata-inkling 0.2.21 server (Inkling-2-Mini UD-Q4_K_XL, DSpark) on the R9700 — strata-swap lane";
+    documentation = [
+      "https://huggingface.co/strata-engine/Inkling-2-Mini-Strata"
+      "https://github.com/Niko1221/Strata/releases/tag/v0.2.21"
+    ];
     after = [ "network.target" ];
     # Swap-only, like the strata partners: strata-swap starts it when a
     # request names it; NO wantedBy, so the boot default stays Strata.
     # Runs as root because /home/cjdell is 700 (the llama-log-viewer reason).
 
-    # HIP, not Vulkan — Vulkan's FA path drops off a cliff between 84K and 88K
-    # depth (106 -> 22 t/s) with the GPU only 48 % busy, and no KV type or
-    # coopmat2 setting changes it; HIP runs the same 90K prompt at 134 t/s at
-    # 97 % busy. Curve and A/B evidence in the header above and AGENTS.md.
-    # Only the R9700 is HIP-visible (gfx803 is not supported by ROCm 7), so
-    # device 0 is always the dGPU and the console RX 580 cannot be picked.
-    environment = {
-      HIP_VISIBLE_DEVICES = "0";
-      # ROCm 7.2.3's hipGraphExecUpdate SEGVs inside VirtualGPU::submitKernel-
-      # Internal when ggml-hip captures/updates a graph (crash 2026-11-23
-      # 22:07:50, stack: ggml_cuda_graph_launch_chunk -> hipGraphExecUpdate ->
-      # amd::roc::VirtualGPU::submitKernelInternal). Graphs are a launch-overhead
-      # optimisation only, so the documented escape hatch is to turn them off
-      # until ROCm fixes it — measure the decode cost before re-enabling.
-      GGML_CUDA_DISABLE_GRAPHS = "1";
-    };
-
     unitConfig.ConditionPathExists = [
       model
-      mmproj
+      vision
+      drafter
+      "${models}/tokenizer.json"
+      "${models}/chat_template.jinja"
+      drafterAlt
     ];
 
     serviceConfig = {
+      # Turn the pinned tokenizer.json + chat_template.jinja into the
+      # tokenizer/vocab.json dir (what serve and adopt.py check), once.
+      # tools/inkling_tokenizer.py imports stdlib only on this path.
+      #
+      # The paths go in as argv, not interpolated into a `bash -c '...'`:
+      # inside a Nix indented string `'''` writes TWO quotes, so the inline
+      # form produced `bash -c ''` plus three loose lines, which systemd
+      # rejected ("Missing '=', ignoring line") and silently dropped — the
+      # tokenizer step then never ran on a fresh model directory.
+      ExecStartPre = pkgs.writeShellScript "inkling-tokenizer" ''
+        set -eu
+        test -e ${tokenizerDir}/vocab.json && exit 0
+        exec ${pkgs.python3}/bin/python3 -B ${tokenizerScript} \
+          ${tokenizerDir} ${models}/tokenizer.json ${models}/chat_template.jinja
+      '';
+      StateDirectory = "inkling";
       ExecStart = ''
-        ${llamaCppPkgs.rocm}/bin/llama-server \
-          --model ${model} \
-          --mmproj ${mmproj} \
-          --device ROCm0 \
-          --n-gpu-layers 99 \
-          --jinja \
-          --ctx-size 131072 \
-          --flash-attn on \
-          --cache-type-k q8_0 --cache-type-v q8_0 \
-          --batch-size 1024 --ubatch-size 512 \
-          --parallel 1 \
-          --slots \
-          --host 127.0.0.1 --port ${toString port} \
-          --alias ${alias} \
-          --temp 1.0 --top-p 1.0 --top-k 0 --min-p 0.0
+        ${strataInkling}/bin/strata-server --engine strata --config ${runConfig} \
+          --host 127.0.0.1 --port ${toString port}
       '';
       Restart = "on-failure";
       RestartSec = 5;
       TimeoutStopSec = 120;
+      # Engine watchdog aborts (#29) used to dump 32 GB cores on / here.
+      LimitCORE = 0;
     };
   };
 }
