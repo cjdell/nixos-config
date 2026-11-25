@@ -1,5 +1,35 @@
 > Archived from AGENTS.md (2026-11-24). The short version lives in AGENTS.md; this file holds the full backstory.
 
+## STATUS 2026-11-25: this lane now runs **strata-inkling**, not llama.cpp
+
+Strata 0.2.19 shipped a dedicated Inkling engine (`strata-inkling`, arch
+`inkling2_loop`, HIP with gfx1200/gfx1201), so the "Strata cannot run it"
+premise below is history. The lane is `hosts/zen3-nixos/ai/inkling.nix` on
+`strata-inkling-package.nix` (0.2.21, engine 0.1.67), port 8094, still the
+`inkling-2-mini-ud-q4_k_xl` swap-table entry. Model: Strata's native **SQ-20**
+pack (bit-exact vs the original; SQ-10 is the pack upstream's own R9700 numbers
+use — both fetched by `scripts/fetch-inkling-strata.sh`, which also fetches the
+vision pack and the DSpark drafter).
+
+**It has a depth wedge, and that is the open problem:**
+`docs/inkling-depth-wedge-2026-11-24.md` — 81–122K prompts that must *replace* a
+large resident context read "complete" (79K tokens in 10 s = 7,900 tok/s, i.e.
+skipped), then produce no first token while the engine spins (gfx 100 %,
+119–145 W, two threads in `R`, 9.4 GiB VRAM still free). Reported upstream as
+**Niko1221/Strata#7096**. The one variable that changed it: `--chunk 512`
+(ring `1536 positions`, span cap 512) completed an 82K cold read that wedged on
+`--chunk 2048` (ring 3072, span cap 2048) minutes earlier — one observation, not
+yet a soak. The llama.cpp run line below is the proven fallback (131K, 33–36
+t/s, 99.9 % reuse, never wedged in a day of use).
+
+Five Python-only serve patches ride in front of it via
+`strata-inkling-serve.nix` (prefill progress + decode rate in `/metrics`;
+`does_not_fit` admission guard for the two-slot case; a `pick:` routing trace;
+"protect slot 0 only while the new prompt fits beside it"; and a phase label so
+a generating request stops printing "reading the prompt" — a tool call's
+argument body is buffered by `inkling_dialect`, which made 12K-token writes
+look like a stuck prefill).
+
 ## Inkling-2-Mini on llama.cpp (`inkling-2-mini.service` — the third swap lane)
 
 Thinking Machines' Inkling 2 Mini (released 2026-11-20, Apache 2.0), served by

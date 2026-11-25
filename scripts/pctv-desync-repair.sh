@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # pctv-desync-repair.sh - pull a recording's sound back onto its picture
 # without touching one frame of the picture.
 #

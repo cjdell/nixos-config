@@ -213,8 +213,8 @@
 #      the step counter). The no-knob control row never executed on a live card
 #      either — its attempt started on a bus that was already dead (now scored
 #      NO-GPU-ON-BUS and not counted). So the software hypotheses are untested,
-#      not disproved: the 580 CUDA path against OpenMM's allocation pattern, the
-#      service env (LD_PRELOAD + the core's bundled CUDA 11.8) for OpenMM
+#      not disproved: the 580 CUDA path against OpenMM's allocation pattern,
+#      the service env (LD_PRELOAD + the core's bundled CUDA 11.8) for OpenMM
 #      specifically, the display stack sharing the card, ASPM/DVFS. First among
 #      the hardware ones, still, is #8's adapter-fed 6-pin — which fits BOTH a
 #      16 s kill under 29 W sampled (a transient between samples) and a 71 s
@@ -331,14 +331,10 @@ let
 in
 {
   imports = [
-    ../../common/fah-panel.nix
-    ../../common/folding-at-home-native.nix
+    ../../common/folding-heater.nix
   ];
 
   services.folding-at-home-native = {
-    enable = true;
-    userName = "cjdell";
-    teamNumber = 236565;
     # GPU FOLDING OFF since 2026-11-21 (power history #10, #11). The 970 on
     # this box dies under OpenMM GPU work within seconds of the first WU —
     # Xid 79, off the bus, reboot to reclaim — reproducibly, with the client
@@ -360,24 +356,6 @@ in
     cpus = 8;
     gpuUsage = 50;
     startDelay = "90";
-    httpAddresses = [ "0.0.0.0:7396" ];
-    allowAddresses = [
-      "127.0.0.1" # loopback — fah-provision and local fahctl connect here
-      "::1"
-      "192.168.49.0/24" # LAN
-      "10.47.0.0/16" # WireGuard
-      "100.64.0.0/10" # tailnets
-    ];
-    # Links this machine to the FAH account (it then shows up in
-    # app.foldingathome.org next to zen1, haswellatx and asus-i7-6700).
-    # secrets/fah.yaml is encrypted to the shared fleet age key, i.e. the
-    # /var/lib/sops-nix/key.txt provisioned on every sops-enabled host.
-    accountTokenFile = config.sops.secrets.fah_account_token.path;
-  };
-
-  sops.secrets.fah_account_token = {
-    sopsFile = ../../secrets/fah.yaml;
-    restartUnits = [ "fah-client.service" ];
   };
 
   # THE load-bearing pair (see power history #3/#4): runs last in the
@@ -519,7 +497,6 @@ in
   # Control on :7396 is exposed here. (zen1 runs the same app with its
   # --gpu amd backend.)
   services.fah-panel = {
-    enable = true;
     gpu = "nvidia";
     nvidiaSmi = config.hardware.nvidia.package.bin + "/bin/nvidia-smi";
     # --budget flags the CPU+GPU DC estimate against this box's reality.
@@ -544,13 +521,4 @@ in
 
   # The panel reads/pins the cap the boot-time unit owns, so start after it.
   systemd.services.fah-panel.after = [ "nvidia-power-limit.service" ];
-
-  # A heater never sleeps; logind refuses suspend/hibernate requests
-  # (PowerDevil's idle actions included).
-  systemd.sleep.settings.Sleep = {
-    AllowSuspend = "no";
-    AllowHibernation = "no";
-    AllowHybridSleep = "no";
-    AllowSuspendThenHibernate = "no";
-  };
 }

@@ -12,20 +12,15 @@
 # `tail /var/lib/fah-client/log.txt`. Paused/resumed by stopping the unit:
 #   sudo systemctl stop  fah-client   # idle the box (e.g. while a render runs)
 #   sudo systemctl start fah-client   # fold again (un-paused, see the module)
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}:
+{ lib, ... }:
 
 {
-  imports = [ ../../common/folding-at-home-native.nix ];
+  imports = [
+    ../../common/folding-heater.nix
+    ../../common/fah-nvidia.nix
+  ];
 
   services.folding-at-home-native = {
-    enable = true;
-    userName = "cjdell";
-    teamNumber = 236565;
     # While this box is on video duty it folds GPU-only: the lossless x264
     # render owns the 8 Kaby Lake threads, so 0 CPU slots (the client's GPU
     # slot still runs). The client honours <cpus>0</cpus> (no CPU slots are
@@ -37,26 +32,16 @@
     # full heater again.
     cpus = 0;
     # gpuUsage left at the module default (100).
-    httpAddresses = [ "0.0.0.0:7396" ];
-    allowAddresses = [
-      "127.0.0.1" # loopback — fah-provision/fahctl connect here
-      "::1"
-      "192.168.49.0/24" # LAN
-      "10.47.0.0/16" # WireGuard
-      "100.64.0.0/10" # tailnets
-    ];
-
-    # Linked to the FAH account since 2026-11-03: the token comes from
-    # secrets/fah.yaml, decrypted by the shared fleet age key at
-    # /var/lib/sops-nix/key.txt (installed on this host that day — same
-    # arrangement as hosts/asus-i7-6700-nixos/folding-heater.nix). Without it
-    # folding still credits donor name + team in public stats, but the points
-    # never appear on app.foldingathome.org.
-    accountTokenFile = config.sops.secrets.fah_account_token.path;
   };
 
-  sops.secrets.fah_account_token = {
-    sopsFile = ../../secrets/fah.yaml;
+  # This box is a video workbench, not a pure heater: no fah-panel and no
+  # sleep-disable (the shared folding-heater.nix enables both by default).
+  services.fah-panel.enable = false;
+  systemd.sleep.settings.Sleep = {
+    AllowSuspend = "yes";
+    AllowHibernation = "yes";
+    AllowHybridSleep = "yes";
+    AllowSuspendThenHibernate = "yes";
   };
 
   # The native module exists for AMD GPUs, so it wires up the ROCm OpenCL ICD.
@@ -65,23 +50,8 @@
   # hosts/asus-i7-6700-nixos/folding-heater.nix, and the reason
   # hardware.nvidia.package — with its patchelf workaround, which the driver's
   # bin/ and OpenCL bits come from — is what these paths resolve through).
-  systemd.services.fah-client.environment = lib.mkIf config.services.folding-at-home-native.enable {
-    OCL_ICD_VENDORS = lib.mkForce "${config.hardware.nvidia.package}/etc/OpenCL/vendors";
-    LD_LIBRARY_PATH = lib.mkForce (
-      lib.makeLibraryPath [
-        pkgs.ocl-icd
-        pkgs.expat
-        pkgs.zlib
-        config.hardware.nvidia.package
-      ]
-    );
-    # The fah user is an isSystemUser with HOME=/var/empty, and the NVIDIA
-    # userspace caches JIT'd kernels under $HOME/.nv — keep them in the
-    # service's CacheDirectory so they survive (and speed up) restarts.
-    HOME = "/var/cache/fah-client";
-  };
-
-  systemd.services.fah-client.serviceConfig.CacheDirectory = "fah-client";
+  # (The shared fah-nvidia.nix module does this wiring; this file only adds
+  # the host-specific cpus=0.)
 
   # The container kept its state in /srv/fah (fah user, uid 7396). That tree
   # is now orphaned — the native client's state is the SQLite DB in

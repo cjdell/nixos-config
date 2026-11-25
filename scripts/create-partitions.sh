@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 
 # Trap for SIGINT (Ctrl+C)
 trap 'echo -e "\nScript terminated by user." && exit 1' SIGINT

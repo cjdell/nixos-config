@@ -1,4 +1,5 @@
 #!/run/current-system/sw/bin/env bash
+set -eo pipefail
 # Stop a running pctv-monitor capture when the tape ends.
 #
 # SINCE 2026-11-02 THE MONITOR DOES THIS ITSELF, better: it sees the frames, and a

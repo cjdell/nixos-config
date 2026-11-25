@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # strata-pf-ab.sh — A/B a Strata prompt-path switch against this box's real traffic.
 #
 # Built for STRATA_PF_FUSED_Q50 (the fused int8 kernel for the Q5_0 `down` layers —

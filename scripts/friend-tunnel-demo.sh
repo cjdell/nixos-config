@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # friend-tunnel demo: evidence the /64-over-WebSocket experiment works.
 # Run ON grafton-router. Sections 1-3: plumbing, 4: the strict ISP bites,
 # 5-7: friend-side v6 rides the tunnel, 8: inbound through the /64.

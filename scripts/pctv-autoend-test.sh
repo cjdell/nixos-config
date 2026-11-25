@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # End-to-end harness for scripts/pctv-autoend.sh.
 #
 # Fakes the three things the watchdog looks at:

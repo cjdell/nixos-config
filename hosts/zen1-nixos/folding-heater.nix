@@ -15,37 +15,16 @@
 # writing hwmon power1_cap; the 75–150 W range this VBIOS exposes is read at
 # startup, verified writable on the default ppfeaturemask).
 {
-  imports = [
-    ../../common/fah-panel.nix
-    ../../common/folding-at-home-native.nix
-  ];
+  imports = [ ../../common/folding-heater.nix ];
 
   services.folding-at-home-native = {
-    enable = true;
-    userName = "cjdell";
-    teamNumber = 236565;
     cpus = 16; # the whole 1800X, nothing reserved
-    httpAddresses = [ "0.0.0.0:7396" ];
-    allowAddresses = [
-      "127.0.0.1" # loopback — fah-provision and local fahctl connect here
-      "::1"
-      "192.168.49.0/24" # LAN
-      "10.47.0.0/16" # WireGuard
-      "100.64.0.0/10" # tailnets
-    ];
-    accountTokenFile = config.sops.secrets.fah_account_token.path;
-  };
-
-  sops.secrets.fah_account_token = {
-    sopsFile = ../../secrets/fah.yaml;
-    restartUnits = [ "fah-client.service" ];
   };
 
   # Same panel binary as the asus-i7-6700 heater, AMD backend (see crates/fah-panel).
   # No --budget here: this is a proper AM4 desktop PSU, not the old Z240's
   # brownout-prone SFF one, so the DC-load card just reports without a marker.
   services.fah-panel = {
-    enable = true;
     gpu = "amd";
     # Navi 10 XT (RX 5700 XT). Id, not BDF — ids survive PCIe re-enumeration.
     amdPci = "1002:731f";
@@ -56,14 +35,5 @@
     # chip cools. Startup target = this option (survives restarts/reboots);
     # the panel slider overrides it live for the running service.
     cpuTempTarget = 80;
-  };
-
-  # A heater never sleeps; logind refuses suspend/hibernate requests
-  # (PowerDevil's idle actions included).
-  systemd.sleep.settings.Sleep = {
-    AllowSuspend = "no";
-    AllowHibernation = "no";
-    AllowHybridSleep = "no";
-    AllowSuspendThenHibernate = "no";
   };
 }

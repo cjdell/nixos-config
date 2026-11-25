@@ -189,15 +189,18 @@ let
         #   @98304: fp8 22.6  fp16 34.6
         "--kv"
         "fp8"
-        # The HIP dispatch guard allows 8192 for a >=36 CU block, but the
-        # engine's default `--chunk` is 512 and that is what actually gates
-        # prefill. Measured at 8192-token prompts: 512 -> 874 t/s,
-        # 1024 -> 1137, 2048 -> 1348, 4096 -> 1346 (plateau). At 32768 the
-        # same 2048 setting gives 1219 vs 738 at the default; at 65536, 1083
-        # vs 640. Each chunk costs SWA ring positions (win 1024 + chunk), so
-        # 2048 keeps the ring at 3072 positions.
+        # CHUNK 512, from 2048 on 2026-11-25 00:05 — the one variable that matches the wedge's shape.  The
+        # engine stalls on EXACTLY one chunk (`reading the prompt: 2,048 of 81,042 tokens, 198 s so far`), then
+        # "reads" the remaining 79,000 in 10 s (7,900 t/s — it skipped them) and then produces no first token for
+        # 300 s with GPU 100 % / 119 W / umc 10 % and two engine threads in R.  With `--chunk 2048` the SWA ring is
+        # sized to exactly `window 1024 + chunk 2048 = 3,072` positions ("SWA KV ring 3072 positions (window 1024,
+        # forward_batch span cap 2048)"), i.e. the forward-batch span EQUALS the ring's window term; 512 puts the
+        # span below the 1024 window instead.  Cost, measured earlier on this card (8K prompt): 512 -> 874 t/s,
+        # 1024 -> 1137, 2048 -> 1348, 4096 -> 1346 (plateau); at 32K: 1024 -> 1219 vs 738 at 512; at 65K: 1083 vs
+        # 640.  So this is ~40 % of the prefill rate at depth, spent to find out whether the chunk boundary is the
+        # bug — revert to `"2048"` if it is not.
         "--chunk"
-        "2048"
+        "512"
         "--vision"
         vision
         "--dspark"

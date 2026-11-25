@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 
 # Ensure disk write buffers are flushed to physical disk
 sync

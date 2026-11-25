@@ -71,21 +71,21 @@ local-max-jobs := `grep -q '^max-jobs = 0' /etc/nix/nix.conf 2>/dev/null && echo
 
 # Switch the current host (canonical rebuild)
 rebuild:
-    sudo nixos-rebuild switch --impure --flake . {{ local-max-jobs }}
+    sudo nixos-rebuild switch --flake . {{ local-max-jobs }}
 
 # Build the current host into the boot generation (reboot to activate)
 reboot:
-    sudo nixos-rebuild boot --impure --flake . {{ local-max-jobs }}
+    sudo nixos-rebuild boot --flake . {{ local-max-jobs }}
 
 # Rebuild any host:  just rebuild-host N100-NAS
 rebuild-host host:
-    sudo nixos-rebuild switch --impure --flake .#{{ host }} {{ local-max-jobs }}
+    sudo nixos-rebuild switch --flake .#{{ host }} {{ local-max-jobs }}
 
 # Boot-build any host:  just reboot-host N100-NAS
 reboot-host host:
-    sudo nixos-rebuild boot --impure --flake .#{{ host }} {{ local-max-jobs }}
+    sudo nixos-rebuild boot --flake .#{{ host }} {{ local-max-jobs }}
 
-# On autoRollback hosts (N100-NAS, zen3-nixos) the machine rolls itself back
+# On autoRollback hosts (N100-NAS, grafton-router) the machine rolls itself back
 # and reboots within ~5 minutes unless the new generation is confirmed.
 # Confirm the current generation after every rebuild.
 confirm:
@@ -171,7 +171,7 @@ hosts-run op="deploy":
     fi; \
     echo "will run '{{ op }}' on: $(tr '\n' ' ' < "$tmp/selected")"; \
     case "{{ op }}" in \
-        deploy) cmd="git pull && GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' sudo nixos-rebuild switch --impure --flake . \$(grep -q '^max-jobs = 0' /etc/nix/nix.conf || echo --max-jobs 1) && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }";; \
+        deploy) cmd="git pull && GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' sudo nixos-rebuild switch --flake . \$(grep -q '^max-jobs = 0' /etc/nix/nix.conf || echo --max-jobs 1) && { if command -v nixos-confirm >/dev/null 2>&1; then sudo nixos-confirm; fi; }";; \
         reboot) cmd="sudo reboot";; \
         *) echo "unknown op: {{ op }} (supported: deploy, reboot)"; exit 1;; \
     esac; \

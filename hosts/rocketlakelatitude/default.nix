@@ -3,7 +3,6 @@
 [
   ../../common/desktop.nix
   ../../common/podman.nix
-  ../../common/system.nix
   ../../users/cjdell
 
   ({ lib, pkgs, ... }: {

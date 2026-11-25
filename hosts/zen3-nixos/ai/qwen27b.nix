@@ -58,24 +58,39 @@ let
   };
 
   runArgs = [
-    "--host" "127.0.0.1"
-    "--port" (toString port)
-    "--model" model
-    "--ctx-size" "262144"
-    "--n-gpu-layers" "99"
-    "--flash-attn" "on"
-    "--cache-type-k" "q8_0"
-    "--cache-type-v" "q8_0"
+    "--host"
+    "127.0.0.1"
+    "--port"
+    (toString port)
+    "--model"
+    model
+    "--ctx-size"
+    "262144"
+    "--n-gpu-layers"
+    "99"
+    "--flash-attn"
+    "on"
+    "--cache-type-k"
+    "q8_0"
+    "--cache-type-v"
+    "q8_0"
     "--kv-offload"
-    "--cache-ram" "16384"
-    "--cache-reuse" "256"
-    "--parallel" "1"
+    "--cache-ram"
+    "16384"
+    "--cache-reuse"
+    "256"
+    "--parallel"
+    "1"
     "--slots"
     "--jinja"
-    "--spec-type" "draft-mtp"
-    "--spec-draft-n-max" "2"
-    "--spec-draft-model" mtp
-    "--log-prompts-dir" "/home/cjdell/nixos-config/llama-logs"
+    "--spec-type"
+    "draft-mtp"
+    "--spec-draft-n-max"
+    "2"
+    "--spec-draft-model"
+    mtp
+    "--log-prompts-dir"
+    "/home/cjdell/nixos-config/llama-logs"
   ];
 
   # The swap shim's kind "llama" dialect: /slots answers only once the model
@@ -108,9 +123,7 @@ in
     ];
 
     serviceConfig = {
-      ExecStart = lib.concatStringsSep " " (
-        [ "${llama-server}/bin/llama-server" ] ++ runArgs
-      );
+      ExecStart = lib.concatStringsSep " " ([ "${llama-server}/bin/llama-server" ] ++ runArgs);
       Environment = lib.mapAttrsToList (k: v: "${k}=${v}") env;
       Restart = "on-failure";
       RestartSec = 5;

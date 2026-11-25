@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 #
 # pctv-win7-logs.sh — dump a standard bundle of PCTV/driver state from the win7
 # guest into a host-side log file. Run it BEFORE and AFTER a driver change so the

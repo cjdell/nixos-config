@@ -1019,7 +1019,11 @@ in
   # when the card leaves the llm lease (./gpu-mode.nix bakes it into the
   # command, ./gpu-mode.sh reads it), so adding a selectable model here needs
   # no gpu-mode edit.
-  ai.strataEngineUnits = [ "strata" ] ++ map (p: p.unit) partnerConfigs ++ map (e: e.unit) config.ai.swapEngines;
+  ai.strataEngineUnits = [
+    "strata"
+  ]
+  ++ map (p: p.unit) partnerConfigs
+  ++ map (e: e.unit) config.ai.swapEngines;
 
   # `strata-batch` — two conversations at once on the R9700, on demand.
   # Solo is the default (boot, no mode file); see ./strata-batch.sh for the

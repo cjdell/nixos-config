@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 
 mount /dev/disk/by-label/ROOT /mnt
 mkdir -p /mnt/boot

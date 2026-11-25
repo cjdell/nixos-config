@@ -11,7 +11,6 @@
   ../../common/nfs.nix
   ../../common/nosleep.nix
   ../../common/sunshine.nix
-  ../../common/system.nix
   # sops: provides /run/secrets/brave_api_key for the brave-search MCP server
   # that users/cjdell/opencode.nix spawns (see common/sops.nix).
   sops-nix.nixosModules.sops

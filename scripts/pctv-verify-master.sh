@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # pctv-verify-master.sh — verify a pctv-monitor capture master is complete
 # and internally consistent, independently of the monitor's own counters.
 #

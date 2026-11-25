@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # check-hackspace-tailscale.sh — why can't I reach the leighhack tailnet?
 #
 # There are TWO tailscale connections on grafton-router and they are unrelated:

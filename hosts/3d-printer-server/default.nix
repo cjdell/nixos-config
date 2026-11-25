@@ -1,7 +1,6 @@
 { ... }:
 
 [
-  ../../common/desktop.nix
   ../../common/nfs.nix
   ../../common/nosleep.nix
   ../../common/podman.nix

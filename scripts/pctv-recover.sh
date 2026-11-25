@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # pctv-recover.sh — revive a wedged PCTV 320cx and bring up the DVB stack.
 #
 # The DIB7000P behind the DiB0700 bridge stops answering I2C (every read

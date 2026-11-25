@@ -191,13 +191,12 @@ Full details (weights, schnell recipe, VAE-tiling gotcha, SDXL test command, lea
 
 Full details (ctx sizing, measured tok/s, reasoning-hybrid quirk, MCP not wired): **`docs/lfm3.md`**.
 
-## Inkling-2-Mini on llama.cpp (`inkling-2-mini.service` — the third swap lane)
+## Inkling-2-Mini swap lane (`inkling-2-mini.service` — now strata-inkling)
 
-Thinking Machines' Inkling 2 Mini (2026-11-20, Apache 2.0), served by **stock llama.cpp HIP (ROCm)** on the R9700 — switched from Vulkan 2026-11-23 because Vulkan's FA path collapses to 22 t/s past ~88K depth. Strata cannot run it (`inkling2_loop` matches neither qwen4exp nor qwen35moe). It is a strata-swap table entry, not a new proxy.
+⚠️ **Switched from llama.cpp to Strata's own `strata-inkling` engine on 2026-11-24** (0.2.21, engine 0.1.67, HIP/gfx1201, native SQ-20 pack). Thinking Machines' Inkling 2 Mini (2026-11-20, Apache 2.0) is the one model here with a **depth wedge open upstream** — 81–122K prompts that must replace a resident context read "complete" (79K tokens in 10 s: skipped) and then never emit a token while the engine spins. Evidence, the four configurations that all wedge, and the one variable that changed it (`--chunk 512`) are in **`docs/inkling-depth-wedge-2026-11-24.md`**; upstream report **Niko1221/Strata#7096**.
 
-- **Run line**: UD-Q4_K_XL (17.63 GB) fully offloaded, `-c 131072`, `-fa on`, `-ctk/-ctv q8_0`, `--parallel 1`, `-b 1024 -ub 512` (load-bearing — `-ub 1024` collapses a 53.6K prefill to 128 t/s), `--jinja`, `--slots`, mmproj-F16, `--device ROCm0` with `HIP_VISIBLE_DEVICES=0`, port 8094.
-- **Files**: `scripts/fetch-inkling-2-mini.sh` — must fetch from **`Mainline_Support/`** (`inkling2_loop` tensor layout); the repo's ROOT UD files use Unsloth's looped layout and mainline rejects them.
-- **llama-cpp is pinned to `a0677c34`** (2026-11-23) in `flake.nix`, not floating HEAD — the upstream flake's Svelte webui derivation fails in the sandbox; `llamaCppPkgs` wrapper sets `.override { useWebUi = false; }`.
+- **Fallback = the old llama.cpp run line** (still in this file's git history and in `docs/inkling.md`): UD-Q4_K_XL, `-c 131072`, `-fa on`, `-ctk/-ctv q8_0`, `-b 1024 -ub 512` (load-bearing), `--device ROCm0` — 33–36 t/s, 131K, 99.9 % reuse, never wedged.
+- **Files**: SQ-20/SQ-10 + vision + drafter by `scripts/fetch-inkling-strata.sh` (size+sha pinned); the GGUF by `scripts/fetch-inkling-2-mini.sh`.
 - ⚠️ **A `nixos-rebuild switch` starts `strata.service` even while a partner engine is live** — after any switch on zen3: `sudo systemctl stop strata && sudo systemctl start inkling-2-mini`.
 
 Full details (backend A/B, prefill curve, `-ub` sweep, why Flash-Next differs): **`docs/inkling.md`**.

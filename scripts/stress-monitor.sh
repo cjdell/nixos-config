@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -eo pipefail
 # stress-monitor.sh — stress-ng soak with hardware telemetry and a verdict.
 #
 # WHY THIS EXISTS

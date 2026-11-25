@@ -7,7 +7,6 @@
   ../../common/podman.nix
   ../../common/printer.nix
   ../../common/sops.nix
-  ../../common/system.nix
   ../../users/cjdell
 
   ./tailscale.nix
