@@ -16,11 +16,12 @@ vision pack and the DSpark drafter).
 large resident context read "complete" (79K tokens in 10 s = 7,900 tok/s, i.e.
 skipped), then produce no first token while the engine spins (gfx 100 %,
 119–145 W, two threads in `R`, 9.4 GiB VRAM still free). Reported upstream as
-**Niko1221/Strata#7096**. The one variable that changed it: `--chunk 512`
-(ring `1536 positions`, span cap 512) completed an 82K cold read that wedged on
-`--chunk 2048` (ring 3072, span cap 2048) minutes earlier — one observation, not
-yet a soak. The llama.cpp run line below is the proven fallback (131K, 33–36
-t/s, 99.9 % reuse, never wedged in a day of use).
+**Niko1221/Strata#7096** — maintainer replied 2026-11-25 (HIP default chunk is
+512, so the wedging 2048 was hand-set; three tests requested — plan in
+`docs/inkling-7096-test-plan.md`, not yet run). `--chunk 512` completed the 82K
+cold read that wedged on `--chunk 2048` minutes earlier and then served ~1 h of
+real traffic (38–43 t/s, zero wedges). The llama.cpp run line below is the proven
+fallback (131K, 33–36 t/s, 99.9 % reuse, never wedged in a day of use).
 
 Five Python-only serve patches ride in front of it via
 `strata-inkling-serve.nix` (prefill progress + decode rate in `/metrics`;

@@ -52,12 +52,13 @@ def build(n_tokens, salt):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("tokens", type=int)
+    ap.add_argument("--salt", help="pin the prompt filler (byte-identical reruns; #7096 tests)")
     ap.add_argument("--warm", action="store_true", help="append one line to the previous prompt (prefix reuse)")
     ap.add_argument("--max-tokens", type=int, default=32)
     ap.add_argument("--timeout", type=float, default=900)
     a = ap.parse_args()
 
-    salt = "warm" if a.warm else f"cold{int(time.time())}"
+    salt = a.salt or ("warm" if a.warm else f"cold{int(time.time())}")
     text = build(a.tokens, salt)
     if a.warm:
         text += "\nline extra follow-up marker 1"

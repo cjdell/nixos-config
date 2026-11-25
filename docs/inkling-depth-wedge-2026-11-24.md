@@ -1,10 +1,27 @@
 # Inkling-2-Mini on strata-inkling 0.2.21 (HIP, gfx1201): the 81–122K depth wedge
 
-**Status (2026-11-25 00:05):** open, engine-side. Reported upstream as
+**Status (2026-11-25 11:15):** OPEN upstream, reply received. Reported as
 `[Engine] strata-inkling 0.1.67 (HIP, gfx1201/R9700): 81-122K prompt read
-completes with no first token, engine spins`. One variable changed the behaviour:
-`--chunk 512` (instead of 2048) completed an 82K cold read that had wedged on
-2048 minutes earlier. Single observation so far — treat it as a lead, not a fix.
+completes with no first token, engine spins` → **Niko1221/Strata#7096**, answered
+by the maintainer 2026-11-25T10:03Z: not yet reproduced on their side; they note
+the HIP **default chunk is 512** (so the wedging `--chunk 2048` was hand-set —
+true, and it was a deliberate speed choice, see below); they hedge that the
+impossible progress rate might be "counted differently in the patched serve
+layer"; and they ask for three tests. **Those tests are the plan in
+`docs/inkling-7096-test-plan.md` — not yet run.** `--chunk 512` has since served
+~1 h of real agent traffic on this card (turns 28–83K, 38–43 t/s, zero wedges)
+before `gpu-mode llm` took the lease back at 00:44 — the default looks solid,
+but it does not explain 2048.
+
+Two facts to carry into the follow-up comment: the `reading the prompt:` progress
+line is printed by **stock** serve code (`server.py:5835`) from the engine's own
+`PP <pos> <total> <engine-ms> <engine-mean-tok/s>` lines (parsed at `:1565`/
+`:2725`; none of our five diffs touch either), so the serve-layer hedge is
+refutable — but raw `PP` lines were never captured (serve consumes them;
+`grep -c PP inkling.log` → 0), so the re-runs echo them and add
+`STRATA_INK_PROF=1`. Scrubbed collapse dumps (no model text, no IPs) live at
+`/var/lib/inkling/collapse-scrubbed-20261125.tar.gz`; nothing is published until
+the tests are in.
 
 ## The signature
 
