@@ -8,20 +8,43 @@ the HIP **default chunk is 512** (so the wedging `--chunk 2048` was hand-set —
 true, and it was a deliberate speed choice, see below); they hedge that the
 impossible progress rate might be "counted differently in the patched serve
 layer"; and they ask for three tests. **Those tests are the plan in
-`docs/inkling-7096-test-plan.md` — not yet run.** `--chunk 512` has since served
+`docs/inkling-7096-test-plan.md`, and they were run on 2026-11-25** (results in
+that file). `--chunk 512` has since served
 ~1 h of real agent traffic on this card (turns 28–83K, 38–43 t/s, zero wedges)
 before `gpu-mode llm` took the lease back at 00:44 — the default looks solid,
-but it does not explain 2048.
+but it does not explain 2048. **The three tests were run 2026-11-25
+11:26–12:19 GMT** and posted as
+<https://github.com/Niko1221/Strata/issues/7096#issuecomment-7162254328> —
+results and the retraction below in *What the re-runs changed*.
 
-Two facts to carry into the follow-up comment: the `reading the prompt:` progress
-line is printed by **stock** serve code (`server.py:5835`) from the engine's own
-`PP <pos> <total> <engine-ms> <engine-mean-tok/s>` lines (parsed at `:1565`/
-`:2725`; none of our five diffs touch either), so the serve-layer hedge is
-refutable — but raw `PP` lines were never captured (serve consumes them;
-`grep -c PP inkling.log` → 0), so the re-runs echo them and add
-`STRATA_INK_PROF=1`. Scrubbed collapse dumps (no model text, no IPs) live at
-`/var/lib/inkling/collapse-scrubbed-20261125.tar.gz`; nothing is published until
-the tests are in.
+## What the re-runs changed (2026-11-25)
+
+The `reading the prompt:` line is printed by **stock** serve code
+(`server.py:5884`; the seconds are `now - started`, the token pair is the
+engine's own `PP` fields parsed at `:1565`/`:2771`), so the maintainer's
+serve-layer hedge is refuted — but two of our own readings were wrong and were
+retracted in the reply:
+
+1. **"The first chunk alone took ~190 s" is false.** `el` is `now - started`,
+   and `started` (`began`, `:2055`/`:2261`) is set when the request enters the
+   batch path, before it is admitted while another turn generates. A request
+   queued behind a 2,500-token generation printed `93 s so far` one second after
+   admission, with a real read of `PP 81246 81246 39.6 25.2`.
+2. **"79K read in 10 s at 7,900 tok/s" is the right shape, wrong explanation.**
+   The total on that line came from the engine's `PP` and was 81,042 for an
+   81,865-token prompt — 823 short. So the read stopped short and reported
+   itself complete; whether the engine clamped `n_past` or another pass wrote the
+   shared `engine.progress` is still open (the same shared-attribute artifact
+   was seen live: a queued request's view showing the wrap-up pass's
+   81,246/81,246).
+
+The three requested runs all completed (stock serve/default chunk 135.3 s read;
+build's 7.2.x libs 92.8 s; a 3,963-token replacement at chunk 2048 read in
+3.11 s), and `--chunk 2048` did not wedge in five synthetic replacement runs.
+Test bed and numbers: `docs/inkling-7096-test-plan.md` § Results. Raw `PP` lines
+are echoed by the test trees (`[pp-raw]` in the serve log); the lane itself is
+still on 512 and the scrubbed collapse dumps
+(`/var/lib/inkling/collapse-scrubbed-20261125.tar.gz`) were offered, not posted.
 
 ## The signature
 

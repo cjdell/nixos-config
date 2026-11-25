@@ -1,10 +1,18 @@
 # Test plan: Niko1221/Strata#7096 — the three runs the maintainer asked for
 
-**Status:** not yet run. Written 2026-11-25 ~11:15 GMT, after the maintainer's reply
+**Status:** **run 2026-11-25 11:26–12:19 GMT**, results posted as
+<https://github.com/Niko1221/Strata/issues/7096#issuecomment-7162254328>. Headline:
+the three requested runs all completed (stock serve/default chunk, build's 7.2.x
+libraries, and a ~4K replacement at chunk 2048); `--chunk 2048` did **not**
+reproduce the wedge in five synthetic replacement runs; and the "first chunk took
+190 s" claim was wrong — that number is queue wait, see § R0/retraction below.
+Written 2026-11-25 ~11:15 GMT, after the maintainer's reply
 (2026-11-25T10:03Z) to <https://github.com/Niko1221/Strata/issues/7096>.
 Run this in a maintenance window when nothing needs the R9700 — it owns the card
 exclusively, and this box's main lane (`strata.service`, `gpu-mode llm`) must be
-stopped for the duration. Budget **~1 h** (4 engine starts + cold reads).
+stopped for the duration (also stop `strata-swap.service`, or the :8080 shim can
+start a swap lane into the middle of a run). Budget **~1 h** (4 engine starts +
+cold reads).
 
 Read first: `docs/inkling-depth-wedge-2026-11-24.md` (the wedge itself) and the
 issue thread. The maintainer's asks, verbatim:
@@ -154,10 +162,58 @@ kill -INT $P; sleep 30; kill -KILL $P $E 2>/dev/null        # then verify orphan
 
 | run | chunk | serve | libs | B result | prefill ms (B) | first token? | chunk-1 time | PP lines say | verdict row for the comment |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| R0 | 2048 | patched | rocm10 |  |  |  |  |  |  |
-| T3 | 2048 | patched | rocm10 |  |  |  |  |  |  |
-| T2 | 2048 | patched | **7.2.x** |  |  |  |  |  |  |
-| T1 | default | **stock** | rocm10 |  |  |  |  |  |  |
+| R0 | 2048 | patched | rocm10 | **no wedge** ×5 | 91,170–100,543 | yes | ~1.5 s | `PP 81064 81064 91129.9 889.5` (total = prompt) | non-reproduction (five variants) |
+| T3 | 2048 | patched | rocm10 | completed | 3,112 (B = 3,963 tok) | yes, 28 tok | ~1.5 s | `PP 3963 3963 3094.0 1280.9` | no minute-long chunk-1 |
+| T2 | 2048 | patched | **7.2.x** | completed | 92,782 | yes, 28 tok | ~1.5 s | `PP 81064 81064 92742.2 874.1` | libs not the variable |
+| T1 | default (512) | **stock** | rocm10 | completed | 135,298 | yes, 28 tok | n/a (512) | `PP 81064 81064 135258.3 599.3` | stock serve/default chunk clean |
+
+## Results (2026-11-25, as run)
+
+Engine 0.2.21 / strata-inkling 0.1.67, SQ-20, `--max-context 163840 --kv fp8
+--vision … --dspark … --draft off`, one slot, GPU idle, fresh engine per run,
+manual `serve.server` on :8094 with `STRATA_DEBUG=1`, `STRATA_INK_PROF=1`,
+`STRATA_INK_PARK=1`. Serve trees: `share-stock-pp` (stock 0.2.21 tree + a 2-line
+raw-PP echo) and `share-patched-pp` (our five diffs + the same echo). Artifacts:
+`/tmp/opencode/7096/` (`serve-RX.log` with `[pp-raw]` lines, `engine-RX.log`
+with `[ink-hip]` lines, `probe-RX-A/B.out`, `cap-RX-*`).
+
+| run | A (resident) | B | A read | B read | B out | verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| T1 stock serve, no `--chunk` (ring 1536 / span 512) | 82,087 | 81,064 | 137.8 s | 135.3 s (599 tok/s) | 28 tok, needle ok | completed |
+| T2 build RUNPATH 7.2.x (0 `rocm10` in maps) | 82,087 | 81,064 | 94.6 s | 92.8 s (874 tok/s) | 28 tok, needle ok | completed |
+| T3 `--chunk 2048`, B ≈ 4K | 82,087 | 3,963 | 92.9 s | **3.11 s** (1,281 tok/s) | 28 tok, needle ok | completed |
+
+R0 (chunk 2048) replacement runs, each completed with `PP total == prompt len`:
+A 82,087→B 81,064 (91.2 s); A 85,090→B 81,064; A 78,061→B 81,064 (B longer than
+A); A 85,090→B 87,070 (over the context); A 81,071 + 2,500 generated (slot held
+83,570) →B 87,070 queued behind the generating turn. So chunk 2048 is
+necessary-but-not-sufficient in a synthetic harness; the real resident context
+was grown turn-by-turn with prefix reuse/checkpoints, which a fresh engine lacks.
+
+### Retraction: the 190 s "chunk-1 stall" was queue wait
+
+`_progress()` (stock 0.2.21 `server.py:5875-5886`) prints `el = now - started`,
+and `started` is `began` (`:2055`, `:2261`) — set when the request enters the
+batch path, **before** it is admitted while another turn is generating. A request
+queued behind a 2,500-token generation printed `93 s so far` one second after
+admission (its real read: `PP 81246 81246 39.6 25.2`). What remains unexplained
+is the *total* on that line: in the original capture the prompt was 81,865 tokens
+but progress went `(2,048, 81,042)` → `(81,042, 81,042)`, i.e. 823 short — the
+progress total comes from the engine's own `PP` (`:1565`, `:2771`), which none of
+our diffs touch. Two readings, both open: the engine clamped `n_past`, or another
+pass wrote the shared `engine.progress` (seen live: a queued request's view
+showing the wrap-up pass's 81,246/81,246).
+
+### Reading the numbers
+
+- `PP <pos> <total> <ms since prompt start> <mean tok/s>` — mean, not a window,
+  so it declines with depth (1,349 tok/s at 2K → 866 at 87K on chunk 2048).
+- The engine emits a trailing `PP <n+6> <n+6> ~40 ms ~25 tok/s` after a response,
+  and the request table's `prompt_ms` ends up holding that 40 ms — trust the PP
+  lines, not `/metrics prompt_ms`.
+- Two concurrent requests on the one-slot config (our own harness slip in the
+  first T2 attempt) still collapse decode to 0.1–3.5 tok/s though they finish —
+  the known two-active class, not part of these results.
 
 Reading the outcome (each branch is still worth posting):
 
