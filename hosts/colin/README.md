@@ -53,17 +53,38 @@ Done:
   deliberately; and `containers.nix` no longer imports a non-existent
   `../constants.nix` (the binding was unused, so it had never been evaluated).
 
+**Activated 2026-11-26 23:24** (generation 176 → `wjf4hcy…` after the
+librespeed fix below), `nixos-confirm`ed, and verified live:
+
+- all nine containers up; 13/13 nginx vhosts answer (200/301/302 — a 502 on
+  `speed.` was a real port bug, see below);
+- `tailscaled` Running with the persisted node identity (no pre-auth key used),
+  `sshd`, `nginx`, `postgresql`, `immich-server`, `mosquitto`, `samba-smbd`,
+  ACME all active; ZFS `electronerds` ONLINE 90 %; zero failed units;
+- home-manager took over `/home/cjdell`: `~/.config/opencode/{opencode,cli}.json`,
+  `~/.config/git/config`, `~/.npmrc` are store symlinks, `home-manager-cjdell`
+  exited 0;
+- activation itself reported `status 4` once, on a **transient** unifi
+  `podman healthcheck run` unit that raced the container's own startup — a
+  `systemctl reset-failed` + re-run passed. Not an activation failure.
+- **`speed.electronerds.com` was a 502 for a pre-existing reason**, not the
+  unification: the `ghcr.io/librespeed/speedtest` image defaults `WEBPORT` to
+  8080 while the publish and nginx use container port 80. Fixed with
+  `WEBPORT = "80"` in `services/librespeed.nix` (`speed` now 200).
+
 ### What changed for the people using it
 
-- `LANG`/`LC_*` moved from `en_US.UTF-8` to the fleet's `en_GB.UTF-8`.
+- `LANG`/`LC_*` moved from `en_US.UTF-8` to the fleet's `en_GB.UTF-8` (log in
+  again — an existing shell keeps its old locale).
 - `cjdell` is now in `networkmanager`, `dialout`, `i2c` and `video` as well as
   `wheel` (fleet `users/cjdell`), and **home-manager manages
   `/home/cjdell`** from the first switch: `~/.config/opencode` is taken over
   (`force = true`, any previous files are moved aside as `.backup-<n>`), plus
-  `~/.gitconfig`, `~/.npmrc` and nodejs in the user profile. `~/.opencode`
-  itself is untouched (installer-managed binary).
-- `mitigations=off` is now in the kernel command line, like every other fleet
-  host.
+  `~/.config/git/config`, `~/.npmrc` and nodejs in the user profile.
+  `~/.opencode` itself is untouched (installer-managed binary).
+- `mitigations=off` is now in the kernel command line (takes effect on the next
+  boot), like every other fleet host.
+
 
 
 ## Immich 2.6.1 → 3.x + VectorChord (done 2026-11-26)
@@ -174,6 +195,17 @@ settings are in `./sops.nix`.
 sudo nixos-rebuild switch --flake .        # hostname is colin, so this picks .#colin
 sudo nixos-confirm                          # REQUIRED within 5 minutes
 ```
+
+`sudo nixos-rebuild …` is the correct form: nixos-rebuild-ng re-runs the flake
+evaluation as the invoking user (`cjdell`), which is what the libgit2 ownership
+check needs. Invoking the same rebuild **as root** (`sudo systemd-run …
+nixos-rebuild`, a root cron job, `su -`) fails with
+`repository path '/home/cjdell/nixos-config' is not owned by current user` —
+evaluation as root never reaches the build, so don't "fix" it by chowning the
+checkout. If a switch must survive an SSH drop, run it detached as cjdell with
+`PATH` set, or arm `scripts/remote-rebuild-guard.sh` and activate by hand
+(`nix-env -p /nix/var/nix/profiles/system --set <toplevel>` then
+`<toplevel>/bin/switch-to-configuration switch` as root).
 
 The 25.11 `/home/cjdell`-era configs are gone from the flake: roll back a live
 mistake by generation (`sudo nixos-rebuild switch --rollback`, or
