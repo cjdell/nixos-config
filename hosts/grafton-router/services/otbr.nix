@@ -9,6 +9,12 @@
 # spinel-over-UART radio at 460800 8N1 (no hardware flow control); all Thread
 # logic runs here in the OTBR container.
 #
+# Identity (verified on the live stick 2026-11-26): CP2102N USB bridge
+# (10c4:ea60) with a unique serial — unlike the older CH340-bridge P revision,
+# so a serial match pins this exact dongle and it may sit in ANY USB socket.
+# After flashing, otbr-agent --radio-version answered "OPENTHREAD/1.4.0-Koenkk-
+# 2025.3.1; CC13XX_CC26XX" — that line is the fingerprint of a healthy RCP.
+#
 # Host side: the official openthread/border-router image (pinned by digest).
 # Its s6 otbr-agent run script reads OT_RCP_DEVICE / OT_INFRA_IF /
 # OT_THREAD_IF / OT_REST_* from the environment, puts Thread state in /data
@@ -38,18 +44,12 @@
 let
   net = import ../networking/constants.nix;
 
-  # Physical USB port the Sonoff sits in, as the trailing `usb1/<port>` path
-  # element (e.g. "1-3"). REQUIRED before anything here does anything: the
-  # CH340 on these sticks has no serial number, and this box already carries
-  # an unrelated idle CH340 on port 1-7 — so `1a86:7523` alone would match the
-  # wrong device and OTBR would hammer a stranger's serial line. Empty =
-  # service inert (no udev rule, no container).
-  #
-  # When the dongle arrives: plug it in, then
-  #   sudo udevadm info -q path -n /dev/ttyUSBn   # → .../usb1/1-3/... → use "1-3"
-  # and set rcpPort. Flash BEFORE setting it (flash-thread-rcp.sh) so no
-  # container has the port open while cc2538-bsl talks to the bootloader.
-  rcpPort = "";
+  # CP2102N serial of OUR dongle (`ls -l /dev/serial/by-id/`, the string after
+  # "Sonoff_Zigbee_3.0_USB_Dongle_Plus_"). Empty disables the service
+  # entirely — that is the knob for "no radio attached", not a wrong guess:
+  # matching a different CP210x would hand OTBR someone else's serial line.
+  # If the stick is ever swapped for another, update this string.
+  rcpSerial = "d01311ed57c9eb1198a28b4f1d69213e";
   rcpDev = "/dev/otbr-rcp";
 
   # docker.io/openthread/border-router:latest as of 2026-11-24 (re-pin with
@@ -60,13 +60,12 @@ let
   stateDir = "/srv/otbr";
 in
 {
-  # Stable symlink for the RCP: pin by USB port + CH340 VID:PID (see above).
-  services.udev.extraRules = lib.optionalString (rcpPort != "") ''
+  services.udev.extraRules = lib.optionalString (rcpSerial != "") ''
     # Sonoff ZBDongle-P running OpenThread RCP → ${rcpDev} (services/otbr.nix)
-    SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="${rcpPort}", SYMLINK+="${lib.strings.removePrefix "/dev/" rcpDev}", MODE="0660"
+    SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="${rcpSerial}", SYMLINK+="${lib.strings.removePrefix "/dev/" rcpDev}", MODE="0660"
   '';
 
-  virtualisation.oci-containers.containers = lib.optionalAttrs (rcpPort != "") {
+  virtualisation.oci-containers.containers = lib.optionalAttrs (rcpSerial != "") {
     otbr = {
       hostname = "otbr";
       image = otbrImage;
@@ -107,8 +106,8 @@ in
   # The udev symlink only exists while the dongle is plugged in; podman
   # refuses to create the container without it (missing --device). Default
   # on-failure would give up — force a retry loop so the BR comes back by
-  # itself after a re-plug or a port-path change without any manual start.
-  systemd.services.podman-otbr = lib.optionalAttrs (rcpPort != "") {
+  # itself (within RestartSec) after a re-plug, with nothing to edit.
+  systemd.services.podman-otbr = lib.optionalAttrs (rcpSerial != "") {
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     serviceConfig = {
@@ -117,7 +116,7 @@ in
     };
   };
 
-  systemd.tmpfiles.settings."10-otbr" = lib.optionalAttrs (rcpPort != "") {
+  systemd.tmpfiles.settings."10-otbr" = lib.optionalAttrs (rcpSerial != "") {
     ${stateDir} = {
       d = {
         user = "root";

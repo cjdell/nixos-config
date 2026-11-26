@@ -1,9 +1,11 @@
 # Thread border router on grafton-router (Sonoff ZBDongle-P → Matter over Thread)
 
-Adopted 2026-11-26 — **status: software staged, radio pending.** The ZBDongle-P
-had not been plugged in yet at the time of writing, so `rcpPort` in
-`services/otbr.nix` is empty and the whole service is inert; the bring-up is the
-plug-in → flash → set-port → rebuild sequence below.
+Adopted 2026-11-26 — **status: radio flashed & verified, awaiting relocation to the
+router.** At the time of writing the stick sat on zen3-nixos: enumeration + chip checks
+below, `ot_rcp` flashed, `otbr-agent --radio-version` answered `OPENTHREAD/1.4.0-Koenkk-
+2025.3.1; CC13XX_CC26XX`. The grafton-router service config is live (identity = the
+dongle's CP2102N serial, any USB socket works); what remains is plug it into the router,
+rebuild, and the Home Assistant UI steps.
 Home Assistant and python-matter-server have run on
 grafton-router for a long time (containers in `home-assistant.nix`), but
 without a Thread border router (TBR) no Matter-over-Thread device could ever
@@ -11,6 +13,20 @@ be commissioned. This adds the missing half: a spare **Sonoff ZBDongle-P**
 (TI **CC2652P10**, shield silkscreen "C2652P") flashed to OpenThread **RCP**
 firmware, driven by an **OTBR** container on the router, wired into HA via the
 `otbr` → `thread` → `matter` integration chain.
+
+## The stick (inspected 2026-11-26 on zen3)
+
+- USB: `10c4:ea60` CP2102N, ITead "Sonoff Zigbee 3.0 USB Dongle Plus", **unique
+  serial `d01311ed57c9eb1198a28b4f1d69213e`** → udev pins the serial, so the
+  service no longer cares which socket it is in. (Earlier P revisions used a
+  serial-less CH340 `1a86:7523` — those need port pinning; this one does not.
+  If the stick is ever swapped, update `rcpSerial` in `services/otbr.nix`.)
+- CC2652P10 confirmed via TI serial bootloader (cc2538-bsl reports it with the
+  benign "CC1350 PG2.0 (7x7mm): 352KB Flash" mislabel — same silicon ID; the
+  geometry and `CC13XX_CC26XX` platform string settle it). Factory IEEE address
+  intact: `00:12:4B:00:24:BC:1A:83`.
+- The app flash area was **blank when found** (all `ff`): this stick had no
+  coordinator firmware at all, so the RCP flash destroyed nothing.
 
 ## Why this particular firmware path (the confusing part)
 
@@ -58,20 +74,32 @@ sudo ./scripts/flash-thread-rcp.sh flash                 # BSL entry + erase/wri
 
 Mechanics: `nixpkgs`'s `cc2538-bsl` with `--bootloader-sonoff-usb` — it toggles
 DTR/RTS in the pattern that resets a Sonoff board straight into the TI serial
-bootloader, so no case opening, no soldering, no debug probe. After a flash the
-dongle enumerates the same CH340 (no serial number) and the tty node may get a
-different number — always key config off the USB **port** (see udev below).
+bootloader, so no case opening, no soldering, no debug probe. Run 2026-11-26 on
+zen3: mass-erase + 360448 bytes @0x0 + CCFG write, CRC32 verify match
+`0x3427c0fa`; afterwards the pinned image's own tool validated the radio:
+
+```
+$ podman run --rm --entrypoint /usr/sbin/otbr-agent --device /dev/ttyUSB0:/dev/rtest \
+    $OTBR_IMAGE --vendor-name OpenThread --model-name BorderRouter \
+    --radio-version "spinel+hdlc+uart:///dev/rtest?uart-baudrate=460800"
+OPENTHREAD/1.4.0-Koenkk-2025.3.1; CC13XX_CC26XX; Mar 13 2025 20:18:49
+```
+
+(`otbr-agent --radio-version` is the authoritative RCP liveness probe —
+worth knowing when debugging a "silent" stick. A hand-rolled spinel PING is a
+bad substitute: this build answers a framed RESET but not naive PING/GET
+frames, see OT's extended-header transaction semantics.)
 Rollback: flash `CC1352P2_CC2652P_launchpad_coordinator_*.hex` (Koenkk
 Z-Stack-firmware) with the same command minus the ot_rcp URL.
 
 ## Host side — `hosts/grafton-router/services/otbr.nix`
 
-- udev: `SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523",
-  KERNELS=="<usb port>"` → `/dev/otbr-rcp`. The CH340 carries no serial, so
-  the physical USB port is the only way to tell this stick apart — and there
-  is already an unrelated CH340 on port 1-7 of this box, so `rcpPort` must be
-  set from the *observed* path after plugging ours in (empty = whole service
-  inert: no rule, no container).
+- udev: `SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60",
+  ATTRS{serial}=="d01311ed…"` → `/dev/otbr-rcp`. The CP2102N revision carries
+  a unique serial, so this matches exactly our stick in any socket, and the
+  other serial adapters on the box (an idle CH340 on 1-7, an FTDI) can never
+  be grabbed. Empty `rcpSerial` in the module = fully inert (no rule, no
+  container).
 - Container: `docker.io/openthread/border-router` **pinned by digest**
   (2026-11-24 build), `--network host --privileged`, devices `/dev/otbr-rcp` +
   `/dev/net/tun`. The image's s6 `otbr-agent` run script reads `OT_*` env vars
@@ -110,23 +138,24 @@ add-on — the equivalent core-integration route:
    devices directly too — the phone reads the dataset from the Thread
    integration, the BLE work is done by HA's server-side Bluetooth.
 
-## Bring-up (when the dongle arrives)
+## Bring-up (firmware is done — what remains once the stick moves)
 
 ```sh
-# 1. plug into a free USB socket on grafton-router, find its port:
-ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
-  'dmesg | tail; sudo udevadm info -q path -n /dev/ttyUSB0'   # new tty → .../usb1/1-N/...
-# 2. flash (service still inert — port empty; WORKDIR pre-staged by the
-#    bring-up prep, so no download needed):
-ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
-  'sudo PORT=/dev/ttyUSBn WORKDIR=/srv/otbr /srv/otbr/flash-thread-rcp.sh flash'
-# 3. set rcpPort = "1-N" in hosts/grafton-router/services/otbr.nix, commit, push;
-#    then (autoRollback host!):
+# 1. plug the flashed stick into ANY free USB socket on grafton-router.
+# 2. deploy (autoRollback host!) — from zen3: git push, then:
 ssh -A -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'cd nixos-config && git pull --ff-only && sudo nixos-rebuild switch --flake .'
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 sudo nixos-confirm
-# 4. verify + HA UI clicks (otbr integration url http://127.0.0.1:8081, thread preferred).
+# 3. verify on the router — podman-otbr self-heals within 10 s of the symlink:
+ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
+  'ls -l /dev/otbr-rcp; curl -s http://127.0.0.1:8081/node | jq ".node_state"; sudo podman logs --tail 30 podman-otbr'   # 4 once the mesh is up
+# 4. HA UI: add "OpenThread Border Router" integration (http://127.0.0.1:8081)
+#    → Thread integration appears → set preferred network → Matter → Add device.
 ```
+
+The router already has the bring-up prep: `/srv/otbr` (firmware + flasher, in
+case a re-flash is ever needed), the digest image pre-pulled, `cc2538-bsl`
+cached in its Nix store.
 
 ## Ops quick reference
 
@@ -142,8 +171,9 @@ sudo ./scripts/flash-thread-rcp.sh flash
 
 Symptoms → likely cause:
 
-- `Failed to communicate with RCP` at start → wrong port (dongle moved: update
-  `rcpPort`), baud/flow-control mismatch, or the stick is still on Zigbee firmware.
+- `Failed to communicate with RCP` at start → `/dev/otbr-rcp` points at a swapped-in
+  stick with a different serial (update `rcpSerial`), baud/flow-control mismatch, or
+  the stick is not on ot_rcp firmware (`otbr-agent --radio-version` proves it).
 - BR green, device commissioning dies at "joining network" → the upstream caveat
   above; try re-commissioning first, then consider an EFR32 stick as the radio.
 - LAN client can't reach a Thread device → `nft list chain ip6 filter forward-allow`
