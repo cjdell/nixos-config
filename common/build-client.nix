@@ -7,6 +7,10 @@
 # nix.buildMachines entry (hosts/zen3-nixos/default.nix) dispatches
 # aarch64-linux to the MacBookAir.
 #
+# Two off switches: it never configures itself on zen3 (the builder), and
+# `fleetBuildClient.enable = false` turns it off on a host that cannot reach
+# the builder (colin, our internet-only satellite).
+#
 # How it works on a client:
 #   - nix.distributedBuilds = true makes the daemon use /etc/nix/machines,
 #     generated from nix.buildMachines.
@@ -36,7 +40,22 @@ let
   builderHostKeyLine = "ssh-ed25519 ${builderHostKey}";
 in
 {
-  config = mkIf (!isBuilder) {
+  # Opt-out for a host that cannot reach the builder at all. Only colin uses
+  # it: it is a satellite on 192.168.178.0/24 behind TalkTalk, with no route
+  # to the fleet LAN or the tailnet (zen3 has no tailnet node), so a build
+  # machine entry there would just fail over to local builds after every
+  # connection attempt. Every other host keeps the default.
+  options.fleetBuildClient.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = true;
+    description = ''
+      Dispatch builds to zen3-nixos (192.168.49.50) over ssh-ng and keep one
+      local build slot as the fallback. Turn off on a host that has no network
+      path to the builder; it then builds locally, and nothing else changes.
+    '';
+  };
+
+  config = mkIf (!isBuilder && config.fleetBuildClient.enable) {
     nix.distributedBuilds = true;
     nix.settings.max-jobs = mkDefault 1;
     nix.buildMachines = [

@@ -33,7 +33,9 @@ in
     )
 
     # zen3-nixos as this machine's remote Nix build server, with local
-    # builds kept as a fallback (self-disabling on zen3 itself).
+    # builds kept as a fallback (self-disabling on zen3 itself, and opt-out
+    # via `fleetBuildClient.enable = false` on hosts with no route to it —
+    # colin).
     ./build-client.nix
 
     # The forked DeepSeek Harness Web GUI as an always-on LAN service —
