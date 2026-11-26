@@ -28,7 +28,19 @@
 
       # nginx basic-auth file (home page + Frigate). The sops value is the
       # apr1 hash; the "admin:" prefix is added here.
-      htpasswd.content = "admin:${config.sops.placeholder.htpasswd}\n";
+      #
+      # Group/mode are load-bearing: nginx workers run as the `nginx` user and
+      # open this file per request. The sops-nix default (0400 root:root) is
+      # unreadable to them, so any request that actually carries credentials
+      # dies with `[crit] open() ... Permission denied` -> 500, while a
+      # credential-less request still gets a 401. 0440 root:nginx is the
+      # minimum that works.
+      htpasswd = {
+        content = "admin:${config.sops.placeholder.htpasswd}\n";
+        group = config.services.nginx.group;
+        mode = "0440";
+        reloadUnits = [ "nginx.service" ];
+      };
     };
   };
 }
