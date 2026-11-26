@@ -24,6 +24,7 @@
     ./kanidm.nix
     ./meter-relay.nix
     ./mosquitto.nix
+    ./otbr.nix
     ./postgres.nix
     ./qbittorrent.nix
     ./qwencraft.nix

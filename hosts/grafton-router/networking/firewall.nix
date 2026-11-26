@@ -179,6 +179,19 @@ in
           # LAN can initiate to VLAN10
           iifname ${c.LAN_INTERFACE} oifname ${c.VLAN10_INTERFACE} accept comment "LAN to VLAN10"
 
+          # Thread mesh (services/otbr.nix): wpan0 is the Thread interface the
+          # OTBR container runs on the host network namespace. Only NEW flows
+          # reach here — established/related already passed the forward chain's
+          # ct vmap. What is deliberately NOT done here: filtering unicast INTO
+          # the mesh. otbr-agent inserts its own OT_FORWARD_INGRESS chain for
+          # that (a later nft hook priority, matching against on-mesh prefixes
+          # it owns and we cannot know statically), so this pair is just the
+          # "internal network" authorization for both directions — without it
+          # the policy drop here silently black-holes the mesh in both
+          # directions while the border router looks perfectly healthy.
+          iifname ${c.LAN_INTERFACE} oifname wpan0 accept comment "LAN to Thread mesh"
+          iifname wpan0 oifname ${c.LAN_INTERFACE} accept comment "Thread mesh to LAN"
+
           # Internal networks outbound to internet
           iifname ${c.LAN_INTERFACE}    oifname ${c.WAN_INTERFACE} accept comment "LAN out via ISP"
           iifname ${c.VLAN10_INTERFACE} oifname ${c.WAN_INTERFACE} accept comment "VLAN10 out via ISP"
