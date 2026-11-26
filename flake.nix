@@ -166,6 +166,27 @@
     # Bleeding-edge Zed: source build tracking zed main (via zed.overlays.default),
     # replaces nixpkgs' zed-editor package which ships the prebuilt release channel.
     zed.url = "github:zed-industries/zed";
+
+    # colin (the ElectroNerds server at 192.168.178.10) is a satellite site,
+    # not on the 192.168.49.0/24 LAN. It was ported verbatim from the
+    # standalone flake it ran before adoption, so it keeps that flake's exact
+    # nixos-25.11 pin (the rev its live system was built from:
+    # 25.11.20260324.1073dad) and its own module set. Moving it to the fleet's
+    # nixos-unstable pin is a separate, testable change.
+    nixpkgs_25_11.url = "github:NixOS/nixpkgs/1073dad219cb244572b74da2b20c7fe39cb3fa9e";
+    home-manager_25_11 = {
+      url = "github:nix-community/home-manager/7afd8cebb99e25a64a745765920e663478eb8830";
+      inputs.nixpkgs.follows = "nixpkgs_25_11";
+    };
+    # sops-nix matching that pin: newer revisions bumped go.mod to Go 1.26,
+    # which nixos-25.11's toolchain cannot build (sops-install-secrets failed
+    # with "go.mod requires go >= 1.26.0"). This is the last 2025 revision
+    # (go 1.24) before the bump. The rest of the fleet keeps the floating
+    # sops-nix above.
+    sops-nix_25_11 = {
+      url = "github:Mic92/sops-nix/94d8af61d8a603d33d1ed3500a33fcf35ae7d3bc";
+      inputs.nixpkgs.follows = "nixpkgs_25_11";
+    };
   };
 
   outputs =
@@ -190,6 +211,9 @@
       disko,
       disko-zfs,
       zed,
+      nixpkgs_25_11,
+      home-manager_25_11,
+      sops-nix_25_11,
     }@inputs:
 
     let
@@ -599,7 +623,7 @@
         # Find configs in `hosts` folder and use the folder name as the host name
         (
           let
-            hosts = builtins.filter (x: x != null && x != "grafton-router") (
+            hosts = builtins.filter (x: x != null && x != "grafton-router" && x != "colin") (
               nixpkgs.lib.mapAttrsToList (name: value: if (value == "directory") then name else null) (
                 builtins.readDir ./hosts
               )
@@ -630,6 +654,29 @@
             ]
             ++ (import ./hosts/grafton-router inputs);
             specialArgs = { inherit inputs; };
+          };
+
+          # colin is the ElectroNerds home server (192.168.178.10), ported
+          # verbatim from its standalone ~/nixos-config flake. It keeps its
+          # own nixos-25.11 pin and its old module list (no common/system.nix,
+          # users/cjdell home-manager config, autoRollback or fleet build
+          # client), so being in this repo does not change its role. The only
+          # fleet convention it follows is sops for secrets. The verbatim port
+          # evaluated to the running system bit-for-bit; sops then moved the
+          # Route53/WG/Tailscale/AP/htpasswd secrets out of the store.
+          # Converge the rest onto the fleet pin separately.
+          colin = nixpkgs_25_11.lib.nixosSystem {
+            system = "x86_64-linux";
+            modules =
+              (import ./hosts/colin inputs)
+              ++ [
+                home-manager_25_11.nixosModules.home-manager
+                {
+                  home-manager.useGlobalPkgs = true;
+                  home-manager.useUserPackages = true;
+                  home-manager.sharedModules = [ ];
+                }
+              ];
           };
 
           precision-nixos = nixpkgs.lib.nixosSystem {
