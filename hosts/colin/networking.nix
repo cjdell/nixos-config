@@ -1,11 +1,17 @@
-{ config, lib, pkgs, modulesPath, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  modulesPath,
+  ...
+}:
 
 let
   constants = import ./constants.nix;
 in
 {
-  networking.hostName = constants.HOST_NAME;
-
+  # networking.hostName comes from mkHost ({ networking.hostName = "colin"; }
+  # in flake.nix) — it must match the hosts/<name> directory.
   networking.enableIPv6 = false; # TalkTalk *still* don't support IPv6
 
   # Open ports in the firewall.
@@ -28,11 +34,14 @@ in
   # passphrase would be world-readable in /nix/store. Render the same KeyValue
   # config through sops instead and point the unit at the rendered file.
   sops.templates."create_ap.conf".content =
-    lib.generators.toKeyValue { } config.services.create_ap.settings;
+    lib.generators.toKeyValue { }
+      config.services.create_ap.settings;
 
   systemd.services.create_ap = {
     restartTriggers = lib.mkForce [ config.sops.templates."create_ap.conf".path ];
-    serviceConfig.ExecStart = lib.mkForce "${pkgs.linux-wifi-hotspot}/bin/create_ap --config ${config.sops.templates."create_ap.conf".path}";
+    serviceConfig.ExecStart = lib.mkForce "${pkgs.linux-wifi-hotspot}/bin/create_ap --config ${
+      config.sops.templates."create_ap.conf".path
+    }";
   };
 
   # Enable NAT

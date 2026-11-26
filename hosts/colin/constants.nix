@@ -6,7 +6,8 @@
 
 let
   constants = {
-    HOST_NAME = "colin";
+    # HOST_NAME is not here: the host name is mkHost's (flake.nix module
+    # `{ networking.hostName = "colin"; }`), which must match hosts/colin.
     LAN_IP = "192.168.178.10";
 
     SSID = "ElectroNerds Upstairs";
@@ -23,14 +24,14 @@ let
     RENDER_GID = 303;
 
     # Port / UID for apps (usually the same for both)
-    WHOOGLE         = 8001;   # Needs to run as root for some reason
-    FILE_BROWSER    = 8002;   # Uses Admin UID
-    AD_GUARD        = 8003;
-    LIBRESPEED      = 8004;
-    BITTORRENT      = 8005;
-    UNIFI           = 8007;
-    JELLYFIN        = 8096;
-    HOME_ASSISTANT  = 8123;
+    WHOOGLE = 8001; # Needs to run as root for some reason
+    FILE_BROWSER = 8002; # Uses Admin UID
+    AD_GUARD = 8003;
+    LIBRESPEED = 8004;
+    BITTORRENT = 8005;
+    UNIFI = 8007;
+    JELLYFIN = 8096;
+    HOME_ASSISTANT = 8123;
 
     CREATE_SRV_SCRIPT = ''
       mkdir -p /srv/adguard/conf

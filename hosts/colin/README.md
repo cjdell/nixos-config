@@ -11,12 +11,17 @@ nginx/ACME Route53 edge, the WireGuard client, Tailscale/headscale and the
 
 - **Satellite site.** It lives on `192.168.178.0/24` behind TalkTalk, not on the
   fleet's `192.168.49.0/24` LAN, and cannot reach the zen3 builder — not over
-  the LAN and not over the tailnet (zen3 has no tailnet node). It must build
-  locally; do **not** import `common/build-client.nix`.
-- **Own module list.** It does not import `common/system.nix` or `users/cjdell`
-  yet (step 2 of the unification).
+  the LAN and not over the tailnet (zen3 has no tailnet node). It builds
+  locally: `fleetBuildClient.enable = false` in `./default.nix` turns
+  `common/build-client.nix` off for this host only.
+- **Two things it does not take from the fleet**: `common/sops.nix` (its sops
+  file and secret set are its own — `./sops.nix` — so it cannot share the
+  fleet's `defaultSopsFile`) and the fleet `sharedPackages` list alone (it adds
+  the disk/network forensics tools it actually uses).
+- **Everything else is shared**, because it is now a normal `hosts/colin`
+  directory built by flake.nix's `mkHost`.
 
-## Unification status (begun 2026-11-26)
+## Unification status (begun 2026-11-26, finished 2026-11-26)
 
 Done:
 
@@ -31,6 +36,35 @@ Done:
   25.11 pin — see the migration section below). There are now **no**
   `nixpkgs_25_11` / `home-manager_25_11` / `sops-nix_25_11` inputs left in
   `flake.nix` or `flake.lock`.
+- **Full mkHost adoption** (2026-11-26, second and last step). `colin` is no
+  longer a bespoke `nixosSystem` block in `flake.nix`; it is discovered as a
+  `hosts/colin` directory like every other host, so it now gets
+  `common/system.nix` (fleet CLI set, ssh, nix-ld, sudo, `en_GB` locale,
+  `stateVersion 24.11`, `mitigations=off`), `users/cjdell` + home-manager with
+  `homeManagerPrefs`, and `commonModules` (nixos-utils rollback + containers).
+  `common/build-client.nix` gained a `fleetBuildClient.enable` option (default
+  true) precisely so this host can keep building locally.
+- Housekeeping that came with it: colin's package list is now only the extras
+  on top of `sharedPackages`; the duplicated ssh/sudo/nix-ld/timezone/
+  stateVersion/experimental-features settings are gone (the shared modules own
+  them); its hand-rolled `update-containers` unit/timer is gone in favour of
+  the fleet `system.updateContainers` one (**daily 02:00** with the notify
+  webhook, instead of Monday 02:00); `boot.zfs.forceImportRoot = false` is set
+  deliberately; and `containers.nix` no longer imports a non-existent
+  `../constants.nix` (the binding was unused, so it had never been evaluated).
+
+### What changed for the people using it
+
+- `LANG`/`LC_*` moved from `en_US.UTF-8` to the fleet's `en_GB.UTF-8`.
+- `cjdell` is now in `networkmanager`, `dialout`, `i2c` and `video` as well as
+  `wheel` (fleet `users/cjdell`), and **home-manager manages
+  `/home/cjdell`** from the first switch: `~/.config/opencode` is taken over
+  (`force = true`, any previous files are moved aside as `.backup-<n>`), plus
+  `~/.gitconfig`, `~/.npmrc` and nodejs in the user profile. `~/.opencode`
+  itself is untouched (installer-managed binary).
+- `mitigations=off` is now in the kernel command line, like every other fleet
+  host.
+
 
 ## Immich 2.6.1 → 3.x + VectorChord (done 2026-11-26)
 
@@ -130,7 +164,9 @@ Secrets live in `hosts/colin/secrets/secrets.yaml` (sops), encrypted to the
 fleet age key. `/var/lib/sops-nix/key.txt` must exist on the host; sops renders
 `/run/secrets/*` and `/run/secrets/rendered/*` (Route53 env, htpasswd,
 `create_ap.conf`) at activation, so nothing secret is in `/nix/store`. The sops
-*module* is selected in `flake.nix` alongside the nixpkgs pin.
+*module* is imported by `./default.nix` (`sops-nix.nixosModules.sops` — it is
+not part of `mkHost`, since each host pulls it from the flake inputs), and the
+settings are in `./sops.nix`.
 
 ## Rebuild
 
@@ -161,8 +197,15 @@ referenced constants that do not exist, so they are intentionally not ported
 
 ## Remaining unification work
 
-1. `common/system.nix` + `users/cjdell` — requires an `enable` switch on
-   `common/build-client.nix` (or a colin-specific override) because colin must
-   not dispatch builds to zen3.
-2. `boot.zfs.forceImportRoot = false` (26.11 recommends it; silence the eval
-   warning deliberately, not by accident).
+None for the adoption itself. Deliberate differences that will stay:
+
+1. `fleetBuildClient.enable = false` — no network path to zen3 (see above).
+2. `./sops.nix` instead of `common/sops.nix` — colin's own secrets file; it
+   never had the fleet `brave_api_key` secret, which is fine (the opencode
+   brave MCP server just fails to start there, exactly as on the other
+   sops-less hosts).
+3. Its own `hardware-configuration.nix`, `http.nix` (nginx/ACME Route53 edge,
+   `electronerds.com`), `wireguard.nix`, `networking.nix` (`create_ap`, NAT,
+   the ping-reboot watchdog) and `services/` — that is the host's role, not
+   drift.
+

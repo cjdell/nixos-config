@@ -599,7 +599,7 @@
         # Find configs in `hosts` folder and use the folder name as the host name
         (
           let
-            hosts = builtins.filter (x: x != null && x != "grafton-router" && x != "colin") (
+            hosts = builtins.filter (x: x != null && x != "grafton-router") (
               nixpkgs.lib.mapAttrsToList (name: value: if (value == "directory") then name else null) (
                 builtins.readDir ./hosts
               )
@@ -632,36 +632,24 @@
             specialArgs = { inherit inputs; };
           };
 
-          # colin is the ElectroNerds home server (192.168.178.10), ported
-          # verbatim from its standalone ~/nixos-config flake.
-          #
-          # UNIFICATION (begun 2026-11-26): it now runs the fleet's unified
-          # nixos-unstable pin, with the fleet sops-nix, and the fleet
-          # nixos-utils rollback module as the remote safety net. It still uses
-          # its own module list (no common/system.nix, no users/cjdell
-          # home-manager, no fleet build client — zen3 is unreachable from its
-          # LAN).
-          #
-          # MIGRATION DONE (2026-11-26): Immich moved 2.6.1 -> 3.3.3 and its
-          # database converted pgvecto.rs -> VectorChord (both indexes are
-          # `vchordrq`, the old extension + schema are dropped). Immich 3
-          # dropped pgvecto.rs, so there is no 25.11 pin or override left.
-          # See hosts/colin/README.md.
+          # colin is the ElectroNerds home server (192.168.178.10). UNIFIED
+          # 2026-11-26: it is now a plain `hosts/colin` directory built by
+          # mkHost like every other host (fleet nixpkgs pin, common/system.nix,
+          # users/cjdell + home-manager, nixos-utils modules), with its own
+          # module list under hosts/colin/. It disables the fleet build client
+          # (`fleetBuildClient.enable = false`) — it is a satellite behind
+          # TalkTalk and cannot reach zen3.
           #
           # AFTER EVERY `nixos-rebuild switch` ON THIS HOST: verify it is still
           # reachable, then `sudo nixos-confirm` within 5 minutes or
           # system.autoRollback reverts and reboots it.
-          colin = nixpkgs.lib.nixosSystem {
-            system = "x86_64-linux";
-            modules = [ sops-nix.nixosModules.sops ] ++ (import ./hosts/colin inputs);
-          };
-
+          #
           # The 25.11 configuration colin ran until 2026-11-26 has been retired:
           # its store path stays bootable (generation 172 / the systemd-boot
           # menu) but there is no longer a rebuildable output for it, because a
-          # 25.11 rebuild would run Immich 2.6.1 against a VectorChord database
-          # once the migration below is done. Rolling back a live mistake is by
-          # generation: `sudo nixos-rebuild switch --rollback` / system-good.
+          # 25.11 rebuild would run Immich 2.6.1 against a VectorChord database.
+          # Rolling back a live mistake is by generation:
+          # `sudo nixos-rebuild switch --rollback` / system-good.
 
           precision-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
