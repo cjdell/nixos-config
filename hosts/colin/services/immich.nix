@@ -2,24 +2,16 @@
   config,
   lib,
   pkgs,
-  nixpkgs_25_11,
   modulesPath,
   ...
 }:
 
 let
   constants = import ../constants.nix;
-  # Transitional pin (see hosts/colin/README.md): nixos-unstable ships Immich
-  # 3.x, which requires a VectorChord database migration. Until that is done as
-  # its own step, keep the running 2.6.1 package from the 25.11 pin. On the
-  # 25.11 output this is the same derivation as pkgs.immich, so the verbatim
-  # port stays bit-for-bit.
-  pkgs25 = nixpkgs_25_11.legacyPackages.${pkgs.stdenv.hostPlatform.system};
 in
 {
   services.immich = {
     enable = true;
-    package = pkgs25.immich;
     host = "0.0.0.0";
     port = 2283;
     accelerationDevices = null;
@@ -28,6 +20,34 @@ in
     };
     mediaLocation = "/electronerds/ds-photos/immich";
     openFirewall = true;
+  };
+
+  # The `immich` role owns the database but is not a superuser, and
+  # services.immich.database is off (external PG). Immich 3 needs the vchord
+  # extension created before it starts; do it as postgres, idempotently.
+  # journalctl -u immich-vectorchord-init
+  systemd.services.immich-vectorchord-init = {
+    description = "Create the VectorChord extension in the Immich database";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "postgresql.service" ];
+    requires = [ "postgresql.service" ];
+    before = [ "immich-server.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "postgres";
+      RemainAfterExit = true;
+    };
+    script = ''
+      ${pkgs.postgresql_16}/bin/psql -d immich -v ON_ERROR_STOP=1 \
+        -c 'CREATE EXTENSION IF NOT EXISTS vchord CASCADE;'
+    '';
+  };
+
+  # Order the server behind it, and fail fast rather than let Immich spin on a
+  # database without the extension.
+  systemd.services.immich-server = {
+    requires = [ "immich-vectorchord-init.service" ];
+    after = [ "immich-vectorchord-init.service" ];
   };
 
   system.activationScripts.immich-dir = ''

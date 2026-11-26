@@ -27,21 +27,54 @@ Done:
   reindexed for the glibc 2.40→2.44 collation change.
 - **Fleet sops-nix** (the 25.11 pre-Go-1.26 pin cannot build on unstable).
 - **`system.autoRollback`** (see below).
-- **`colin-legacy`** output = the exact 25.11 configuration it ran before, kept
-  rebuildable while the transitional pins below are in use.
+- **Immich 3.3.3 + VectorChord** (2026-11-26, this is what removed the last
+  25.11 pin — see the migration section below). There are now **no**
+  `nixpkgs_25_11` / `home-manager_25_11` / `sops-nix_25_11` inputs left in
+  `flake.nix` or `flake.lock`.
 
-Still pinned to `nixpkgs_25_11` (transitional, both deleted by removing the
-override + specialArg):
+## Immich 2.6.1 → 3.x + VectorChord (done 2026-11-26)
 
-- **Immich 2.6.1** in `services/immich.nix`. nixos-unstable ships Immich 3.x
-  and the module now **always** uses VectorChord; colin's live database is on
-  pgvecto.rs. That is a data migration with its own runbook, not part of the
-  pin move.
-- **pgvecto.rs** (`vectors` 0.3.0) in `services/postgres.nix`, because unstable
-  dropped `pgvecto-rs` outright.
+Immich 3.0 dropped pgvecto.rs — `DB_VECTOR_EXTENSION` accepts only
+`vectorchord` or `pgvector`. Colin's database used the old extension (`vectors`
+0.3.0, `vector` columns in `face_search`/`smart_search`), so it was converted
+with Immich's documented **automatic** path
+(`docs.immich.app/administration/postgres-standalone/#migrating-from-pgvecto-rs`):
+pgvecto.rs + pgvector + VectorChord installed together, both preloaded, and the
+3.x server did the column/index conversion at startup.
 
-So a rebuild from `colin-legacy` is still possible, and the live system still
-*looks* like a 2.6.1 Immich host even though everything else is 26.11.
+Result (generation `z8azrx4psv…`, 2026-11-26 23:06):
+
+- Immich **3.3.3** (fleet pin); `immich-server` and `machine-learning` healthy.
+- `clip_index` (smart_search) and `face_index` (face_search) are now
+  `USING vchordrq`; both "Reindexed" messages were logged (~30 s for
+  15,795 / 19,095 rows).
+- Columns are `public.vector` (pgvector 0.8.7); `vchord` 1.1.1 preloaded only.
+- `DROP EXTENSION vectors; DROP SCHEMA vectors;` succeeded (no dependants), and
+  the 25.11 override + inputs are gone from the repo.
+
+Backups from before the conversion are still on disk:
+
+```
+electronerds/ds-postgres@pre-immich3-2026-11-26
+electronerds/ds-photos@pre-immich3-2026-11-26
+/electronerds/ds-postgres/dumps/immich-pre-v3-20261126.dump
+    pg_dump -Fc, 107 MB, 493 TOC entries (tables + data, incl. the vector tables)
+```
+
+They can be pruned once the 3.x install has had some real use (a post-migration
+`pg_dump` is the more useful thing to keep).
+
+What the migration used (and what remains in the config):
+
+- `services.postgresql.extensions` = pgvector **0.8.7** + VectorChord **1.1.1**
+- `shared_preload_libraries = "vchord.so"` (only; `vectors.so` is gone)
+- `services.immich` = **3.3.3** (fleet pin)
+- `immich-vectorchord-init.service` is **kept**: a oneshot running as
+  `postgres` that runs `CREATE EXTENSION IF NOT EXISTS vchord CASCADE;`,
+  ordered `before` and `required by` `immich-server`. It is a no-op on a normal
+  boot; it matters if the DB is ever restored from a pre-migration dump, and it
+  documents why the extension exists outside NixOS (the `immich` role owns the
+  DB but is not a superuser, and `services.immich.database` is off).
 
 ## Remote safety net — read before any rebuild
 
@@ -106,7 +139,9 @@ sudo nixos-rebuild switch --flake .        # hostname is colin, so this picks .#
 sudo nixos-confirm                          # REQUIRED within 5 minutes
 ```
 
-The 25.11 reference config is `.#colin-legacy` (do not deploy it casually).
+The 25.11 `/home/cjdell`-era configs are gone from the flake: roll back a live
+mistake by generation (`sudo nixos-rebuild switch --rollback`, or
+`nixos-confirm <gen>`), not by rebuilding an old output.
 
 ## Backups / rollback points
 
@@ -126,12 +161,8 @@ referenced constants that do not exist, so they are intentionally not ported
 
 ## Remaining unification work
 
-1. Immich 2.6.1 → 3.x + VectorChord migration (needs a DB dump + the documented
-   pgvecto.rs → VectorChord steps), then drop both the overrides and the
-   `nixpkgs_25_11` / `home-manager_25_11` / `sops-nix_25_11` pins and the
-   `colin-legacy` output.
-2. `common/system.nix` + `users/cjdell` — requires an `enable` switch on
+1. `common/system.nix` + `users/cjdell` — requires an `enable` switch on
    `common/build-client.nix` (or a colin-specific override) because colin must
    not dispatch builds to zen3.
-3. `boot.zfs.forceImportRoot = false` (26.11 recommends it; silence the eval
+2. `boot.zfs.forceImportRoot = false` (26.11 recommends it; silence the eval
    warning deliberately, not by accident).

@@ -2,18 +2,10 @@
   config,
   lib,
   pkgs,
-  nixpkgs_25_11,
   ...
 }:
 
 let
-  # Transitional pin (see hosts/colin/README.md): nixos-unstable dropped
-  # pgvecto-rs, but the live Immich 2.6.1 database still uses the `vectors`
-  # extension (pgvecto.rs 0.3.0, `vector` columns in face_search/smart_search).
-  # Keep supplying the extension from the 25.11 pin until Immich is migrated
-  # to 3.x + vectorchord as its own change.
-  pkgs25 = nixpkgs_25_11.legacyPackages.${pkgs.stdenv.hostPlatform.system};
-
   # Define a single data structure for DB names and passwords.
   DATABASES = {
     immich = "immich";
@@ -52,10 +44,16 @@ in
 
     dataDir = "/electronerds/ds-postgres/data";
 
-    extensions = ps: [ pkgs25.postgresql_16.pkgs.pgvecto-rs ];
+    extensions = ps: [
+      ps.pgvector
+      ps.vectorchord
+    ];
     settings = {
-      shared_preload_libraries = [ "vectors.so" ];
-      search_path = "\"$user\", public, vectors";
+      # VectorChord must be preloaded; pgvector supplies the `vector` type it
+      # builds on (Immich 3 converted the pgvecto.rs columns to it on
+      # 2026-11-26 — see hosts/colin/README.md).
+      shared_preload_libraries = [ "vchord.so" ];
+      search_path = "\"$user\", public";
     };
   };
 

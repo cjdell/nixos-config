@@ -166,29 +166,6 @@
     # Bleeding-edge Zed: source build tracking zed main (via zed.overlays.default),
     # replaces nixpkgs' zed-editor package which ships the prebuilt release channel.
     zed.url = "github:zed-industries/zed";
-
-    # colin (the ElectroNerds server at 192.168.178.10) is a satellite site,
-    # not on the 192.168.49.0/24 LAN. It was ported verbatim from the
-    # standalone flake it ran before adoption. Since 2026-11-26 it runs the
-    # fleet's nixos-unstable pin (the `colin` output), and these 25.11 pins
-    # are now referenced only by (a) the `colin-legacy` reference output and
-    # (b) the two transitional data migrations that cannot move yet: Immich
-    # 2.6.1 and its pgvecto.rs extension. Drop all three pins once Immich is
-    # on 3.x + vectorchord.
-    nixpkgs_25_11.url = "github:NixOS/nixpkgs/1073dad219cb244572b74da2b20c7fe39cb3fa9e";
-    home-manager_25_11 = {
-      url = "github:nix-community/home-manager/7afd8cebb99e25a64a745765920e663478eb8830";
-      inputs.nixpkgs.follows = "nixpkgs_25_11";
-    };
-    # sops-nix matching that pin: newer revisions bumped go.mod to Go 1.26,
-    # which nixos-25.11's toolchain cannot build (sops-install-secrets failed
-    # with "go.mod requires go >= 1.26.0"). This is the last 2025 revision
-    # (go 1.24) before the bump. The rest of the fleet keeps the floating
-    # sops-nix above.
-    sops-nix_25_11 = {
-      url = "github:Mic92/sops-nix/94d8af61d8a603d33d1ed3500a33fcf35ae7d3bc";
-      inputs.nixpkgs.follows = "nixpkgs_25_11";
-    };
   };
 
   outputs =
@@ -213,9 +190,6 @@
       disko,
       disko-zfs,
       zed,
-      nixpkgs_25_11,
-      home-manager_25_11,
-      sops-nix_25_11,
     }@inputs:
 
     let
@@ -666,14 +640,13 @@
           # nixos-utils rollback module as the remote safety net. It still uses
           # its own module list (no common/system.nix, no users/cjdell
           # home-manager, no fleet build client — zen3 is unreachable from its
-          # LAN), and two stateful pieces stay pinned to the old 25.11 nixpkgs
-          # until their data migration is done:
-          #   * Immich 2.6.1 (unstable ships 3.x, which needs a VectorChord DB
-          #     migration) — services/immich.nix
-          #   * the pgvecto.rs `vectors` extension that database uses —
-          #     services/postgres.nix
-          # Both overrides read nixpkgs_25_11 directly, so they are deleted by
-          # simply dropping the overrides + this specialArg.
+          # LAN).
+          #
+          # MIGRATION DONE (2026-11-26): Immich moved 2.6.1 -> 3.3.3 and its
+          # database converted pgvecto.rs -> VectorChord (both indexes are
+          # `vchordrq`, the old extension + schema are dropped). Immich 3
+          # dropped pgvecto.rs, so there is no 25.11 pin or override left.
+          # See hosts/colin/README.md.
           #
           # AFTER EVERY `nixos-rebuild switch` ON THIS HOST: verify it is still
           # reachable, then `sudo nixos-confirm` within 5 minutes or
@@ -681,31 +654,14 @@
           colin = nixpkgs.lib.nixosSystem {
             system = "x86_64-linux";
             modules = [ sops-nix.nixosModules.sops ] ++ (import ./hosts/colin inputs);
-            specialArgs = { inherit nixpkgs_25_11; };
           };
 
-          # The 25.11 configuration colin ran until 2026-11-26, kept only as a
-          # rebuildable reference while the two transitional pins above are in
-          # use (rollback of a live mistake is by generation, not by rebuild:
-          # see `sudo nixos-rebuild switch --rollback` / system-good).
-          # Delete this output together with the nixpkgs_25_11 /
-          # home-manager_25_11 / sops-nix_25_11 pins once Immich is on 3.x.
-          colin-legacy = nixpkgs_25_11.lib.nixosSystem {
-            system = "x86_64-linux";
-            modules = [
-              sops-nix_25_11.nixosModules.sops
-            ]
-            ++ (import ./hosts/colin inputs)
-            ++ [
-              home-manager_25_11.nixosModules.home-manager
-              {
-                home-manager.useGlobalPkgs = true;
-                home-manager.useUserPackages = true;
-                home-manager.sharedModules = [ ];
-              }
-            ];
-            specialArgs = { inherit nixpkgs_25_11; };
-          };
+          # The 25.11 configuration colin ran until 2026-11-26 has been retired:
+          # its store path stays bootable (generation 172 / the systemd-boot
+          # menu) but there is no longer a rebuildable output for it, because a
+          # 25.11 rebuild would run Immich 2.6.1 against a VectorChord database
+          # once the migration below is done. Rolling back a live mistake is by
+          # generation: `sudo nixos-rebuild switch --rollback` / system-good.
 
           precision-nixos = nixpkgs.lib.nixosSystem {
             inherit system pkgs;
