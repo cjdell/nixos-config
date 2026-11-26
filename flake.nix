@@ -169,10 +169,12 @@
 
     # colin (the ElectroNerds server at 192.168.178.10) is a satellite site,
     # not on the 192.168.49.0/24 LAN. It was ported verbatim from the
-    # standalone flake it ran before adoption, so it keeps that flake's exact
-    # nixos-25.11 pin (the rev its live system was built from:
-    # 25.11.20260324.1073dad) and its own module set. Moving it to the fleet's
-    # nixos-unstable pin is a separate, testable change.
+    # standalone flake it ran before adoption. Since 2026-11-26 it runs the
+    # fleet's nixos-unstable pin (the `colin` output), and these 25.11 pins
+    # are now referenced only by (a) the `colin-legacy` reference output and
+    # (b) the two transitional data migrations that cannot move yet: Immich
+    # 2.6.1 and its pgvecto.rs extension. Drop all three pins once Immich is
+    # on 3.x + vectorchord.
     nixpkgs_25_11.url = "github:NixOS/nixpkgs/1073dad219cb244572b74da2b20c7fe39cb3fa9e";
     home-manager_25_11 = {
       url = "github:nix-community/home-manager/7afd8cebb99e25a64a745765920e663478eb8830";
@@ -657,26 +659,52 @@
           };
 
           # colin is the ElectroNerds home server (192.168.178.10), ported
-          # verbatim from its standalone ~/nixos-config flake. It keeps its
-          # own nixos-25.11 pin and its old module list (no common/system.nix,
-          # users/cjdell home-manager config, autoRollback or fleet build
-          # client), so being in this repo does not change its role. The only
-          # fleet convention it follows is sops for secrets. The verbatim port
-          # evaluated to the running system bit-for-bit; sops then moved the
-          # Route53/WG/Tailscale/AP/htpasswd secrets out of the store.
-          # Converge the rest onto the fleet pin separately.
-          colin = nixpkgs_25_11.lib.nixosSystem {
+          # verbatim from its standalone ~/nixos-config flake.
+          #
+          # UNIFICATION (begun 2026-11-26): it now runs the fleet's unified
+          # nixos-unstable pin, with the fleet sops-nix, and the fleet
+          # nixos-utils rollback module as the remote safety net. It still uses
+          # its own module list (no common/system.nix, no users/cjdell
+          # home-manager, no fleet build client — zen3 is unreachable from its
+          # LAN), and two stateful pieces stay pinned to the old 25.11 nixpkgs
+          # until their data migration is done:
+          #   * Immich 2.6.1 (unstable ships 3.x, which needs a VectorChord DB
+          #     migration) — services/immich.nix
+          #   * the pgvecto.rs `vectors` extension that database uses —
+          #     services/postgres.nix
+          # Both overrides read nixpkgs_25_11 directly, so they are deleted by
+          # simply dropping the overrides + this specialArg.
+          #
+          # AFTER EVERY `nixos-rebuild switch` ON THIS HOST: verify it is still
+          # reachable, then `sudo nixos-confirm` within 5 minutes or
+          # system.autoRollback reverts and reboots it.
+          colin = nixpkgs.lib.nixosSystem {
             system = "x86_64-linux";
-            modules =
-              (import ./hosts/colin inputs)
-              ++ [
-                home-manager_25_11.nixosModules.home-manager
-                {
-                  home-manager.useGlobalPkgs = true;
-                  home-manager.useUserPackages = true;
-                  home-manager.sharedModules = [ ];
-                }
-              ];
+            modules = [ sops-nix.nixosModules.sops ] ++ (import ./hosts/colin inputs);
+            specialArgs = { inherit nixpkgs_25_11; };
+          };
+
+          # The 25.11 configuration colin ran until 2026-11-26, kept only as a
+          # rebuildable reference while the two transitional pins above are in
+          # use (rollback of a live mistake is by generation, not by rebuild:
+          # see `sudo nixos-rebuild switch --rollback` / system-good).
+          # Delete this output together with the nixpkgs_25_11 /
+          # home-manager_25_11 / sops-nix_25_11 pins once Immich is on 3.x.
+          colin-legacy = nixpkgs_25_11.lib.nixosSystem {
+            system = "x86_64-linux";
+            modules = [
+              sops-nix_25_11.nixosModules.sops
+            ]
+            ++ (import ./hosts/colin inputs)
+            ++ [
+              home-manager_25_11.nixosModules.home-manager
+              {
+                home-manager.useGlobalPkgs = true;
+                home-manager.useUserPackages = true;
+                home-manager.sharedModules = [ ];
+              }
+            ];
+            specialArgs = { inherit nixpkgs_25_11; };
           };
 
           precision-nixos = nixpkgs.lib.nixosSystem {
