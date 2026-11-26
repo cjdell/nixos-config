@@ -13,6 +13,18 @@
       tailscale_pre_auth_key = { };
       ap_passphrase = { };
       htpasswd = { };
+
+      # Brave Search API key for the brave-search MCP server that
+      # users/cjdell/opencode.nix spawns (BRAVE_API_KEY_FILE). colin is the one
+      # host with its own sops file instead of common/sops.nix, so name the
+      # fleet file explicitly — same key, same value, and this host's age key
+      # decrypts it. 0440 root:wheel matches common/sops.nix: cjdell is in
+      # wheel, so the MCP server can read it and nobody else can.
+      brave_api_key = {
+        sopsFile = ../../secrets/secrets.yaml;
+        group = "wheel";
+        mode = "0440";
+      };
     };
 
     templates = {
