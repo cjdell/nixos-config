@@ -10,16 +10,40 @@ nginx/ACME Route53 edge, the WireGuard client, Tailscale/headscale and the
 ## Why this host is different
 
 - **Satellite site.** It lives on `192.168.178.0/24` behind TalkTalk, not on the
-  fleet's `192.168.49.0/24` LAN, and cannot reach the zen3 builder — not over
-  the LAN and not over the tailnet (zen3 has no tailnet node). It builds
-  locally: `fleetBuildClient.enable = false` in `./default.nix` turns
-  `common/build-client.nix` off for this host only.
+  fleet's `192.168.49.0/24` LAN. Since 2026-11-26 it *does* reach that LAN over
+  the tailnet (`--accept-routes`, see `./wireguard.nix` and *Reaching the fleet
+  LAN* below), but it still builds locally: `fleetBuildClient.enable = false`
+  in `./default.nix` turns `common/build-client.nix` off for this host only, so
+  fleet builds don't have to cross the TalkTalk WAN.
 - **Two things it does not take from the fleet**: `common/sops.nix` (its sops
   file and secret set are its own — `./sops.nix` — so it cannot share the
   fleet's `defaultSopsFile`) and the fleet `sharedPackages` list alone (it adds
   the disk/network forensics tools it actually uses).
 - **Everything else is shared**, because it is now a normal `hosts/colin`
   directory built by flake.nix's `mkHost`.
+
+## Reaching the fleet LAN (192.168.49.0/24, added 2026-11-26)
+
+The LAN is reachable from here **through the tailnet, not the WAN**: grafton-router
+is a tailscale subnet router advertising `192.168.49.0/24` (plus `10.3.0.0/16`
+and the hackspace IPv6 /48s), and `./wireguard.nix` now passes
+`--accept-routes=true` instead of `false`. Tailscale installs the accepted
+routes in its own table 52 (priority 5270, ahead of `main`); `100.64.0.0/10`
+and this host's local subnets are untouched, so an SSH session arriving over
+`tailscale0` keeps its return path.
+
+Apply the flag on a live box (before the rebuild that makes it survive a reboot):
+
+```sh
+sudo tailscale set --accept-routes=true     # instant, no tailscaled restart
+ip route show table 52 | grep 192.168.49    # expect: 192.168.49.0/24 dev tailscale0
+ping -c2 192.168.49.50
+```
+
+Without the rebuild, the next boot's `tailscaled-autoconnect` re-runs
+`tailscale up --accept-routes=false` and the flag silently reverts. The rebuild
+only restarts `tailscaled-autoconnect`, never `tailscaled` itself, so it does
+not drop an SSH session — but `nixos-confirm` is still required afterwards.
 
 ## Unification status (begun 2026-11-26, finished 2026-11-26)
 

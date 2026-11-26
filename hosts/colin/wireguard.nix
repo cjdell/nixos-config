@@ -58,7 +58,15 @@
     extraUpFlags = [
       "--login-server=https://tailscale.home.chrisdell.info"
       "--advertise-routes=192.168.178.0/24"
-      "--accept-routes=false"
+      # Accept the tailnet's approved subnet routes so the fleet LAN
+      # (192.168.49.0/24, advertised by grafton-router) is reachable from this
+      # box over the tailnet instead of dying at the TalkTalk gateway. Also
+      # pulls in dbthr33 192.168.35.0/24 and gatling-services 10.0.1.0/24 —
+      # none of them overlap this host's own subnets (192.168.178.0/24,
+      # 192.168.12.0/24, wg0 10.47.0.0/16, podman0 10.88.0.0/16).
+      # 100.64.0.0/10 stays in tailscale's own table 52 ahead of main, so an
+      # SSH session in over the tailnet keeps its return path either way.
+      "--accept-routes=true"
       "--accept-dns=false"
     ];
   };
