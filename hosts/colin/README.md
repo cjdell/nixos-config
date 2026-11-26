@@ -78,12 +78,18 @@ sudo touch /run/rebuild-ok && sudo systemctl stop remote-rebuild-guard.timer
 `remote-rebuild-guard.sh` rolls back to `system-good` and reboots unless
 `/run/rebuild-ok` exists.
 
-**Reboots are the one unprotected step.** `nixos-rebuild switch` does not change
-the running kernel; the 26.11 move brought 6.12.77 → 6.18.57, so the next
-unattended reboot boots a kernel this host has never run. ZFS is stage-2 (root
-is ext4), so a ZFS problem cannot prevent booting; but the first reboot onto
-6.18.57 should be done while someone can reach the box. Until then the 25.11
-generation remains in the systemd-boot menu.
+**Reboots are the one step the rollback cannot cover** — if the kernel does not
+boot, no timer runs. That gap was closed by testing it deliberately: the 26.11
+move brought 6.12.77 → 6.18.57, and on **2026-11-26 22:59** the box was
+cold-booted onto 6.18.57 with `system-good` armed at the 25.11 generation
+(`sudo nixos-confirm 172` → reboot → confirm once back; without that confirm it
+reverts to 25.11 and reboots). Result: back in ~65 s, tailscaled `Running` 12 s
+after start **without using the pre-auth key** (the persisted
+`/var/lib/tailscale/tailscaled.state` carried the node identity —
+`tailscaled-autoconnect` logs "Tailscale is running" and exits), all nine
+containers healthy, public HTTPS 200 on both vhosts, ZFS pools imported, zero
+failed units. The 25.11 generation stays in the systemd-boot menu as a manual
+fallback.
 
 ## Secrets
 
@@ -124,9 +130,8 @@ referenced constants that do not exist, so they are intentionally not ported
    pgvecto.rs → VectorChord steps), then drop both the overrides and the
    `nixpkgs_25_11` / `home-manager_25_11` / `sops-nix_25_11` pins and the
    `colin-legacy` output.
-2. First supervised reboot onto kernel 6.18.57.
-3. `common/system.nix` + `users/cjdell` — requires an `enable` switch on
+2. `common/system.nix` + `users/cjdell` — requires an `enable` switch on
    `common/build-client.nix` (or a colin-specific override) because colin must
    not dispatch builds to zen3.
-4. `boot.zfs.forceImportRoot = false` (26.11 recommends it; silence the eval
+3. `boot.zfs.forceImportRoot = false` (26.11 recommends it; silence the eval
    warning deliberately, not by accident).
