@@ -1,4 +1,10 @@
-{ config, lib, pkgs, modulesPath, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  modulesPath,
+  ...
+}:
 
 let
   constants = import ../constants.nix;
@@ -21,6 +27,11 @@ in
       ];
       environment = {
         TZ = "Europe/London";
+        # The ghcr.io/librespeed/speedtest image defaults WEBPORT to 8080,
+        # while the publish below (and nginx) speak to container port 80. Left
+        # alone, apache listened on 8080 and speed.electronerds.com was a 502
+        # (found while verifying the unification activation on 2026-11-26).
+        WEBPORT = "80";
       };
     };
   };
