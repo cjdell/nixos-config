@@ -73,7 +73,8 @@ in
       volumes = [
         # The image's agent run script does `ln -sft /var/lib /data/thread`,
         # so the Thread network dataset (network key, BR id, on-mesh prefix)
-        # persists in ${stateDir}/thread. Losing this = recreating the mesh.
+        # persists in ${stateDir}/thread — covered by the borg backup-srv job
+        # (it archives all of /srv). Losing this = recreating the mesh.
         "${stateDir}:/data"
         "/etc/localtime:/etc/localtime:ro"
       ];

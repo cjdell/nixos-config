@@ -235,6 +235,35 @@ Full usage docs: **`docs/recallium.md`**.
 
 Full details: **`docs/hass-rs.md`**.
 
+## Thread border router / Matter over Thread (grafton-router, staged 2026-11-26 — radio flashed & verified, awaiting its USB socket there)
+
+A spare **Sonoff ZBDongle-P** (TI CC2652P10, shield "C2652P") runs as a **Thread border
+router radio** for Matter devices. ⚠️ This is the **community** firmware path: Sonoff's own
+flasher is Zigbee-only for the CC2652P (their OTBA guide's "Thread" entry is the newer
+Dongle-PP10). RCP firmware = Koenkk `ot-ti` 2025.3.1 `CC1352P2_CC2652P_launchpad` build
+(pinned sha256 in the script), flashed via `nixpkgs` `cc2538-bsl --bootloader-sonoff-usb` —
+`sudo ./scripts/flash-thread-rcp.sh flash` on the box the stick is plugged into, no disassembly.
+
+- **Service**: `hosts/grafton-router/services/otbr.nix` — official `openthread/border-router`
+  image (digest-pinned) on host network, `OT_RCP_DEVICE=spinel+hdlc+uart:///dev/otbr-rcp?uart-baudrate=460800`
+  (no HW flow control), infra iface `lan`, REST on loopback :8081, mesh state persists in
+  `/srv/otbr/thread` (back it up; loss = recreate mesh + re-commission devices).
+- **Device identity**: this stick is the **CP2102N** P revision (`10c4:ea60`) with a
+  **unique serial** → udev matches the serial (`rcpSerial` in otbr.nix) and symlinks
+  `/dev/otbr-rcp`; it can sit in any USB socket, and the box's other serial adapters
+  (idle CH340 on 1-7, an FTDI) can never be grabbed. Swapping the physical stick ⇒ update
+  `rcpSerial` (empty = service fully inert). Radio verified after flashing with
+  `otbr-agent --radio-version` → `OPENTHREAD/1.4.0-Koenkk-2025.3.1; CC13XX_CC26XX`.
+- **Firewall**: `forward` is `policy drop` here — the `lan ↔ wpan0` pair in
+  `networking/firewall.nix` is load-bearing; otbr's own `OT_FORWARD_INGRESS` ip6tables chain
+  (mesh-into-unicast filter) also shows up and is expected, not cruft.
+- **HA**: no HAOS add-ons on this fleet — add the `otbr` integration (`http://127.0.0.1:8081`)
+  → `thread` integration appears → set preferred network → commission via the existing
+  matter-server (BLE hci0). Upstream caveat: one closed report of OTBR losing the CC2652P RCP
+  when a device joins — the rollback is flashing any Koenkk Z-Stack coordinator hex back.
+
+Full runbook + hashes: **`docs/thread-border-router.md`**.
+
 ## DeepSeek Harness web GUI (`dsh-web-harness`, live on zen3-nixos + grafton-router)
 
 The forked DeepSeek Harness Web GUI, as an always-on service: `common/dsh-web-service.nix` (`services.dshWebHarness`), enabled by `hosts/zen3-nixos/dsh-harness.nix` (`192.168.49.50:3080`) and `hosts/grafton-router/dsh-harness.nix` (`192.168.49.1:3080`).
@@ -273,7 +302,8 @@ The serving engine is **Strata** (a separate stack from llama.cpp), pinned at **
 - **The whole card is a lease, not an allocation**: `gpu-mode sd|game` **stops `strata.service` outright** — do not "restart it for good measure" while testing SD or gaming.
 - **DFlash2 is LIVE as the drafter** (`"drafting": "dflash2"` in `strata.nix`'s `configFile`): 0.2.10 made it the `auto` pick for Qwen3.8-Flash-Next on CUDA/HIP/Metal/SYCL. Since 0.2.12 `auto` now picks MTP on gfx1201 (the DFlash2 prompt stall is open), so the explicit `"drafting": "dflash2"` is what we run. `"drafting": "mtp"` remains the one-line revert.
 - **One pack live, two kept as schema**: `config.ai.strataModel` = `"ud-iq4-xs-v31"` (Unsloth's Dynamic v3.1 re-cut of UD-IQ4_XS, 93.7 GB / 4 shards, live since 2026-11-05 15:20). The old three-shard UD-IQ4_XS and the GSQ-RCO IQ3_S GGUFs have been deleted.
-- **Second family, selectable since 2026-11-18**: `models.qwen36-ud-q4-k-xl` — Qwen3.6-35B-A3B (35B MoE / 3B active / 256 experts / top-8, arch `qwen35moe`). An own-path engine: reads ONE GGUF in place, no iq_pack, no expert profile, no PLE shard, no `--resident-budget-gib`. Run line = `--native <gguf> --max-context 131072 --prefill auto --mtp 2`.
+- **Second family, selectable since 2026-11-18**: `models.qwen36-ud-q4-k-xl` — Qwen3.6-35B-A3B (35B MoE / 3B active / 256 experts / top-8, arch `qwen35moe`). An own-path engine: reads ONE GGUF in place, no iq_pack, no expert profile, no PLE shard, no `--resident-budget-gib`. Run line = `--native <gguf> --max-context 131072 --prefill auto --mtp 2`. **On the pinned 0.1.59.1, 256K cannot be fully VRAM-resident at UD-Q4_K_XL** (weights+KV = 32.83 GiB before buffers; ceiling ≈145–167K, and `--max-context 262144` starts *silently in hybrid mode* — upstream's fit rule only predicts starting) — quant options that do fit, the memory model, and the safe test: **`docs/qwen36-256k-vram.md`**.
+- **Qwen3.6 q36 lanes on engine 0.1.67, MEASURED 2026-11-26**: engine 0.1.6x has KV widths on this path (`--kv fp32|fp16|fp8|fp4`; at 262,144 that is 11.56 -> **1.65 GiB** fp4), so the existing `UD-Q4_K_XL` file does 256K **fully resident** - measured, not predicted: `every routed expert in VRAM (18.75 GiB)`, 2,567 MiB free, decode **165 tok/s cold / 48.4 at 138K fill / 24.9 at 258K fill**. Three lanes on the v0.2.21 build (`hosts/zen3-nixos/ai/strata-q36-package.nix`, target `strata-q36` only; `nix build .#strata-q36`) while Flash-Next stays on 0.1.59.1: `qwen36-256k-fp4` (8097, the 256K default), `qwen36-256k-fp8` (8096, 19.6 at 253K - slower at depth, better KL), `qwen36-128k-fp8` (8099, 131072 + fp8 cache). **The 128K lane is the big result**: narrowing the cache there is worth **3.25x at 60K fill and 4.15x at 122K** (75.4 / 49.0 tok/s against fp32 KV's 23.2 / 11.8 on the same engine), because the depth collapse is the dense attention read - NOT the K-quant loader bug (#3925, #5595) this file previously suspected: on 0.1.67 with fp32 KV the 60K-fill decode is 23.2 against the pin's ~22.5, i.e. unchanged. What 0.1.67 does add is MTP, which was **dead on the pin** (`drafts accepted 0 of 0` on every request in `/var/lib/strata-qwen36-ud-q4-k-xl/strata.log`) and is worth +63 % cold; `--mtp 2` beats 0 and 3. Measurement harness: `scripts/qwen36-256k-check.sh` (`status` / `go fp4|fp8|128kfp8` / `single` / `restore`), full tables in **`docs/qwen36-256k-vram.md`**.
 - **Third Flash-Next pack, selectable since 2026-11-22**: `models.coder-iq1m` — Qwen3.8-Flash-Next Coder (IQ1_M, 58.4 GB in two shards). DFlash2 must NOT be configured for it (`dflash2 = false`).
 - **Model choice via the API — `strata-swap`, live on `:8080` since 2026-11-18**: the shim owns `127.0.0.1:8080`; the engines moved behind it (primary `strata.service` → `:8091`; one unit per selectable model → `:8092+`). A request whose `model` exactly names a non-live engine triggers a SWAP — wait for the live engine's `activity.in_flight` to drain → stop live unit → wait for free VRAM → `systemctl start strata-<key>` → poll `/v1/status` `loaded:true` → forward the buffered request. Name-blind traffic follows the live engine.
 - **The engine does not run on nixpkgs' ROCm — it runs on a store-built ROCm 10.0.0** (`hosts/zen3-nixos/ai/rocm10-runtime.nix`). Do not "simplify" it back to `pkgs.rocmPackages`.

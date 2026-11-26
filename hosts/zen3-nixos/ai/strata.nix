@@ -78,6 +78,13 @@
 
 let
   strata = pkgs.callPackage ./strata-package.nix { };
+  # Strata 0.2.21 / engine 0.1.67, built for ONE target: `strata-q36`, the
+  # Qwen3.6-35B-A3B own-path engine.  It exists because that engine grew
+  # `--kv fp32|fp16|fp8|fp4` (0.1.6x), and the 262,144-token question is
+  # entirely a KV-width question - see ./strata-q36-package.nix's header and
+  # the qwen36-256k entries in the models map below.  The Qwen3.8-Flash-Next
+  # lanes keep `strata` (0.2.13.1 + engine 0.1.59.1) untouched.
+  strataQ36 = pkgs.callPackage ./strata-q36-package.nix { };
   # The ROCm 10.0.0 runtime the engine loads instead of nixpkgs' 7.2.3; see
   # ./rocm10-runtime.nix for why it is not nixpkgs and how it is fetched.
   rocm10 = pkgs.callPackage ./rocm10-runtime.nix { };
@@ -86,6 +93,118 @@ let
   # the hand-prepared pack and MTP runtime live under modelDir.
   modelDir = "/home/cjdell/Strata";
   mtpDir = "${modelDir}/mtp/rt";
+
+  # ---- the 0.2.21 / engine 0.1.67 lanes, parameterised ---------------------
+  # Every lane that runs the 0.2.21 build is declared here, so the engine/serve
+  # pairing lives in one place.  Two shapes share it:
+  #   * the 262,144 pair (`qwen36-256k-fp8` / `-fp4`), text-only, --kv narrowed;
+  #   * `qwen36-128k-v221`, the SAME 131072 run line and the same picture
+  #     reader as the deployed `qwen36-ud-q4-k-xl`, only the engine moves.
+  #     That one is a measurement arm, not a feature: 0.2.17 fixed K-quant
+  #     ssm_alpha/ssm_beta and Q4_K down-expert loading (#3925, #5595) and this
+  #     family's GGUF is a K-quant, so "was the pinned engine the reason for
+  #     the 41-57 tok/s recorded on 2026-11-23?" is a question only this pair
+  #     can answer.  It costs nothing until started (no wantedBy).
+  qwen36_v221 =
+    {
+      width,
+      port,
+      # `maxContext`, not `context`: this is a `rec`, so an attribute of the
+      # same name could only refer to itself.
+      maxContext ? 262144,
+      # Vision is `null` (pictures off) for the 256K arms: serve's reader is a
+      # second resident process (upstream measured 1,325 MiB for this model's
+      # mmproj-F16) and at 262,144 every GiB of 31.86 belongs to the experts.
+      # ./strata-q36-package.nix therefore builds no strata-vision either; the
+      # 128K A/B arm sets this to the GGUF's mmproj instead, because the lane
+      # it is being compared against runs with pictures.
+      mmprojFile ? null,
+      suffix ? "${width}",
+      # Drafts per step. Swept 0 / 2 / 3 on 2026-11-26 and 2 won outright
+      # (110.2 / 178.7 / 177.6 cold, 40.5 / 49.0 / 49.1 at 122K fill), so this
+      # is now documentation rather than a knob: 2 is setup.py's pin and no
+      # entry overrides it.
+      mtpDepth ? 2,
+      # The shim's gate, not the engine's.  null = no explicit floor (the
+      # ownPath default in vramMinFor); the 256K arms must be stricter or the
+      # swap silently gets a hybrid CPU-expert pool.
+      minVram ? null,
+    }:
+    rec {
+      selectable = true;
+      ownPath = true;
+      arch = "qwen35moe";
+      # Loopback-only engine slot, named rather than auto-numbered: the number
+      # is what the shim routes to, and pinning it here means a lane added
+      # later cannot renumber this one. (8091 primary, 8092 coder,
+      # 8093 q36-128K-fp32, 8094 inkling, 8095 qwen27b, 8096/8097 the 256K
+      # pair, 8099 q36-128K-fp8.)
+      inherit port;
+      # The 0.2.21 build, engine 0.1.67: the only one of the three with --kv.
+      package = strataQ36;
+      engineBin = "strata-q36";
+      ggufDir = "/home/cjdell/Models/Qwen3.6-35B-A3B-MTP-GGUF";
+      # The tokenizer pack is size-agnostic (scripts/repack-strata-qwen36-35b-a3b.sh
+      # extracts it; only the repack script ever reads the GGUF), so these lanes
+      # reuse the 128K entry's pack rather than making another copy.
+      packDir = "${modelDir}/pack/qwen36-ud-q4-k-xl";
+      nativeGguf = "${ggufDir}/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf";
+      pleGguf = null;
+      mmproj = mmprojFile;
+      # `vision` is a boolean switch here, not the section itself: the section
+      # is built once from the entry's mmproj (see `vision =` below), and
+      # serve starts the reader only for a dict. true = "the normal picture
+      # path", null = text-only, which is exactly what an entry without
+      # pictures has to say.
+      vision = if mmprojFile == null then null else true;
+      # NOT just "-ud-q4_k_xl": own_path_fit.from_model_name() matches the
+      # whole suffix against HYBRID_MIN_GIB, and that table's arithmetic is
+      # fp32-only (47,104 B/token) — a name it parses would let serve's
+      # pre-start gate quote fp32 numbers at a run that does not use them. With
+      # the width/size tag IN the suffix the parse returns None and the gate is
+      # deliberately silent (the same posture the Q3/IQ3 sizes get, per
+      # docs/qwen36-256k-vram.md), so the run line is the only sizing
+      # authority. It also keeps the swap table's `id` unique, which the plain
+      # qwen3.6-35b-a3b-ud-q4_k_xl name already occupies.
+      modelName = "qwen3.6-35b-a3b-ud-q4_k_xl-${suffix}";
+      context = maxContext;
+      args = [
+        "--native"
+        nativeGguf
+        "--max-context"
+        (toString context)
+        "--prefill"
+        "auto"
+        # 2 drafts per step - setup.py's pin, "measured best on the R9700".
+        # The MTP block is 1 of the 11 KV-bearing layers, so it costs
+        # 4,096 B/token at fp32 and ~1 KB/token narrowed: keep it.
+        # `mtpDepth` is parameterised only so the depth sweep (0/2/3) is a
+        # config entry rather than a hand-run engine; 2 is setup.py's pin.
+        "--mtp"
+        (toString mtpDepth)
+        # THE reason this lane exists. fp8 = symmetric int8, one float scale per
+        # (KV head, cell); fp4 = q4_0 blocks after a 256-point Hadamard
+        # rotation (the rotation is not optional upstream either - without it a
+        # K-channel outlier flattens the other 31 of 256 dims: KL 5.19 nats vs
+        # 0.0115). Upstream's logits-level KL/step against fp32: fp16 0.0044,
+        # fp8 0.0064, fp4 0.0115, top-1 token identical 8/8 steps.
+        "--kv"
+        width
+      ];
+      # The engine reads the GGUF itself; the hand-prepared parts are the
+      # tokenizer pack and the file, plus the picture reader's mmproj when this
+      # arm has one (serve opens it, so the unit must not start without it).
+      preconditions = [
+        nativeGguf
+      ]
+      ++ lib.optional (mmprojFile != null) mmprojFile
+      ++ [ "${packDir}/tokenizer/vocab.json" ];
+      # The shim's gate, not the engine's: ~26.2 GiB (fp4) to ~27.4 GiB (fp8)
+      # of the 31.86 GiB card has to be genuinely free or the engine goes
+      # hybrid, which is a 2x decode loss said nowhere. See vramMinFor.
+      # Omitted when null so vramMinFor's ownPath default applies.
+    }
+    // lib.optionalAttrs (minVram != null) { vramMinMiB = minVram; };
 
   # One entry per prepared pack; config.ai.strataModel (./default.nix) picks one.
   #   pleGguf    the shard holding the 26.82 GiB per_layer_token_embd table,
@@ -266,6 +385,10 @@ let
       selectable = true;
       ownPath = true;
       arch = "qwen35moe";
+      # Named (not auto-numbered) so a lane added later cannot renumber it:
+      # 8091 primary, 8092 coder, 8093 here, 8094 inkling, 8095 qwen27b,
+      # 8096/8097 the 256K lanes.
+      port = 8093;
       ggufDir = "/home/cjdell/Models/Qwen3.6-35B-A3B-MTP-GGUF";
       packDir = "${modelDir}/pack/qwen36-ud-q4-k-xl"; # tokenizer ONLY (strata_tokenizer.py)
       nativeGguf = "${ggufDir}/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf";
@@ -295,6 +418,77 @@ let
         mmproj
         "${packDir}/tokenizer/vocab.json"
       ];
+    };
+
+    # Qwen3.6-35B-A3B at 262,144 — the 256K lane, two cache widths, same file.
+    # The desk arithmetic in docs/qwen36-256k-vram.md said this card cannot hold
+    # UD-Q4_K_XL at 256K (weights 21.29 + fp32 KV 11.48 + ~3.2 of buffers ≈ 36
+    # against 31.86) and that the honest route was a 13-16 GiB quant.  Engine
+    # 0.1.67 narrowed the cache instead — `--kv fp32|fp16|fp8|fp4`
+    # (upstream's own bench: at 262,144 the KV is 11.56 GiB fp32 / 6.06 fp16 /
+    # 3.35 fp8 / 1.65 fp4) — so the file we already have lands at ~26.2 GiB
+    # (fp4) / ~27.4 GiB (fp8), fully resident, with room for the chunk
+    # buffers.  Read those two numbers as the trade:
+    #   fp8  2.87 GiB of KV, KL/step 0.0064  — the safe arm, ~4.4 GiB spare
+    #   fp4  1.65 GiB of KV, KL/step 0.0115  — the fast arm, ~5.9 GiB spare
+    # Both are on the SAME weights, so this A/B isolates the cache exactly:
+    # at a FULL 256K cache the decode has to read the whole thing every token,
+    # so the width is the decode speed at depth (upstream's own fill table:
+    # 84.3 -> 6.8 tok/s fp16 at 126K fill on a 12 GiB card *with hybrid
+    # experts*, which is why their number is not ours and why
+    # scripts/qwen36-256k-check.sh measures fill, not window).
+    # Both entries are selectable NOW, i.e. they join the swap table and get a
+    # unit each (`systemctl start strata-qwen36-256k-fp4`, or a request whose
+    # `model` names them).  Nothing starts at boot — the shim only swaps while
+    # an engine is already live — so their cost until tested is one more engine
+    # in the closure.  If you want 0.2.21 out of the system entirely, delete
+    # these three entries (they are the only reference to
+    # ./strata-q36-package.nix).
+    qwen36-256k-fp8 = qwen36_v221 {
+      width = "fp8";
+      port = 8096;
+      minVram = 27000;
+    };
+    qwen36-256k-fp4 = qwen36_v221 {
+      width = "fp4";
+      port = 8097;
+      minVram = 27000;
+    };
+
+    # The 131072 lane with the cache narrowed to fp8 (1.4 GiB of KV instead of
+    # 5.9).  This is the measured best everyday configuration, not a guess: on
+    # 2026-11-26, same GGUF, same engine (0.1.67), same MTP depth, same picture
+    # reader, only the KV width differing:
+    #   fp32 KV, 0.1.67    175.2 cold / 23.2 @ 60K fill / 11.8 @ 122K
+    #   fp32 KV, 0.1.59.1  107.2 cold / ~22.5          / ~11.5      (its own log)
+    #   fp8  KV, 0.1.67    178.7 cold / 75.4           / 49.0
+    # So the width is worth 3.25x at 60K fill and 4.15x at 122K — the depth
+    # collapse is the dense attention read, not a loader bug — while the engine
+    # bump on its own buys only MTP (dead on the pin: "drafts accepted 0 of 0"
+    # on every request) and ~2x prefill.  fp8 over fp4 HERE is the quality
+    # call: KL/step 0.0064 against fp32 vs 0.0115, and at this window the two
+    # are within ~6% on speed (fp4 read 48.4 at 138K fill on the 256K window).
+    # Pictures stay ON: this window keeps ~3.5 GiB spare with the reader
+    # resident, which the 256K pair cannot afford.
+    #
+    # The measurement arms that produced those numbers (a fp32-KV lane on
+    # 0.1.67, and --mtp 0 / 3 over this lane) were deleted once the matrix was
+    # recorded — see docs/qwen36-256k-vram.md, "Measured on the card".  Depth 3
+    # was 49.1 against depth 2's 49.0 at 122K fill (and worse cold: 177.6 vs
+    # 178.7) on 78% draft acceptance instead of 91%, so `--mtp 2` stands.
+    qwen36-128k-fp8 = qwen36_v221 {
+      width = "fp8";
+      port = 8099;
+      maxContext = 131072;
+      mmprojFile = "/home/cjdell/Models/Qwen3.6-35B-A3B-MTP-GGUF/mmproj-F16.gguf";
+      # NOT "fp8": that would be the 256K fp8 entry's id, and the swap table
+      # routes by id (the assert in swapConfig is what caught this).
+      suffix = "128k-fp8";
+      # Measured use is 32,624-3,491 = 29.1 GiB, so the same 27,000 floor the
+      # 256K pair carries: the shim must refuse rather than start this on a
+      # card a straggler has not finished releasing (the engine would quietly
+      # put experts in the CPU pool and say nothing).
+      minVram = 27000;
     };
   };
 
@@ -334,6 +528,22 @@ let
   swapPort = 8080;
   primaryPort = 8091;
   partnerPort0 = 8092;
+  # Ports are the shim's private address space, but they still have to be
+  # unique, and three of them are already hand-picked elsewhere: 8094 is
+  # ./inkling.nix's and 8095 is ./qwen27b.nix's (both arrive through
+  # ai.swapEngines), and the older strata lanes now name their own (see the
+  # `port` on the models entries).  So the AUTO list is "partnerPort0 upwards,
+  # minus every port somebody already claimed": it keeps every existing unit on
+  # the number it has today and hands a new entry one that cannot collide.
+  # swapConfig asserts the whole list is distinct either way.
+  claimedPorts =
+    map (e: e.port) config.ai.swapEngines
+    ++ (map (v: v.port) (lib.attrValues (lib.filterAttrs (_: v: v ? port) models)));
+  partnerPortFor =
+    let
+      slots = lib.filter (p: !lib.elem p claimedPorts) (lib.genList (i: partnerPort0 + i) 24);
+    in
+    i: builtins.elemAt slots i;
   partnerModels =
     let
       keys = lib.attrNames (lib.filterAttrs (_: v: v.selectable or false) models);
@@ -343,7 +553,7 @@ let
       mm = models.${k};
       unit = "strata-${k}";
       stateDir = "/var/lib/strata-${k}";
-      port = partnerPort0 + i;
+      port = models.${k}.port or (partnerPortFor i);
     }) (lib.filter (k: k != model) keys);
   # What VRAM must be free before each engine may start, per the shim's
   # amd-smi gate: flash-next's cache auto-fill wants essentially the whole card
@@ -352,7 +562,14 @@ let
   # weights plus graphs at 128K. The gate is a safety margin against a
   # not-yet-dead predecessor, not a sizing reservation; `before_load` (stop
   # sd-server) is already in every config.
-  vramMinFor = mm: if mm.ownPath or false then 25000 else 30000;
+  # An entry may name its own floor (`vramMinMiB`), and the qwen36-256k entries
+  # DO: their start needs ~26.2 GiB (21.29 weights + ~1.6 KV at --kv fp4 +
+  # state + ~3.2 of buffers/graphs), so 25,000 MiB would let the shim start
+  # them on a card with a straggler still holding a gigabyte — which is exactly
+  # docs/qwen36-256k-vram.md's trap: the engine then puts most experts per
+  # layer in the CPU pool, runs, and says nothing. A too-high floor here fails
+  # LOUD (the shim refuses the swap), a too-low one fails SILENT and slow.
+  vramMinFor = mm: mm.vramMinMiB or (if mm.ownPath or false then 25000 else 30000);
 
   # 0.2.17 no longer ships expert-profile.bin in terminal/data (profiles come
   # from the model feed now; setup.py names e.g. expert-profile-coder.bin per
@@ -534,7 +751,13 @@ let
   # stateDir = the unit's StateDirectory); the literals below are otherwise
   # untouched from the single-model era.
   runConfigBaseFor = mm: stateDir: {
-    exe = "${strata}/bin/strata";
+    # The engine binary, per ENTRY.  Every Flash-Next entry takes the pinned
+    # 0.2.13.1 build; the qwen36-256k entries below name their own 0.2.21
+    # `strata-q36` build (./strata-q36-package.nix) because that is where
+    # `--kv fp16|fp8|fp4` exists at all - on 0.1.59.1 the flag is swallowed by
+    # the serve catch-all ("ignoring --kv ... not an option of this engine")
+    # and the run silently goes hybrid.
+    exe = "${mm.package or strata}/bin/${mm.engineBin or "strata"}";
     args = engineArgsFor mm;
     # Drafting. 0.2.10 made DFlash2 (incoai's block drafter, packed under
     # /home/cjdell/Strata/dflash2/ by drafting_fetch.ensure() from pinned
@@ -663,13 +886,25 @@ let
     # Text-only requests are unaffected: upstream states the output is
     # bit-identical with images on when the VRAM is the same, and the serve
     # layer only touches a prompt that actually carries image parts.
-    vision = {
-      exe = "${strata}/bin/strata-vision";
-      mmproj = mm.mmproj or mmprojDefault;
-      model = mm.nativeGguf;
-      gpu = false;
-      max_tokens = 1024;
-    };
+    # `null` is a real option, not an oversight: serve adds `--vision` only
+    # `if isinstance(cfg.get("vision"), dict)` (server.py engine_args), so an
+    # entry that says `vision = null` starts WITHOUT pictures.  The qwen36-256k
+    # entries do exactly that — see their comment (the reader's VRAM belongs to
+    # the experts there, and ./strata-q36-package.nix deliberately does not
+    # build a strata-vision to pair with it).  The 128K q36 lanes set
+    # `vision = true` instead, which is what makes this branch build the
+    # section from their own `mmproj`.
+    vision =
+      if (mm.vision or true) == null then
+        null
+      else
+        {
+          exe = "${mm.visionPackage or strata}/bin/strata-vision";
+          mmproj = mm.mmproj or mmprojDefault;
+          model = mm.nativeGguf;
+          gpu = false;
+          max_tokens = 1024;
+        };
     env.HIP_VISIBLE_DEVICES = "0";
     # Local #879 instrumentation (see strata-package.nix): when a window's logits come
     # out non-finite, dump the first non-finite (layer, row, col, raw bits) per
@@ -930,20 +1165,24 @@ let
   # same /var/lib/strata/batch-mode (strata-batch); on an ownPath model the
   # batch2 config is parallel=1, so the toggle simply does nothing there.
   execFor =
-    name: solo: batch: port:
+    name: solo: batch: port: mm:
     pkgs.writeShellScript "strata-exec-${name}" ''
       mode=$(${pkgs.coreutils}/bin/cat /var/lib/strata/batch-mode 2>/dev/null || echo off)
       cfg=${solo}
       if [ "$mode" = "2" ]; then cfg=${batch}; fi
       echo "strata-exec-${name}: batch-mode=$mode -> ''${cfg##*/}"
-      exec ${strata}/bin/strata-server --engine strata --config "$cfg" --host 127.0.0.1 --port ${toString port}
+      # The serve layer comes from the SAME package as the engine: 0.2.21
+      # serve speaks 0.2.21 engine's protocol, 0.2.13.1 serve speaks
+      # 0.1.59.1's.  Pairing them per entry is what lets the q36-256k unit run
+      # engine 0.1.67 while every Flash-Next unit stays on the pinned build.
+      exec ${mm.package or strata}/bin/strata-server --engine strata --config "$cfg" --host 127.0.0.1 --port ${toString port}
     '';
-  strataExec = execFor "primary" configFile configFileBatch primaryPort;
+  strataExec = execFor "primary" configFile configFileBatch primaryPort m;
   execForPartner =
     p:
     execFor p.key (pkgs.writeText "strata-${p.key}.json" (
       builtins.toJSON p.solo
-    )) (pkgs.writeText "strata-${p.key}-batch2.json" (builtins.toJSON p.batch)) p.port;
+    )) (pkgs.writeText "strata-${p.key}-batch2.json" (builtins.toJSON p.batch)) p.port p.mm;
 
   # The shim's routing table (read at its ExecStart via SWAP_CONFIG): the ids
   # clients put in `"model"` are exactly the configs' model_name values, which
@@ -964,8 +1203,18 @@ let
       ]
       ++ (map (p: p.port) partnerModels)
       ++ (map (e: e.port) config.ai.swapEngines);
+      allIds = [
+        m.modelName
+      ]
+      ++ (map (p: p.mm.modelName) partnerModels)
+      ++ (map (e: e.id) config.ai.swapEngines);
     in
     assert (lib.all (p: lib.count (q: q == p) allPorts == 1) allPorts);
+    # ... and every `model` a client can put in a request resolves to exactly
+    # one unit. Two entries over the same GGUF (the fp8/fp4 pair) make this
+    # worth asserting: the shim routes by this id, so a duplicate would send
+    # half the traffic to whichever unit the table happens to hit first.
+    assert (lib.all (i: lib.count (j: j == i) allIds == 1) allIds);
     pkgs.writeText "strata-swap.json" (
       builtins.toJSON {
         models = [

@@ -555,6 +555,16 @@
         (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-inkling-package.nix
           { };
 
+      # Build the Qwen3.6-35B-A3B own-path engine at 0.2.21 (strata-q36 +
+      # serve) on its own: nix build .#strata-q36
+      # (hosts/zen3-nixos/ai/strata.nix callPackages the same file for the
+      # 256K q36 swap lane; the GGUF is NOT built here — it lives on disk,
+      # scripts/fetch-strata-qwen36-35b-a3b.sh).  Same source tree as
+      # .#strata-inkling, different cmake target.
+      packages.x86_64-linux.strata-q36 =
+        (mkPkgs nixpkgs).callPackage ./hosts/zen3-nixos/ai/strata-q36-package.nix
+          { };
+
       # Build Avalon's llama-server (the Qwen3.8-Flash-Next fork) on its own:
       #   nix build .#avalon
       # (the NixOS module in hosts/zen3-nixos/ai/avalon.nix callPackages the

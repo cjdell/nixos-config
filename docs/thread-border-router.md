@@ -107,8 +107,9 @@ Z-Stack-firmware) with the same command minus the ot_rcp URL.
   `OT_RCP_DEVICE=spinel+hdlc+uart:///dev/otbr-rcp?uart-baudrate=460800`,
   `OT_INFRA_IF=lan`, `OT_THREAD_IF=wpan0`, REST on **127.0.0.1:8081**.
 - State: the agent symlinks `/var/lib/thread → /data/thread`, so the mesh lives
-  in `/srv/otbr/thread`. Back it up like any other /srv data — losing it means
-  recreating the Thread network (and re-commissioning every device).
+  in `/srv/otbr/thread` — the router's nightly borg `backup-srv` job archives
+  `/srv`, so it is automatically in backup (verified: timer active). Losing
+  this means recreating the Thread network (and re-commissioning every device).
 - It also inserts its own `ip6tables` ingress filter (`OT_FORWARD_INGRESS`)
   and the `FORWARD` accepts for egress — that is expected, not stray rules;
   and it starts a **TREL** interface on `lan` alongside the radio.
