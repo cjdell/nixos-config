@@ -79,7 +79,6 @@ in
         "/etc/localtime:/etc/localtime:ro"
       ];
       devices = [
-        rcpDev
         "/dev/net/tun"
       ];
       environment = {
@@ -96,33 +95,69 @@ in
         OT_REST_LISTEN_ADDR = "127.0.0.1";
         OT_REST_LISTEN_PORT = "8081";
       };
+      # ⚠️ `--device` with a SYMLINK source is resolved by podman: bare
+      # --device=/dev/otbr-rcp lands in the container as /dev/ttyUSBn and the
+      # agent ENOENTs on the radio URL (crash loop, observed 2026-11-27).
+      # The explicit :target form is required — verified by podman run test.
       extraOptions = [
         "--network"
         "host"
         "--privileged"
+        "--device=${rcpDev}:${rcpDev}"
       ];
     };
   };
 
-  # The udev symlink only exists while the dongle is plugged in; podman
-  # refuses to create the container without it (missing --device). Default
-  # on-failure would give up — force a retry loop so the BR comes back by
-  # itself (within RestartSec) after a re-plug, with nothing to edit.
-  systemd.services.podman-otbr = lib.optionalAttrs (rcpSerial != "") {
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    serviceConfig = {
-      Restart = lib.mkForce "always";
-      RestartSec = 10;
+  # Do NOT let the container unit start during activation: the first switch failed the
+  # whole `switch-to-configuration` run when podman errored on a missing device, and the
+  # auto-rollback timer then rebooted the router off the half-switched generation five
+  # minutes later. Instead it is pulled exclusively by the path unit below, so activation
+  # can never fail on radio presence. Restart=always still covers transient create
+  # failures at runtime. (Note the whole sets are optionalAttrs-gated: per-name
+  # `optionalAttrs` would still register default-only empty units when disabled.)
+  systemd.services = lib.optionalAttrs (rcpSerial != "") {
+    podman-otbr = {
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      wantedBy = lib.mkForce [ ];
+      serviceConfig = {
+        Restart = lib.mkForce "always";
+        RestartSec = 10;
+      };
+    };
+
+    # Device-driven lifecycle: fires at boot when /dev/otbr-rcp exists, and on
+    # every plug/re-plug (the udev symlink re-appearing counts as a change).
+    # try-restart = start when down, restart when up — the latter matters because
+    # podman binds the *resolved* device node at create time, so a re-seated
+    # stick (new tty inode) needs the container recreated to see it again.
+    otbr-rcp-plug = {
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.systemd}/bin/systemctl try-restart podman-otbr.service";
+      };
     };
   };
 
-  systemd.tmpfiles.settings."10-otbr" = lib.optionalAttrs (rcpSerial != "") {
-    ${stateDir} = {
-      d = {
-        user = "root";
-        group = "users";
-        mode = "0755";
+  systemd.paths = lib.optionalAttrs (rcpSerial != "") {
+    otbr-rcp = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        PathExistsGlob = rcpDev;
+        PathChanged = rcpDev;
+        Unit = "otbr-rcp-plug.service";
+      };
+    };
+  };
+
+  systemd.tmpfiles.settings = lib.optionalAttrs (rcpSerial != "") {
+    "10-otbr" = {
+      ${stateDir} = {
+        d = {
+          user = "root";
+          group = "users";
+          mode = "0755";
+        };
       };
     };
   };

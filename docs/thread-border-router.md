@@ -139,6 +139,31 @@ add-on — the equivalent core-integration route:
    devices directly too — the phone reads the dataset from the Thread
    integration, the BLE work is done by HA's server-side Bluetooth.
 
+## Deployment incident, 2026-11-27 (read before touching otbr.nix)
+
+The first switch half-succeeded and then rolled itself back:
+
+1. `switch-to-configuration` **starts new enabled units during activation** —
+   `podman-otbr` was one, and the udev symlink did not exist at that moment
+   (rules were written to /etc but the running tty device had never been
+   re-triggered), so podman errored (`stat /dev/otbr-rcp: no such file`), the
+   start-unit failed, and the switch aborted **after** the profile symlink had
+   already moved to the new generation.
+2. Five minutes later the auto-rollback timer saw `profile ≠ system-good` and
+   **rebooted the router back to the last confirmed generation** — as designed,
+   but it means a failing service unit on this host does not merely "fail
+   softly", it reverses the whole deployment.
+3. The container itself then crash-looped on `hdlc_interface.cpp:157 ... No
+   such file or directory`: podman resolves SYMLINK `--device` sources, so the
+   node landed in the container as `/dev/ttyUSBn`, not `/dev/otbr-rcp`.
+
+Fixes now in the module: `podman-otbr` is `wantedBy = [ ]` and is pulled only
+by the `otbr-rcp.path` unit (`PathExistsGlob`/`PathChanged` →
+`systemctl try-restart podman-otbr`) — activation can never fail on radio
+presence again; the device is bound `--device=/dev/otbr-rcp:/dev/otbr-rcp`
+(explicit target). The path trigger also recreates the container on re-seat,
+which matters because the bind pins the resolved inode.
+
 ## Bring-up (firmware is done — what remains once the stick moves)
 
 ```sh
@@ -147,7 +172,13 @@ add-on — the equivalent core-integration route:
 ssh -A -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'cd nixos-config && git pull --ff-only && sudo nixos-rebuild switch --flake .'
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 sudo nixos-confirm
-# 3. verify on the router — podman-otbr self-heals within 10 s of the symlink:
+# 2b. on the FIRST switch after these udev rules deploy, nudge the already-
+#     plugged device so the symlink is created (the running device predates the
+#     rules; reboot/re-seat also works):
+ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
+  'sudo udevadm trigger --action=change --sysname-match=ttyUSB2; ls -l /dev/otbr-rcp'
+# 3. verify on the router — the otbr-rcp path unit starts the container for
+#    you (it is NOT enabled directly; see the incident section):
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'ls -l /dev/otbr-rcp; curl -s http://127.0.0.1:8081/node | jq ".node_state"; sudo podman logs --tail 30 podman-otbr'   # 4 once the mesh is up
 # 4. HA UI: add "OpenThread Border Router" integration (http://127.0.0.1:8081)
