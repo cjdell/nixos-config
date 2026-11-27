@@ -159,10 +159,16 @@ The first switch half-succeeded and then rolled itself back:
 
 Fixes now in the module: `podman-otbr` is `wantedBy = [ ]` and is pulled only
 by the `otbr-rcp.path` unit (`PathExistsGlob`/`PathChanged` →
-`systemctl try-restart podman-otbr`) — activation can never fail on radio
+`systemctl restart podman-otbr otbr-form`) — activation can never fail on radio
 presence again; the device is bound `--device=/dev/otbr-rcp:/dev/otbr-rcp`
 (explicit target). The path trigger also recreates the container on re-seat,
-which matters because the bind pins the resolved inode.
+which matters because the bind pins the resolved inode. Two follow-on findings
+that same night: `systemctl try-restart` is a **silent no-op on an inactive
+unit** (it must be plain `restart` here, and the plug unit runs with
+`StartLimitIntervalSec=0` because one physical plug emits several change
+events); and upstream OTBR does **not** form a Thread network on an empty
+dataset — the `otbr-form` oneshot (idempotent, greps `networkkey`) does the
+one-time `dataset init new → commit → ifconfig up → thread start`.
 
 ## Bring-up (firmware is done — what remains once the stick moves)
 

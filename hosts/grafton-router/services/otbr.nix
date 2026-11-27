@@ -126,15 +126,46 @@ in
       };
     };
 
-    # Device-driven lifecycle: fires at boot when /dev/otbr-rcp exists, and on
-    # every plug/re-plug (the udev symlink re-appearing counts as a change).
-    # try-restart = start when down, restart when up — the latter matters because
-    # podman binds the *resolved* device node at create time, so a re-seated
-    # stick (new tty inode) needs the container recreated to see it again.
-    otbr-rcp-plug = {
+    # Upstream OTBR (unlike the HAOS add-on) does NOT form a network when the
+    # persisted dataset is empty — an unplugged-then-plugged fresh stick sits
+    # at state "disabled" forever. This oneshot waits for otbr-agent, then
+    # forms a network exactly when none exists (idempotent: greps networkkey
+    # out of the live dataset). Always exits 0 — formation trouble must never
+    # take the radio unit down with it.
+    otbr-form = {
+      unitConfig.After = [ "podman-otbr.service" ];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${pkgs.systemd}/bin/systemctl try-restart podman-otbr.service";
+        ExecStart = pkgs.writeShellScript "otbr-form" ''
+          set -u
+          podman="${pkgs.podman}/bin/podman"
+          for _ in $(seq 45); do
+            sleep 2
+            "$podman" exec otbr ot-ctl state >/dev/null 2>&1 && break
+          done
+          if ! "$podman" exec otbr ot-ctl dataset info active 2>/dev/null | grep -q networkkey; then
+            "$podman" exec otbr sh -c 'ot-ctl dataset init new >/dev/null && ot-ctl dataset commit active >/dev/null && ot-ctl ifconfig up >/dev/null && ot-ctl thread start >/dev/null' || true
+          fi
+          exit 0
+        '';
+      };
+    };
+
+    # Device-driven lifecycle: fires at boot when /dev/otbr-rcp exists, and on
+    # every plug/re-plug (the udev symlink re-appearing counts as a change).
+    # PLAIN restart, never try-restart: try-restart is a silent no-op on an
+    # inactive unit, and by design podman-otbr is always inactive until the
+    # first event (observed 2026-11-27 — every event did nothing, and five
+    # coalesced no-ops tripped the start limit). Restart also recreates the
+    # container on re-seat, which matters because podman binds the resolved
+    # inode, not the symlink. StartLimitIntervalSec=0: a udev action emits
+    # several change events per plug; bursty triggers are expected, not a
+    # failure condition.
+    otbr-rcp-plug = {
+      unitConfig.StartLimitIntervalSec = 0;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.systemd}/bin/systemctl restart podman-otbr.service otbr-form.service";
       };
     };
   };
