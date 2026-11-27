@@ -86,6 +86,7 @@ All in `hosts/<name>`, on the `192.168.49.0/24` LAN with domain `grafton.lan`; t
 | **kabylakeitx-nixos** | `.55` | folding@home space heater + video workbench (i7-7700, RTX 2060) |
 | **asus-x555la-nixos** | `.70` | e-waste ASUS X555LA laptop (adopted 2026-11-18, no role yet) |
 | **hp-z240-xeon-1240v6-nixos** | `.59` | folding@home space heater (Xeon E3-1240 v6, GTX 1060 console) |
+| **colin** | `.10` on `192.168.178.0/24` (satellite site, not the fleet LAN) | ElectroNerds home server: AdGuard, Frigate, Home Assistant, Jellyfin, Immich, filebrowser, qBittorrent, UniFi, Whoogle, LibreSpeed, Samba, Mosquitto, Postgres, own nginx/ACME edge, WireGuard client, `create_ap` AP. **Fully unified 2026-11-26** (fleet pin, `common/system.nix` + `users/cjdell` via `mkHost`, Immich 3.3.3 + VectorChord; no 25.11 pins left); `system.autoRollback` ON; **builds locally** — `fleetBuildClient.enable = false`. Since 2026-11-26 it *does* reach the fleet LAN (`192.168.49.0/24`) — over the tailnet, via grafton-router's subnet routes (`--accept-routes=true` in `hosts/colin/wireguard.nix`), not the WAN. See `hosts/colin/README.md` |
 | **pi5** | `.92` | aarch64 netboot node — **currently off** (netboot imports commented out) |
 
 Full per-host backstory (what each actually runs, deploy notes, gotchas): **`docs/hosts.md`**.
@@ -106,7 +107,7 @@ Since 2026-10-17 every host in this flake uses zen3-nixos as a remote Nix builde
 
 ## Critical: auto-rollback + `nixos-confirm` (READ THIS FIRST)
 
-`system.autoRollback.enable = true` is set on **N100-NAS** and **grafton-router**. It is **commented out (disabled) on zen3-nixos**. The module comes from the `nixos-utils` flake input.
+`system.autoRollback.enable = true` is set on **N100-NAS**, **grafton-router** and **colin** (live since 2026-11-26 — colin is internet-only, so this is its remote safety net). It is **commented out (disabled) on zen3-nixos**. The module comes from the `nixos-utils` flake input.
 
 - An `auto-rollback.timer` fires **5 minutes after every activation**.
 - It runs `auto-rollback-start`, which compares `/run/current-system` against the symlink `/nix/var/nix/profiles/system-good`. If they differ, it broadcasts a 30-second warning, runs `switch-to-configuration boot` on the good generation, and **reboots the machine**.
