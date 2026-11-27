@@ -22,22 +22,23 @@ const METER_FUNCTION_CODE: u8 = 4;
 /// [`stale_window_ms`]).
 const METER_STALE_FLOOR_MS: u64 = 5_000;
 
-/// The known electrical registers whose *measurement* the plant must never
-/// see frozen: while stale they read 0 W / 0 A everywhere — dashboard, Home
-/// Assistant, and the current/energy registers of the emulated meter line.
-/// Voltage is deliberately absent (a believable voltage keeps the inverters
-/// from tripping a grid fault over the relay's blindness), and so are the
-/// cumulative energy counters inside `R_BULK` — only the two explicitly
-/// defined energy registers are listed, which is what the inverters poll
-/// individually.
-const STALE_ZEROED: &[u16] = &[
-    R_CURRENT,
-    R_ACTIVE_POWER,
-    R_APPARENT_POWER,
-    R_REACTIVE_POWER,
-    R_IMPORT_ACTIVE_ENERGY,
-    R_TOTAL_ACTIVE_ENERGY,
-];
+/// The registers that default to **0** when their freshness window lapses:
+/// the power *flow* — the measurement the plant acts on, and the one the
+/// user asked to default to zero rather than freeze. Everything else on the
+/// meter line keeps its last believable value on purpose: zeroing an energy
+/// *counter* is a reset-lie worse than a slow one, and zeroing apparent or
+/// reactive power while active power is non-zero is physically impossible —
+/// a V=0/0A/45W meter is exactly what a Solis cross-check flags as
+/// `Meter Select Fail` (fault 8217, measured 2026-11-27).
+const STALE_ZEROED: &[u16] = &[R_CURRENT, R_ACTIVE_POWER];
+
+/// What the emulated line serves for grid voltage when this process has
+/// *never* received one (the first fraction of a second after every restart,
+/// while the serial meter is still being polled for the first time): a
+/// believable mains voltage, because "0 V" while the per-inverter PID is
+/// already nudging non-zero watts is the impossible combination that makes
+/// the inverters distrust the meter wholesale (see [`STALE_ZEROED`]).
+const DEFAULT_GRID_VOLTAGE: f32 = 230.0;
 
 /// Freshness window of one meter register: three full polling periods of the
 /// most-often-polled definition that covers it, floored at
@@ -73,15 +74,60 @@ fn is_known_register(register: u16) -> bool {
 }
 
 pub const METER_REGS: &[RegDef] = &[
-    RegDef { function_code: 4, address: R_VOLTAGE, num_regs: 2, interval_ms: 10_000 },
-    RegDef { function_code: 4, address: R_CURRENT, num_regs: 2, interval_ms: 10_000 },
-    RegDef { function_code: 4, address: R_ACTIVE_POWER, num_regs: 2, interval_ms: 50 },
-    RegDef { function_code: 4, address: R_APPARENT_POWER, num_regs: 2, interval_ms: 10_000 },
-    RegDef { function_code: 4, address: R_REACTIVE_POWER, num_regs: 2, interval_ms: 10_000 },
-    RegDef { function_code: 4, address: R_IMPORT_ACTIVE_ENERGY, num_regs: 2, interval_ms: 10_000 },
-    RegDef { function_code: 4, address: R_TOTAL_ACTIVE_ENERGY, num_regs: 2, interval_ms: 10_000 },
-    RegDef { function_code: 4, address: R_BULK, num_regs: 76, interval_ms: 10_000 },
-    RegDef { function_code: 3, address: R_SYSTEM_TYPE, num_regs: 1, interval_ms: 10_000 },
+    RegDef {
+        function_code: 4,
+        address: R_VOLTAGE,
+        num_regs: 2,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_CURRENT,
+        num_regs: 2,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_ACTIVE_POWER,
+        num_regs: 2,
+        interval_ms: 50,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_APPARENT_POWER,
+        num_regs: 2,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_REACTIVE_POWER,
+        num_regs: 2,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_IMPORT_ACTIVE_ENERGY,
+        num_regs: 2,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_TOTAL_ACTIVE_ENERGY,
+        num_regs: 2,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 4,
+        address: R_BULK,
+        num_regs: 76,
+        interval_ms: 10_000,
+    },
+    RegDef {
+        function_code: 3,
+        address: R_SYSTEM_TYPE,
+        num_regs: 1,
+        interval_ms: 10_000,
+    },
 ];
 
 /// A view over the grid meter's cached registers that can build and rewrite
@@ -137,6 +183,19 @@ impl Meter {
                     let byte_index = (*register - req.start_reg) as usize * 2;
                     write_f32_be(&mut regs, byte_index, 0.0);
                 }
+            }
+            // Cold boot: a never-measured voltage must not reach an inverter
+            // as 0.00 V while the nudges are already non-zero watts — see
+            // DEFAULT_GRID_VOLTAGE. A stale-but-known voltage just keeps
+            // serving its last believable value (not in STALE_ZEROED).
+            if req.start_reg == R_VOLTAGE
+                && req.num_regs >= 2
+                && self
+                    .cache
+                    .last_update(METER_FUNCTION_CODE, R_VOLTAGE)
+                    .is_none()
+            {
+                write_f32_be(&mut regs, 0, DEFAULT_GRID_VOLTAGE);
             }
         }
         ModbusResponse::from_regs(req.clone(), regs)
@@ -297,5 +356,31 @@ mod tests {
         assert_eq!(stale_window_ms(R_VOLTAGE), 30_000);
         assert_eq!(stale_window_ms(R_IMPORT_ACTIVE_ENERGY), 30_000);
         assert_eq!(stale_window_ms(R_TOTAL_ACTIVE_ENERGY), 30_000);
+    }
+
+    #[test]
+    fn a_cold_boot_never_serves_a_dead_meter_and_counters_never_reset() {
+        let cache = Arc::new(RegisterCache::new());
+        let meter = Meter::new(Arc::clone(&cache));
+        // The Solis polls its whole meter window within ~2 s of a relay
+        // restart. With nothing measured yet, the line must still read like
+        // a meter on a live grid — never "45 W at 0.00 V", the impossible
+        // combination measured to latch a Solis Meter Select Fail.
+        let cold = meter.build_response(&ModbusRequest::new(1, 4, 0, 76));
+        assert_eq!(read_float(&cold.regs), DEFAULT_GRID_VOLTAGE);
+
+        // Energy is a cumulative counter: staleness keeps the last believable
+        // value rather than resetting it to zero in front of the inverter.
+        cache.store_response(&ModbusResponse::from_regs(
+            ModbusRequest::new(1, 4, R_TOTAL_ACTIVE_ENERGY, 2),
+            (12345.0f32).to_bits().to_be_bytes().to_vec(),
+        ));
+        cache.mark_age(METER_FUNCTION_CODE, R_TOTAL_ACTIVE_ENERGY, 31_000);
+        let res = meter.build_response(&ModbusRequest::new(1, 4, R_TOTAL_ACTIVE_ENERGY, 2));
+        assert_eq!(
+            read_float(&res.regs),
+            12345.0,
+            "a stale counter stays put — resetting it is the worse lie"
+        );
     }
 }

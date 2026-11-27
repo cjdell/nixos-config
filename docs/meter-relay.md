@@ -54,18 +54,28 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
   the mesh quietly. It matches the *device the link resolves to*, so it follows
   radio swaps and can never veto an adapter that might one day carry the meter.
 - **A stale measurement is never served as if it were fresh** (2026-11-27): every
-  meter register carries a staleness window — three polls of the most-often-polled
+  meter register carries a freshness window — three polls of the most-often-polled
   definition covering it, floored at 5 s (`meter.rs::stale_window_ms`) — and when it
-  lapses the value **reads 0** wherever the plant consumes it: dashboard, Home
-  Assistant, and the emulated meter line's current/active/apparent/reactive-power
-  and energy registers. Voltage is deliberately not zeroed (a believable voltage
-  keeps the inverters from tripping a grid fault over the relay's blindness). The
-  central loop meanwhile **holds** (`ControlLaw::hold()`): feeding the made-up 0 W
-  to the PID would chase a grid flow nobody measured, and the per-inverter loops
-  keep nudging at the held targets with *live* battery readings, so the plant stays
-  put instead of steering by the frozen number — which is precisely what the nine
-  hours of 2026-11-27 were doing. `/api/status` carries `meter_stale: true`, and
-  the dashboard wears a red `meter stale · holding` chip.
+  lapses the *flow* registers (active power and current) **read 0** everywhere the
+  plant consumes them: dashboard, Home Assistant, the emulated meter line. The
+  rest of the meter deliberately keeps its last believable value: an energy
+  **counter** reset to zero in front of an inverter is a worse lie than a slow
+  one, and a meter reading 0 VA / 0.00 V while the PID nudges non-zero watts is a
+  physically impossible device. That last case is not theoretical — the first
+  cut of this policy zeroed too much, three relay restarts in five minutes let a
+  Solis cross-check its meter, and **fault 8217 `Meter Select Fail` latched**
+  (with the inverter then refusing to act and the relay-side authority estimates
+  collapsing to their floors — the 2026-09-26 pattern, from the other side). The
+  emulated line also never starts cold: a never-measured voltage is served as a
+  believable 230 V (`DEFAULT_GRID_VOLTAGE`), because the inverters poll the meter
+  within ~2 s of a relay restart and "45 W at 0.00 V" must never be a thing this
+  relay says. The central loop meanwhile **holds** (`ControlLaw::hold()`): feeding
+  the made-up 0 W to the PID would chase a grid flow nobody measured, and the
+  per-inverter loops keep nudging at the held targets with *live* battery
+  readings, so the plant stays put instead of steering by the frozen number —
+  which is precisely what the nine hours of 2026-11-27 were doing. `/api/status`
+  carries `meter_stale: true`, and the dashboard wears a red
+  `meter stale · holding` chip.
 - **It shouts when the plant should not be trusted** (`src/alerts.rs`): a 5 s
   watchdog assembles the problems (stale meter feed, links not online-and-healthy),
   debounces them through `MR_ALERT_GRACE_MS` (60 s — reconnect backoff must never
