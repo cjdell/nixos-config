@@ -158,31 +158,34 @@ The first switch half-succeeded and then rolled itself back:
    node landed in the container as `/dev/ttyUSBn`, not `/dev/otbr-rcp`.
 
 Fixes now in the module: `podman-otbr` is `wantedBy = [ ]` and is pulled only
-by the `otbr-rcp.path` unit (`PathExistsGlob`/`PathChanged` →
-`systemctl restart podman-otbr otbr-form`) — activation can never fail on radio
-presence again; the device is bound `--device=/dev/otbr-rcp:/dev/otbr-rcp`
+by the udev rule (`RUN+="systemd"` + `ENV{SYSTEMD_WANTS}="otbr-rcp-plug.service"`
+— udev's own device-lifecycle hook), plus the `otbr-udev-nudge` oneshot (wanted
+by `multi-user.target`) that fires one `udevadm trigger --action=change` at the
+resolved node, closing the first-deployment gap where the running device
+predates the rule. The device is bound `--device=/dev/otbr-rcp:/dev/otbr-rcp`
 (explicit target). Two follow-on findings that same night: `systemctl
 try-restart` is a **silent no-op on an inactive unit** (it must be plain
 `restart` here); and upstream OTBR does **not** form a Thread network on an
 empty dataset — the `otbr-form` oneshot (idempotent, greps `networkkey`) does
 the one-time `dataset init new → commit → ifconfig up → thread start`.
 
-Then the killer: **watching `/dev/otbr-rcp` with the container running is a
-restart feedback loop.** With path-armed + container-up and nothing else
-touching the box, plug fired every ~7 s forever; kernel uevents: zero; symlink
-inode/mtime: frozen since creation — i.e. create/change events materialize on
-the *resolved* device symlink's name from inside the privileged container's
-device handling, with no udev involvement. (Mechanism never pinned down; the
-fix is to not watch that path.) The path unit now watches the kernel's
-**`/dev/serial/by-id/…` symlink** instead — removed/recreated by udev on every
-genuine attach, and untouchable by podman — and the plug unit carries a
-**device-generation guard** (`stat -c %i:%Z` of the resolved node vs
-`/run/otbr-rcp-plug.state`): repeat events on the same stick with the unit
-active exit 0, so only a new device node or a downed unit restarts anything.
-That same guard makes `StartLimitIntervalSec=0` harmless even under a spurious
-storm. As a side benefit the plug script self-runs `udevadm trigger` on the
-resolved node, so the first switch that ships the udev rule needs **no manual
-trigger step** anymore.
+Then the real killer, with a root cause worth remembering: **a `systemd.path`
+unit using `PathExistsGlob=…` + a `Type=oneshot` trigger service loops
+forever** — systemd.path(5): the Exists condition is checked not only on
+inotify events but *whenever the triggered unit deactivates*. The plug oneshot
+finishes → re-armed → fires again, at script-execution speed (measured 2757
+activations in ~2 min once the guard made runs ~10 ms instead of a 7 s
+container restart; zero kernel uevents, every watched inode/mtime frozen the
+whole time — the container and podman were innocent throughout, and moving
+the watch from `/dev/otbr-rcp` to the by-id symlink changed nothing, which is
+the clue that should have pointed here first). `StartLimitIntervalSec=0`,
+which was added to absorb "bursty" udev events, then removed systemd's own
+fuse. The module now has **no path units**; the plug unit additionally keeps
+the device-generation guard (`stat -c %i:%Z` vs `/run/otbr-rcp-plug.state`),
+so even the intended events (boot coldplug, nudge, every change uevent) are
+verified no-ops unless the device node is genuinely new or the container is
+down. And the plug script must **never** run `udevadm trigger` — the trigger
+inside the unit its own rule starts is the same loop wearing a different hat.
 
 ## Bring-up (firmware is done — what remains once the stick moves)
 
@@ -192,13 +195,13 @@ trigger step** anymore.
 ssh -A -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'cd nixos-config && git pull --ff-only && sudo nixos-rebuild switch --flake .'
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 sudo nixos-confirm
-# 2b. nothing else needed: the otbr-rcp path unit fires at activation (the
-#     by-id symlink already exists for an attached stick) and the plug script
-#     self-runs `udevadm trigger` so /dev/otbr-rcp appears even when the
-#     running device predates the udev rule.
-# 3. verify on the router — the otbr-rcp path unit starts the container for
-#    you (it is NOT enabled directly; see the incident section). Give the
-#    restart+form chain ~30 s, then:
+# 2b. nothing else needed: the udev rule (RUN+="systemd" → otbr-rcp-plug)
+#     handles boot and re-seat; the otbr-udev-nudge oneshot (started at
+#     activation AND boot) fires one change uevent at the running device, so
+#     even the FIRST switch that ships the rule needs no manual nudge.
+# 3. verify on the router — the chain (nudge → udev → plug) starts the
+#    container for you; podman-otbr itself is NOT enabled directly (see the
+#    incident section). Give the restart+form chain ~30 s, then:
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'ls -l /dev/otbr-rcp; systemctl is-active podman-otbr otbr-form; sudo podman exec otbr ot-ctl state; curl -s http://127.0.0.1:8081/node | grep -E "state|networkName"'
 #    (container is named "otbr"; podman-otbr is the unit. REST key is "state".)

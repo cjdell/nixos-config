@@ -53,12 +53,8 @@ let
   rcpDev = "/dev/otbr-rcp";
 
   # Kernel-managed udev symlink for this exact stick (verified name on
-  # grafton-router). The path unit watches THIS, never rcpDev: while the
-  # privileged container runs, repeated create/change events materialize on
-  # /dev/otbr-rcp with no udev event and no visible inode/mtime change
-  # (measured 2026-11-27 — plug fired every ~7 s with the container up, zero
-  # kernel uevents, symlink inode frozen). Whatever crun/podman does to the
-  # resolved node, nothing ever touches /dev/serial/by-id.
+  # grafton-router) — used by otbr-udev-nudge to find the device without
+  # hardcoding the ttyUSB minor.
   rcpById = "/dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_${rcpSerial}-if00-port0";
 
   # docker.io/openthread/border-router:latest as of 2026-11-24 (re-pin with
@@ -69,9 +65,16 @@ let
   stateDir = "/srv/otbr";
 in
 {
+  # RUN+="systemd" + SYSTEMD_WANTS is udev's own device-lifecycle hook: the
+  # plug unit starts on add/change uevents for THIS stick only, with no
+  # inotify involved. Do NOT replace this with a systemd .path unit:
+  # PathExistsGlob re-triggers whenever the triggered unit *deactivates*, so
+  # a Type=oneshot plug service loops at script-execution speed (~2757
+  # activations in 2 min measured 2026-11-27 — systemd.path(5) semantics, no
+  # udev/kernel/container involvement; full story in docs/thread-border-router.md).
   services.udev.extraRules = lib.optionalString (rcpSerial != "") ''
     # Sonoff ZBDongle-P running OpenThread RCP → ${rcpDev} (services/otbr.nix)
-    SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="${rcpSerial}", SYMLINK+="${lib.strings.removePrefix "/dev/" rcpDev}", MODE="0660"
+    SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="${rcpSerial}", SYMLINK+="${lib.strings.removePrefix "/dev/" rcpDev}", MODE="0660", TAG+="systemd", RUN+="systemd", ENV{SYSTEMD_WANTS}="otbr-rcp-plug.service"
   '';
 
   virtualisation.oci-containers.containers = lib.optionalAttrs (rcpSerial != "") {
@@ -120,7 +123,8 @@ in
   # Do NOT let the container unit start during activation: the first switch failed the
   # whole `switch-to-configuration` run when podman errored on a missing device, and the
   # auto-rollback timer then rebooted the router off the half-switched generation five
-  # minutes later. Instead it is pulled exclusively by the path unit below, so activation
+  # minutes later. Instead it is pulled exclusively by the udev rule (above)
+  # and the plug/nudge chain (below): activation
   # can never fail on radio presence. Restart=always still covers transient create
   # failures at runtime. (Note the whole sets are optionalAttrs-gated: per-name
   # `optionalAttrs` would still register default-only empty units when disabled.)
@@ -164,21 +168,21 @@ in
       };
     };
 
-    # Device-driven lifecycle: fires at boot when the stick is attached, and
-    # on every re-seat (the by-id symlink is removed/recreated by udev).
+    # Started by the udev rule (RUN+="systemd" + SYSTEMD_WANTS) on add/change
+    # uevents for this exact stick: boot coldplug, every re-seat, and the
+    # nudge unit below. It NEVER runs udevadm itself — a trigger inside the
+    # unit its own rule starts would close the loop and storm (that is how
+    # the .path-unit restart feedback bit; docs/thread-border-router.md).
     # PLAIN restart, never try-restart: try-restart is a silent no-op on an
     # inactive unit, and by design podman-otbr is always inactive until the
     # first event (observed 2026-11-27 — every event did nothing, and five
     # coalesced no-ops tripped the start limit). Restart also recreates the
     # container on re-seat, which matters because podman binds the resolved
     # inode, not the symlink. StartLimitIntervalSec=0: one physical plug
-    # emits several change events; bursty triggers are expected, not a fault.
-    # The device-generation guard (stat inode:ctime vs /run state) makes
-    # repeat events on the SAME stick a no-op, so even a spurious trigger
-    # storm cannot churn the container — only a genuinely new device node or
-    # a downed unit causes a restart. The udevadm self-trigger covers the one
-    # window where the symlink lags: right after the first switch that ships
-    # the udev rule, the already-running device predates it.
+    # emits several change events; bursts are expected, not a fault. The
+    # device-generation guard (stat inode:ctime vs /run state) makes repeat
+    # events on the SAME stick a no-op, so only a genuinely new device node
+    # or a downed unit causes a container restart.
     otbr-rcp-plug = {
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
@@ -186,16 +190,8 @@ in
         ExecStart = pkgs.writeShellScript "otbr-rcp-plug" ''
           set -u
           systemd="${pkgs.systemd}/bin"
-          byid="${rcpById}"
-          dev=""
-          for _ in $(seq 20); do
-            dev=$(readlink -f "$byid" 2>/dev/null || true)
-            [ -n "$dev" ] && break
-            sleep 0.5
-          done
-          if [ -n "$dev" ]; then
-            "$systemd/udevadm" trigger --action=change "$dev" 2>/dev/null || true
-          fi
+          # udev created ${rcpDev} as part of the very event that started
+          # this unit; the loop is belt-and-braces only.
           for _ in $(seq 20); do
             [ -e ${rcpDev} ] && break
             sleep 0.5
@@ -212,15 +208,30 @@ in
         '';
       };
     };
-  };
 
-  systemd.paths = lib.optionalAttrs (rcpSerial != "") {
-    otbr-rcp = {
+    # Closes the one gap udev cannot: the FIRST deployment of the udev rule
+    # — the already-running device predates the rule, so no uevent ever
+    # reaches it. Wanted by multi-user.target, so `switch` starts it (a new
+    # unit IS started at activation, and unlike the container unit this
+    # oneshot cannot fail on device presence: it exits 0 regardless). It
+    # resolves the stick via the kernel's by-id symlink and fires one change
+    # uevent at exactly that device — the rule then does the rest.
+    otbr-udev-nudge = {
       wantedBy = [ "multi-user.target" ];
-      pathConfig = {
-        PathExistsGlob = rcpById;
-        PathChanged = rcpById;
-        Unit = "otbr-rcp-plug.service";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "otbr-udev-nudge" ''
+          set -u
+          for _ in $(seq 10); do
+            dev=$(readlink -f "${rcpById}" 2>/dev/null || true)
+            if [ -n "$dev" ]; then
+              ${pkgs.systemd}/bin/udevadm trigger --action=change "$dev" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 0 # absent: a later add uevent covers it
+        '';
       };
     };
   };
