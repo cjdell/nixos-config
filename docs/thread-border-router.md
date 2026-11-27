@@ -161,14 +161,28 @@ Fixes now in the module: `podman-otbr` is `wantedBy = [ ]` and is pulled only
 by the `otbr-rcp.path` unit (`PathExistsGlob`/`PathChanged` →
 `systemctl restart podman-otbr otbr-form`) — activation can never fail on radio
 presence again; the device is bound `--device=/dev/otbr-rcp:/dev/otbr-rcp`
-(explicit target). The path trigger also recreates the container on re-seat,
-which matters because the bind pins the resolved inode. Two follow-on findings
-that same night: `systemctl try-restart` is a **silent no-op on an inactive
-unit** (it must be plain `restart` here, and the plug unit runs with
-`StartLimitIntervalSec=0` because one physical plug emits several change
-events); and upstream OTBR does **not** form a Thread network on an empty
-dataset — the `otbr-form` oneshot (idempotent, greps `networkkey`) does the
-one-time `dataset init new → commit → ifconfig up → thread start`.
+(explicit target). Two follow-on findings that same night: `systemctl
+try-restart` is a **silent no-op on an inactive unit** (it must be plain
+`restart` here); and upstream OTBR does **not** form a Thread network on an
+empty dataset — the `otbr-form` oneshot (idempotent, greps `networkkey`) does
+the one-time `dataset init new → commit → ifconfig up → thread start`.
+
+Then the killer: **watching `/dev/otbr-rcp` with the container running is a
+restart feedback loop.** With path-armed + container-up and nothing else
+touching the box, plug fired every ~7 s forever; kernel uevents: zero; symlink
+inode/mtime: frozen since creation — i.e. create/change events materialize on
+the *resolved* device symlink's name from inside the privileged container's
+device handling, with no udev involvement. (Mechanism never pinned down; the
+fix is to not watch that path.) The path unit now watches the kernel's
+**`/dev/serial/by-id/…` symlink** instead — removed/recreated by udev on every
+genuine attach, and untouchable by podman — and the plug unit carries a
+**device-generation guard** (`stat -c %i:%Z` of the resolved node vs
+`/run/otbr-rcp-plug.state`): repeat events on the same stick with the unit
+active exit 0, so only a new device node or a downed unit restarts anything.
+That same guard makes `StartLimitIntervalSec=0` harmless even under a spurious
+storm. As a side benefit the plug script self-runs `udevadm trigger` on the
+resolved node, so the first switch that ships the udev rule needs **no manual
+trigger step** anymore.
 
 ## Bring-up (firmware is done — what remains once the stick moves)
 
@@ -178,15 +192,16 @@ one-time `dataset init new → commit → ifconfig up → thread start`.
 ssh -A -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'cd nixos-config && git pull --ff-only && sudo nixos-rebuild switch --flake .'
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 sudo nixos-confirm
-# 2b. on the FIRST switch after these udev rules deploy, nudge the already-
-#     plugged device so the symlink is created (the running device predates the
-#     rules; reboot/re-seat also works):
-ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
-  'sudo udevadm trigger --action=change --sysname-match=ttyUSB2; ls -l /dev/otbr-rcp'
+# 2b. nothing else needed: the otbr-rcp path unit fires at activation (the
+#     by-id symlink already exists for an attached stick) and the plug script
+#     self-runs `udevadm trigger` so /dev/otbr-rcp appears even when the
+#     running device predates the udev rule.
 # 3. verify on the router — the otbr-rcp path unit starts the container for
-#    you (it is NOT enabled directly; see the incident section):
+#    you (it is NOT enabled directly; see the incident section). Give the
+#    restart+form chain ~30 s, then:
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
-  'ls -l /dev/otbr-rcp; curl -s http://127.0.0.1:8081/node | jq ".node_state"; sudo podman logs --tail 30 podman-otbr'   # 4 once the mesh is up
+  'ls -l /dev/otbr-rcp; systemctl is-active podman-otbr otbr-form; sudo podman exec otbr ot-ctl state; curl -s http://127.0.0.1:8081/node | grep -E "state|networkName"'
+#    (container is named "otbr"; podman-otbr is the unit. REST key is "state".)
 # 4. HA UI: add "OpenThread Border Router" integration (http://127.0.0.1:8081)
 #    → Thread integration appears → set preferred network → Matter → Add device.
 ```

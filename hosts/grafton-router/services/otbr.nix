@@ -52,6 +52,15 @@ let
   rcpSerial = "d01311ed57c9eb1198a28b4f1d69213e";
   rcpDev = "/dev/otbr-rcp";
 
+  # Kernel-managed udev symlink for this exact stick (verified name on
+  # grafton-router). The path unit watches THIS, never rcpDev: while the
+  # privileged container runs, repeated create/change events materialize on
+  # /dev/otbr-rcp with no udev event and no visible inode/mtime change
+  # (measured 2026-11-27 — plug fired every ~7 s with the container up, zero
+  # kernel uevents, symlink inode frozen). Whatever crun/podman does to the
+  # resolved node, nothing ever touches /dev/serial/by-id.
+  rcpById = "/dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_${rcpSerial}-if00-port0";
+
   # docker.io/openthread/border-router:latest as of 2026-11-24 (re-pin with
   # nix shell nixpkgs#skopeo --command skopeo inspect
   #   docker://docker.io/openthread/border-router:latest)
@@ -131,15 +140,19 @@ in
     # at state "disabled" forever. This oneshot waits for otbr-agent, then
     # forms a network exactly when none exists (idempotent: greps networkkey
     # out of the live dataset). Always exits 0 — formation trouble must never
-    # take the radio unit down with it.
+    # take the radio unit down with it. TimeoutStartSec is explicit because
+    # the wait loop is ~60 s of headroom and must stay under systemd's
+    # default 90 s start timeout (a unit killed mid-form looks like a
+    # formation failure but is a timeout artefact).
     otbr-form = {
       unitConfig.After = [ "podman-otbr.service" ];
       serviceConfig = {
         Type = "oneshot";
+        TimeoutStartSec = 150;
         ExecStart = pkgs.writeShellScript "otbr-form" ''
           set -u
           podman="${pkgs.podman}/bin/podman"
-          for _ in $(seq 45); do
+          for _ in $(seq 30); do
             sleep 2
             "$podman" exec otbr ot-ctl state >/dev/null 2>&1 && break
           done
@@ -151,21 +164,52 @@ in
       };
     };
 
-    # Device-driven lifecycle: fires at boot when /dev/otbr-rcp exists, and on
-    # every plug/re-plug (the udev symlink re-appearing counts as a change).
+    # Device-driven lifecycle: fires at boot when the stick is attached, and
+    # on every re-seat (the by-id symlink is removed/recreated by udev).
     # PLAIN restart, never try-restart: try-restart is a silent no-op on an
     # inactive unit, and by design podman-otbr is always inactive until the
     # first event (observed 2026-11-27 — every event did nothing, and five
     # coalesced no-ops tripped the start limit). Restart also recreates the
     # container on re-seat, which matters because podman binds the resolved
-    # inode, not the symlink. StartLimitIntervalSec=0: a udev action emits
-    # several change events per plug; bursty triggers are expected, not a
-    # failure condition.
+    # inode, not the symlink. StartLimitIntervalSec=0: one physical plug
+    # emits several change events; bursty triggers are expected, not a fault.
+    # The device-generation guard (stat inode:ctime vs /run state) makes
+    # repeat events on the SAME stick a no-op, so even a spurious trigger
+    # storm cannot churn the container — only a genuinely new device node or
+    # a downed unit causes a restart. The udevadm self-trigger covers the one
+    # window where the symlink lags: right after the first switch that ships
+    # the udev rule, the already-running device predates it.
     otbr-rcp-plug = {
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${pkgs.systemd}/bin/systemctl restart podman-otbr.service otbr-form.service";
+        ExecStart = pkgs.writeShellScript "otbr-rcp-plug" ''
+          set -u
+          systemd="${pkgs.systemd}/bin"
+          byid="${rcpById}"
+          dev=""
+          for _ in $(seq 20); do
+            dev=$(readlink -f "$byid" 2>/dev/null || true)
+            [ -n "$dev" ] && break
+            sleep 0.5
+          done
+          if [ -n "$dev" ]; then
+            "$systemd/udevadm" trigger --action=change "$dev" 2>/dev/null || true
+          fi
+          for _ in $(seq 20); do
+            [ -e ${rcpDev} ] && break
+            sleep 0.5
+          done
+          state=/run/otbr-rcp-plug.state
+          cur=$(stat -c "%i:%Z" ${rcpDev} 2>/dev/null || echo gone)
+          if [ "$cur" != gone ] \
+            && [ "$(cat "$state" 2>/dev/null || echo none)" = "$cur" ] \
+            && "$systemd/systemctl" is-active --quiet podman-otbr.service; then
+            exit 0
+          fi
+          echo "$cur" >"$state"
+          exec "$systemd/systemctl" restart podman-otbr.service otbr-form.service
+        '';
       };
     };
   };
@@ -174,8 +218,8 @@ in
     otbr-rcp = {
       wantedBy = [ "multi-user.target" ];
       pathConfig = {
-        PathExistsGlob = rcpDev;
-        PathChanged = rcpDev;
+        PathExistsGlob = rcpById;
+        PathChanged = rcpById;
         Unit = "otbr-rcp-plug.service";
       };
     };
