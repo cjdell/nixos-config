@@ -124,6 +124,7 @@ impl Controller {
                 Arc::clone(&driver) as Arc<dyn Inverter>,
                 Arc::clone(&meter),
                 inverter.reverse,
+                inverter.meter_dialect,
             );
 
             inverters.push(InverterRuntime {
@@ -323,6 +324,7 @@ impl Controller {
                 inverter = inverter.id(),
                 endpoint = %endpoint,
                 identified,
+                meter_dialect = inverter.cfg.meter_dialect.name,
                 "inverter meter line connection started"
             );
         }

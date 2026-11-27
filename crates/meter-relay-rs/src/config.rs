@@ -48,6 +48,12 @@ pub struct InverterConfig {
     /// to tell one inverter's meter line from another's when the endpoint
     /// enumeration has shuffled. `MR_<ID>_METER_POLL` overrides it.
     pub meter_poll: Vec<(u8, u16, u16)>,
+    /// The meter *dialect* served on this inverter's meter line — which
+    /// register positions carry volts/amps/watts in the inverter's address
+    /// space, and therefore where this line's PID nudge rides. Selected by
+    /// `MR_<ID>_METER_DIALECT` (`eem` is the historical single-phase map
+    /// every line used before three-phase inverters joined the plant).
+    pub meter_dialect: &'static crate::meter::MeterDialect,
 }
 
 impl InverterConfig {
@@ -576,6 +582,13 @@ fn load_inverters(
 
         let driver = optional(&var("DRIVER"), id).to_ascii_lowercase();
         let defaults = driver_defaults(&driver)?;
+        let dialect_name = optional(&var("METER_DIALECT"), "eem").to_ascii_lowercase();
+        let meter_dialect = crate::meter::meter_dialect(&dialect_name).ok_or_else(|| {
+            anyhow!(
+                "{} names unknown meter dialect {dialect_name:?}; known: eem, sdm630",
+                var("METER_DIALECT")
+            )
+        })?;
         let meter_poll = match optional(&var("METER_POLL"), "") {
             spec if spec.trim().is_empty() => driver_meter_poll(&driver),
             spec => parse_meter_poll(&spec)
@@ -594,6 +607,7 @@ fn load_inverters(
             ha_prefix: optional(&var("HA_PREFIX"), defaults.ha_prefix),
             probe_regs: inverters::probe_regs(&driver)?,
             meter_poll,
+            meter_dialect,
             policy,
         });
     }
@@ -756,6 +770,40 @@ mod tests {
         assert!(
             error.to_string().contains("fronius"),
             "the message should name the driver: {error}"
+        );
+    }
+
+    #[test]
+    fn a_three_phase_inverter_selects_its_meter_dialect() {
+        let inverters = plant(&[
+            ("MR_INVERTERS", "solis,solax,solis2"),
+            ("MR_SOLIS2_DRIVER", "solis"),
+            ("MR_SOLIS2_PORT", "2003"),
+            ("MR_SOLIS2_SLAVE", "3"),
+            ("MR_SOLIS2_METER_DIALECT", "sdm630"),
+            ("MR_SOLIS2_METER_POLL", "4:0:6,4:12:6,4:18:6,4:52:6"),
+        ])
+        .expect("the 2026-11-27 three-inverter plant should configure");
+
+        assert_eq!(inverters[2].meter_dialect.name, "sdm630");
+        assert_eq!(
+            inverters[2].meter_poll,
+            vec![(4, 0, 6), (4, 12, 6), (4, 18, 6), (4, 52, 6)]
+        );
+        assert_eq!(
+            inverters[0].meter_dialect.name, "eem",
+            "the lines that predate the S6 keep the map they were tuned against"
+        );
+
+        let error = plant(&[
+            ("MR_INVERTERS", "solis,solax,solis2"),
+            ("MR_SOLIS2_DRIVER", "solis"),
+            ("MR_SOLIS2_METER_DIALECT", "modbus-plus"),
+        ])
+        .expect_err("an invented dialect must not start the plant");
+        assert!(
+            error.to_string().contains("modbus-plus"),
+            "the message should name the dialect: {error}"
         );
     }
 

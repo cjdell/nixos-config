@@ -1153,6 +1153,65 @@ mod tests {
         }
     }
 
+    // The 2026-11-27 third inverter: an S6 Solis whose SDM630 polls share
+    // start addresses with the other two lines (it bulk-reads from 0x00 and
+    // 0x0C like the others — only the register COUNTS differ), and whose
+    // configured hint port is wrong because the pi's adapter order shuffled
+    // across a reboot. The fingerprints still have to place all three.
+    #[test]
+    fn three_overlapping_meter_lines_place_by_fingerprint_not_by_hint() {
+        let mut plant = plant();
+        plant.inverters.push(fingerprint(
+            "solis2",
+            3,
+            &[(4, 0, 6), (4, 12, 6), (4, 18, 6), (4, 52, 6)],
+            2003,
+        ));
+
+        let gathered = vec![
+            // The S6's traffic lands on the port configured for the old Solis…
+            heard(
+                Endpoint::tcp("192.168.49.30", 2000),
+                Some(Hint::Inverter("solis".into())),
+                &[(4, 0, 6), (4, 12, 6), (4, 18, 6), (4, 52, 6)],
+            ),
+            // …the old Solis's on the port configured for the new one…
+            heard(
+                Endpoint::tcp("192.168.49.30", 2003),
+                Some(Hint::Inverter("solis2".into())),
+                &[(4, 342, 2), (4, 0, 76)],
+            ),
+            heard(
+                Endpoint::tcp("192.168.49.30", 2001),
+                Some(Hint::Inverter("solax".into())),
+                &[(4, 12, 2), (3, 11, 1)],
+            ),
+            silent(
+                Endpoint::tcp("192.168.49.30", 2002),
+                Some(Hint::Stats),
+                stats_probe(&[("solax", 1), ("solis", 2), ("solis2", 3)]),
+            ),
+            grid_meter_candidate(),
+        ];
+
+        let decision = decide(&plant, &gathered);
+        assert!(
+            decision.unidentified_required.is_empty(),
+            "{:?}",
+            decision.log
+        );
+
+        let solis = find(&decision, Role::MeterEmulator, Some("solis"));
+        assert_eq!(solis.endpoint, Some(Endpoint::tcp("192.168.49.30", 2003)));
+        let solis2 = find(&decision, Role::MeterEmulator, Some("solis2"));
+        assert_eq!(solis2.endpoint, Some(Endpoint::tcp("192.168.49.30", 2000)));
+        let solax = find(&decision, Role::MeterEmulator, Some("solax"));
+        assert_eq!(solax.endpoint, Some(Endpoint::tcp("192.168.49.30", 2001)));
+        for assignment in [&solis, &solis2, &solax] {
+            assert_eq!(assignment.identification.method, "listen_fingerprint");
+        }
+    }
+
     fn find<'a>(decision: &'a Decision, role: Role, identity: Option<&str>) -> &'a Assignment {
         decision
             .assignments

@@ -48,13 +48,13 @@ let
     # seen also needs its meter polls written down (MR_<ID>_METER_POLL, measured
     # with crates/meter-relay-rs/scripts/capture-serial.py) or discovery cannot
     # tell its meter line from another inverter's.
-    MR_INVERTERS = "solis,solax";
+    MR_INVERTERS = "solis,solax,solis2";
     MR_INVERTER_HOST = "192.168.49.30";
 
     # --- Which endpoint is which (startup auto-detection) --------------------
-    # The inverter-pi bridges three (soon four) identical CH340 USB adapters
-    # onto the TCP ports below, and the grid meter hangs off a USB adapter on
-    # THIS host. None of those names are identities: the pi's adapters have no
+    # The inverter-pi bridges three CH340 USB adapters plus (since
+    # 2026-11-27, the second Solis's meter line) one FTDI FT232R onto the TCP
+    # ports below, and the grid meter hangs off a USB adapter on THIS host. None of those names are identities: the pi's adapters have no
     # serial numbers, so the kernel's ttyUSB0..2 mapping — and therefore the
     # port-to-inverter mapping — shuffles across reboots, and a meter adapter
     # can (did, 2026-11-27: fourteen seconds after discovery confirmed it as
@@ -142,6 +142,38 @@ let
     MR_SOLAX_MAX_SOC = "95"; # not charged at or above this %
     MR_SOLAX_ABSORB_SURPLUS = "true";
 
+    # --- Solis 2: the second S6 hybrid, plumbed but INERT (2026-11-27) -----
+    # Wired and verified on the wires: stats bus answers at slave 3 (battery
+    # 48.9 V, same 33xxx register layout as its sibling), and its meter port
+    # hammers this line for an Eastron SDM630-style three-phase meter
+    # (fc4 0x00/0x0C/0x18/0x34, the totals block at ~100 Hz while hunting).
+    # It is served the honest grid reading in the sdm630 dialect, but the
+    # NUDGE LIMIT is the kill switch: the PID's only authority over an
+    # inverter is the nudge on the phantom reading, and zero nudge means the
+    # relay observes this inverter without ever steering it. That is
+    # deliberate — its AC wiring is temporary and cannot carry the currents
+    # a charge/discharge loop would command, and it has no battery CAN yet.
+    # Arming later is exactly: raise MR_SOLIS2_NUDGE_LIMIT and the MAX_* /
+    # CHARGE_POWER budgets to the intended values, after confirming its
+    # meter-power sign convention (REVERSE below follows the vendor doc's
+    # "+ = to grid", unverified on this model until the arming test).
+    MR_SOLIS2_DRIVER = "solis";
+    MR_SOLIS2_PORT = "2003";
+    MR_SOLIS2_SLAVE = "3";
+    MR_SOLIS2_METER_DIALECT = "sdm630";
+    MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:52:6";
+    MR_SOLIS2_REVERSE = "true"; # vendor convention "+ = to grid"; verify at arming
+    MR_SOLIS2_KP = "0.3";
+    MR_SOLIS2_NUDGE_LIMIT = "0"; # INERT: serves the honest reading, steers nothing
+    MR_SOLIS2_HA_PREFIX = "solis2";
+    MR_SOLIS2_MAX_DISCHARGE = "0";
+    MR_SOLIS2_MAX_CHARGE = "0";
+    MR_SOLIS2_SLEW = "0";
+    MR_SOLIS2_CHARGE_POWER = "0";
+    MR_SOLIS2_MIN_SOC = "20";
+    MR_SOLIS2_MAX_SOC = "95";
+    MR_SOLIS2_ABSORB_SURPLUS = "false";
+
     # --- Dashboard ----------------------------------------------------------
     # MR_WEB_DIR is set by the package wrapper to the bundled dashboard in the
     # store; don't set it here or it will shadow the store path.
@@ -169,7 +201,7 @@ in
 {
   # Rust port of the former TypeScript meter-relay. Same job, same ports: reads
   # the grid meter over serial, re-serves it to the inverters on
-  # 192.168.49.30:2000/2001 (stats on :2002) and nudges them with PIDs so grid
+  # 192.168.49.30:2000/2001/2003 (stats on :2002) and nudges them with PIDs so grid
   # export tracks MR_METER_TARGET_POWER. Serves a live web dashboard on :8484
   # (the old Express app's /stats port; /stats is kept for compatibility, plus
   # /api/status, /api/history, /api/events SSE and /api/connections). The

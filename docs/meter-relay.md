@@ -270,6 +270,56 @@ junk (`target/`, `web/node_modules/`, `web/dist/`) is **not** copied into the
 build. Keep `git status` in the crate clean-ish, so the working tree that Nix
 reads corresponds to something reviewable.
 
+### The second Solis joins (2026-11-27 evening) — three-phase dialects and an inert plant entry
+
+The plant is now declared as **`solis,solax,solis2`**. The second Solis (an
+S6 hybrid, battery pack analogue-connected at 48.9 V, **no battery CAN yet**,
+AC wiring *temporary — current-limited*) taught the relay its first lesson
+about meter **dialects**:
+
+- Its stats side answers at **slave 3** with exactly the sibling's 33xxx map
+  (`MR_SOLIS2_DRIVER = "solis"` works unmodified).
+- Its **meter port** speaks the Eastron **SDM630** three-phase input-register
+  map, measured by listening to it hunt (`solis2-listen`, 12 s answered
+  nothing): `fc4 0x00 n6` phase volts, `fc4 0x0C n6` per-phase active power,
+  `fc4 0x18 n6` per-phase reactive, `fc4 0x34 n6` the totals block — total
+  P@52/S@56/Q@60 — the last at **~100 Hz while no meter answers**, so the
+  old single-phase "pass-through from cache" emulator would have served the
+  8217-lesson registers at the wrong addresses, held the nudge at a register
+  this inverter never reads, and answered its totals with **zeros**.
+- The fix is `MeterDialect` (`meter.rs`): each line declares where
+  volts/amps/watts/var/VA/energy sit **in the inverter's space** plus a
+  `copies` table (L2/L3 mirror L1; totals mirror the cache). Every position
+  carrying active power is a legal nudge point and gets the same value, so a
+  bulk read stays internally consistent (sum of phases == total — the
+  cross-check that latched 8217 once). `MR_<ID>_METER_DIALECT = "sdm630"`,
+  default `eem` = the historical map, byte-identical to before for the two
+  live lines (regression-tested).
+- The S6's meter line is a **fourth ser2net endpoint, `:2003` → ttyUSB3**,
+  and the adapter there is an **FT232R, not a CH341** — the pi's Buildroot
+  kernel carries `ftdi_sio.ko` but nothing loaded it (the image auto-loads
+  no modules; `/etc/init.d/S02modules` grew a `modprobe ftdi_sio` line next
+  to ch341). No buildroot rebuild was ever needed: the `.ko` has been on the
+  pi the whole time. The new adapter sits on the LAN9512 hub (`1-1.2`), not
+  on the flapping external hub.
+- **`MR_SOLIS2_NUDGE_LIMIT = "0"` and all power budgets zero make the entry
+  inert**: the relay serves this line the *honest* grid reading (so the S6
+  stops faulting its meter and everything about discovery/telemetry/HA
+  entities can be verified) but has no authority to steer it — the nudge on
+  the phantom meter is the relay's *only* control path. Arming it later is
+  raising `NUDGE_LIMIT`/`MAX_*`/`CHARGE_POWER`, and **first** confirming its
+  meter-power sign convention (`MR_SOLIS2_REVERSE = "true"` follows the
+  vendor doc's "+ = to grid", unverified on this model): serve a known grid
+  power, read the inverter's own `Meter Active Power` block at **33130-33131**
+  (33128 volts / 33129 amps alongside), and check the sign. The 12-second
+  listen-and-block-read scripts live in `/tmp/opencode/solis2-listen.py`
+  style: stop meter-relay, single client per ser2net port, read-only FC04.
+- Discovery now distinguishes three meter lines whose polls **share start
+  addresses** (both Solises bulk-read from 0x00; the S6's per-phase power
+  read sits where the Solax's total-power read sits) purely by register
+  COUNTS — `MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:52:6"`; the
+  shuffled-port regression test is `three_overlapping_meter_lines_place_by_fingerprint_not_by_hint`.
+
 ### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 
 While closing out the morning's FTDI loss, the plant died a second time, and the

@@ -20,6 +20,9 @@ pub struct InverterController {
     inverter: Arc<dyn Inverter>,
     meter: Arc<Meter>,
     reverse: bool,
+    /// The meter *dialect* this inverter's line speaks: which register
+    /// positions carry grid power (the nudge rides on them) and current.
+    dialect: &'static meter::MeterDialect,
     last_time: Arc<Mutex<u64>>,
     last_nudge: Arc<Mutex<f64>>,
     request_interval_ms: Arc<Mutex<f64>>,
@@ -32,6 +35,7 @@ impl InverterController {
         inverter: Arc<dyn Inverter>,
         meter: Arc<Meter>,
         reverse: bool,
+        dialect: &'static meter::MeterDialect,
     ) -> Arc<Self> {
         Arc::new(Self {
             name: name.into(),
@@ -39,6 +43,7 @@ impl InverterController {
             inverter,
             meter,
             reverse,
+            dialect,
             last_time: Arc::new(Mutex::new(now_ms())),
             last_nudge: Arc::new(Mutex::new(0.0)),
             request_interval_ms: Arc::new(Mutex::new(0.0)),
@@ -74,7 +79,7 @@ impl InverterController {
         let this = Arc::clone(self);
 
         Arc::new(move |req: ModbusRequest| {
-            let mut response = this.meter.build_response(&req);
+            let mut response = this.meter.build_response(&req, this.dialect);
 
             let pid = Arc::clone(&this.pid);
             let inverter = Arc::clone(&this.inverter);
@@ -83,10 +88,11 @@ impl InverterController {
             let last_nudge = Arc::clone(&this.last_nudge);
             let request_interval_ms = Arc::clone(&this.request_interval_ms);
             let reverse = this.reverse;
+            let dialect = this.dialect;
             let name = this.name.clone();
 
             let override_fn = move |register: u16, value: f64| -> f64 {
-                if register == meter::R_ACTIVE_POWER {
+                if dialect.is_active_power(register) {
                     let now = now_ms();
                     let delta = {
                         let mut last = last_time.lock().unwrap();
@@ -113,7 +119,7 @@ impl InverterController {
 
                     tracing::trace!(name, nudge, current, delta, "PID nudge");
                     nudge
-                } else if register == meter::R_CURRENT {
+                } else if dialect.is_current(register) {
                     let voltage = meter.get_voltage();
                     if voltage != 0.0 {
                         meter.get_active_power() / voltage
@@ -126,7 +132,7 @@ impl InverterController {
             };
 
             this.meter
-                .modify_response(&mut response, reverse, Some(&override_fn));
+                .modify_response(&mut response, reverse, Some(&override_fn), dialect);
 
             Some(response)
         })
