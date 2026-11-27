@@ -91,7 +91,7 @@ All in `hosts/<name>`, on the `192.168.49.0/24` LAN with domain `grafton.lan`; t
 
 Full per-host backstory (what each actually runs, deploy notes, gotchas): **`docs/hosts.md`**.
 
-Load-bearing hosts **not** in this flake: **dbthr33-server** (offsite backup target), **inverter-pi** `.30` (`ser2net` Modbus-RTU bridge for meter-relay), zigbee `.31`, jk-bms-can `.32`/`.33`, the OpenWrt APs `.2`/`.3`, and the **MacBookAir-NixOS** aarch64 build machine (`192.168.49.69`, MAC `00:0e:c6:8e:b3:ff`).
+Load-bearing hosts **not** in this flake: **dbthr33-server** (offsite backup target), **inverter-pi** `.30` (`ser2net` Modbus-RTU bridge for meter-relay — Buildroot appliance: dropbear host keys regenerate on reboot, no NTP so its logs are 1970, three serial-less CH341s behind one hub, and `kill -9`ing ser2net while connected leaves orphans holding the device flocks; 2026-11-27 pm incident: **`online` in `/api/connections` means only "a TCP socket exists"** — verify the serial side with `rx_frames` deltas and `ls /proc/$(cat /var/run/ser2net.pid)/fd | grep ttyUSB`, see `docs/meter-relay.md`), zigbee `.31`, jk-bms-can `.32`/`.33`, the OpenWrt APs `.2`/`.3`, and the **MacBookAir-NixOS** aarch64 build machine (`192.168.49.69`, MAC `00:0e:c6:8e:b3:ff`).
 
 Clients, not servers: `alderlake-thinkpad`, `rocketlakelatitude`, and the legacy `machines/*` configs.
 

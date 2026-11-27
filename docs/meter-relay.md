@@ -270,3 +270,60 @@ junk (`target/`, `web/node_modules/`, `web/dist/`) is **not** copied into the
 build. Keep `git status` in the crate clean-ish, so the working tree that Nix
 reads corresponds to something reviewable.
 
+### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
+
+While closing out the morning's FTDI loss, the plant died a second time, and the
+forensics took hours because **every layer below the relay reported healthy**:
+`/api/connections` showed all three ser2net lines `online`, the relay's TCP
+sessions were rock-steady (`d_conn=0` churn gone), and the grid meter was
+answering 13 polls/s. What was actually down was inverter-pi (`.30`), which is
+**not in this flake** and runs a Buildroot appliance image: a Raspberry Pi
+(armv6, dropbear, host keys that regenerate → the `REMOTE HOST IDENTIFICATION
+HAS CHANGED` warnings on router and zen3 are *normal* after its reboots) with a
+USB hub carrying **three serial-numberless CH341 adapters**, `ser2net.yaml`
+mapping `2000→ttyUSB0, 2001→ttyUSB1, 2002→ttyUSB2`, and **no NTP** (`date` is
+1970; never trust its logs for timing).
+
+Sequence: its USB/serial side died underneath a live system ~11:12–11:15 (the
+meter legs of both inverters went silent minutes apart — a shared component,
+the hub/bus; TCP still accepted, which is why the relay called it `online`), a
+Solis power cycle at 11:19 landed into the dead bridge and latched `Meter COM
+Fail`, and a pi reboot at ~12:26 restored the adapters but nothing answered,
+because **the relay's own connection to ser2net had been `kill -9`'d earlier by
+me during debugging** — ser2net forks a child per connection and *orphans keep
+the flock on the serial device*, so the re-exec'd ser2net accepted TCP and
+never opened `/dev/ttyUSB0`/`1` behind it. The tell: `ls -l /proc/$(cat
+/var/run/ser2net.pid)/fd | grep ttyUSB` showed only `ttyUSB2`. Recovery was
+`killall ser2net` (busybox: no `pkill`) **with meter-relay stopped**, then
+start both: both inverters resumed polling within seconds and the Solis
+cleared `Meter COM Fail` → `Generating` on its own — a latched meter fault
+clears the moment the emulated meter answers again, no inverter power cycle
+needed once the bridge is truly alive.
+
+Lessons kept load-bearing:
+
+- **`state: online` means a TCP socket exists, nothing else.** A bridge that
+  accepts connections and forwards zero bytes is indistinguishable (to the
+  relay) from a healthy one — the real liveness signal is `rx_frames` on a
+  *master-side* line: on the solis/solax lines the relay is a Modbus **slave**,
+  so silence there is the inverters' fault state, while on `stats`/`meter` the
+  relay is the master and its own unanswered polls (`d_tx>0, d_rx=0`) name the
+  dead leg. **Follow-up gap:** `alerts.rs` watches link *state*, so the
+  11:15–13:05 window — hours of a frozen plant — produced no push. An
+  "established but silent" rule for master-side lines (no `rx_frames` growth
+  for N×poll-interval while `tx` is climbing) is the fix.
+- **Never `kill -9` ser2net while a client is connected**; stop the client
+  (meter-relay) first, or the orphan children hold the device flocks and the
+  replacement accepts-but-doesn't-bridge.
+- Both inverters sit behind that one pi/hub. If the pi's TCP stack stays up
+  while its USB side dies, everything downstream is silent-but-`online` — check
+  `ls /proc/$(cat /var/run/ser2net.pid)/fd` for all expected `ttyUSB*`, and
+  `dmesg | grep -cE 'disconnect|now attached'` for hub flapping, **before**
+  touching inverters or CTs.
+- The pi's own enumeration story is the morning's lesson one layer down: three
+  identical CH341s, no `/dev/serial/by-id`, port→`ttyUSBn` is boot-order luck.
+  It happened to survive this reboot stable (dmesg probe order followed hub
+  ports `.3.1/.3.2/.3.3` → `ttyUSB0/1/2`), but a swap would silently serve the
+  Solis's meter frames on the Solax's line. If the appliance config is ever
+  touched, map by hub port path (`/sys/bus/usb/devices/1-1.3.x`) instead.
+
