@@ -158,8 +158,9 @@ The first switch half-succeeded and then rolled itself back:
    node landed in the container as `/dev/ttyUSBn`, not `/dev/otbr-rcp`.
 
 Fixes now in the module: `podman-otbr` is `wantedBy = [ ]` and is pulled only
-by the udev rule (`RUN+="systemd"` + `ENV{SYSTEMD_WANTS}="otbr-rcp-plug.service"`
-— udev's own device-lifecycle hook), plus the `otbr-udev-nudge` oneshot (wanted
+by the udev rule (`TAG+="systemd"` + `ENV{SYSTEMD_WANTS}="otbr-rcp-plug.service"`
+— udev's own device-lifecycle hook; `RUN+="systemd"` is program-exec syntax and
+NixOS rejects it at build time), plus the `otbr-udev-nudge` oneshot (wanted
 by `multi-user.target`) that fires one `udevadm trigger --action=change` at the
 resolved node, closing the first-deployment gap where the running device
 predates the rule. The device is bound `--device=/dev/otbr-rcp:/dev/otbr-rcp`
@@ -195,10 +196,11 @@ inside the unit its own rule starts is the same loop wearing a different hat.
 ssh -A -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 \
   'cd nixos-config && git pull --ff-only && sudo nixos-rebuild switch --flake .'
 ssh -i ~/.ssh/id_ed25519_ps cjdell@192.168.49.1 sudo nixos-confirm
-# 2b. nothing else needed: the udev rule (RUN+="systemd" → otbr-rcp-plug)
-#     handles boot and re-seat; the otbr-udev-nudge oneshot (started at
-#     activation AND boot) fires one change uevent at the running device, so
-#     even the FIRST switch that ships the rule needs no manual nudge.
+# 2b. nothing else needed: the udev rule (TAG+="systemd" + ENV{SYSTEMD_WANTS}
+#     → otbr-rcp-plug) handles boot and re-seat; the otbr-udev-nudge oneshot
+#     (started at activation AND boot) fires one change uevent at the running
+#     device, so even the FIRST switch that ships the rule needs no manual
+#     nudge.
 # 3. verify on the router — the chain (nudge → udev → plug) starts the
 #    container for you; podman-otbr itself is NOT enabled directly (see the
 #    incident section). Give the restart+form chain ~30 s, then:

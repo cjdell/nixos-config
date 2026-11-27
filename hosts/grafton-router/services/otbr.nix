@@ -65,16 +65,19 @@ let
   stateDir = "/srv/otbr";
 in
 {
-  # RUN+="systemd" + SYSTEMD_WANTS is udev's own device-lifecycle hook: the
-  # plug unit starts on add/change uevents for THIS stick only, with no
-  # inotify involved. Do NOT replace this with a systemd .path unit:
-  # PathExistsGlob re-triggers whenever the triggered unit *deactivates*, so
-  # a Type=oneshot plug service loops at script-execution speed (~2757
-  # activations in 2 min measured 2026-11-27 — systemd.path(5) semantics, no
-  # udev/kernel/container involvement; full story in docs/thread-border-router.md).
+  # TAG+="systemd" arms udev's built-in systemd hook, which then reads
+  # ENV{SYSTEMD_WANTS}: the plug unit starts on add/change uevents for THIS
+  # stick only, with no inotify involved. (Do NOT add RUN+="systemd" — that
+  # is program-exec syntax, and NixOS's udev-rules builder rejects it with
+  # "systemd is called in udev rules but not installed by udev".) Do NOT
+  # replace this with a systemd .path unit either: PathExistsGlob re-triggers
+  # whenever the triggered unit *deactivates*, so a Type=oneshot plug service
+  # loops at script-execution speed (~2757 activations in 2 min measured
+  # 2026-11-27 — systemd.path(5) semantics; full story in
+  # docs/thread-border-router.md).
   services.udev.extraRules = lib.optionalString (rcpSerial != "") ''
     # Sonoff ZBDongle-P running OpenThread RCP → ${rcpDev} (services/otbr.nix)
-    SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="${rcpSerial}", SYMLINK+="${lib.strings.removePrefix "/dev/" rcpDev}", MODE="0660", TAG+="systemd", RUN+="systemd", ENV{SYSTEMD_WANTS}="otbr-rcp-plug.service"
+    SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="${rcpSerial}", SYMLINK+="${lib.strings.removePrefix "/dev/" rcpDev}", MODE="0660", TAG+="systemd", ENV{SYSTEMD_WANTS}="otbr-rcp-plug.service"
   '';
 
   virtualisation.oci-containers.containers = lib.optionalAttrs (rcpSerial != "") {
@@ -168,7 +171,7 @@ in
       };
     };
 
-    # Started by the udev rule (RUN+="systemd" + SYSTEMD_WANTS) on add/change
+    # Started by the udev rule (TAG+="systemd" + SYSTEMD_WANTS) on add/change
     # uevents for this exact stick: boot coldplug, every re-seat, and the
     # nudge unit below. It NEVER runs udevadm itself — a trigger inside the
     # unit its own rule starts would close the loop and storm (that is how
