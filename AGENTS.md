@@ -297,6 +297,7 @@ The solar-inverter meter relay on **grafton-router** is built from the Rust crat
 
 - **The endpoint→role mapping is discovered at startup** (the ports are not stable). `MR_*_PORT`/`MR_STATS_PORT` are **hints**; at startup `src/discovery.rs` *listens* for each inverter's own meter polls and *probes* only the endpoints that stayed silent. `MR_DISCOVERY_STRICT=true` (the deployed setting) refuses to start when a required connection cannot be placed.
 - **Every connection reconnects on its own** (250 ms backoff doubling to 10 s). `/api/connections` and the diagnostics page make drops visible.
+- **The grid meter's identity is a probe answer, not a path**: startup discovery probes every kernel-enumerated port (`src/serial.rs`, `MR_SERIAL_AUTO`); if the live meter adapter's node vanishes from the bus for `MR_METER_GONE_AFTER_MS` (default 60 s) the relay exits and the systemd restart re-places it — the 2026-11-27 FT232R death was 9 h of re-dialling a dead by-id path while the plant ran on a frozen reading. `MR_SERIAL_EXCLUDE=/dev/otbr-rcp` keeps probes off the Thread radio while otbr holds it.
 - **The plant is a priority list**, not two hardcoded inverters. `MR_INVERTERS` orders it; each entry takes `MR_<ID>_*` overrides.
 - **Allocation water-fills in both directions** — surplus PV the main bank's charge taper cannot absorb spills into the reserve.
 - **Module**: `hosts/grafton-router/services/meter-relay.nix` is the relay's entire configuration — the plant is declared there as an attrset applied via systemd `Environment`.

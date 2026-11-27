@@ -207,9 +207,10 @@ impl Controller {
         let meter_stats = self.connection("meter", Role::GridMeter, 0, meter_assignment.as_ref());
         let meter_endpoint = meter_stats.endpoint().cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "no grid meter endpoint is available ({}); discovery found no meter and the \
-                 configured device is not free",
-                cfg.serial_device
+                "no grid meter endpoint is available ({cfg}); startup discovery probed the local \
+                 serial ports and none answered a meter voltage read, and the configured device \
+                 was not free to fall back to",
+                cfg = cfg.serial_device
             )
         })?;
         let meter_group = ModbusSlaveGroup::new(
@@ -218,6 +219,14 @@ impl Controller {
             SERIAL_TIMEOUT,
             Arc::clone(&meter_stats),
             connect_timeout,
+            // The meter's identity is its answers, not its path: if the
+            // adapter that discovery chose leaves the USB bus, the node is
+            // gone and this process cannot re-place the meter — exiting (with
+            // the patience from MR_METER_GONE_AFTER_MS) hands that to the
+            // supervised restart's full discovery. Serving the plant from a
+            // frozen reading is what the nine hours of 2026-11-27 proved
+            // wrong.
+            (cfg.meter_gone_after_ms > 0).then(|| Duration::from_millis(cfg.meter_gone_after_ms)),
         );
         ModbusSlaveProxy::new(
             Arc::clone(&meter_group),
@@ -245,6 +254,7 @@ impl Controller {
             SERIAL_TIMEOUT,
             Arc::clone(&stats_connection),
             connect_timeout,
+            None,
         );
         for inverter in &self.inverters {
             ModbusSlaveProxy::new(

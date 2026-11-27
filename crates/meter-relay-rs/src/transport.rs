@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{oneshot, Mutex, Notify};
@@ -33,6 +33,11 @@ pub struct ModbusSlaveGroup {
     stats: Arc<ConnectionStats>,
     timeout: Duration,
     connect_timeout: Duration,
+    /// Only set for the grid meter lane: how long its device may fail to open
+    /// before the process exits, because an endpoint chosen by startup
+    /// discovery can only be re-chosen by startup discovery. See
+    /// [`device_vanished`].
+    vanish_after: Option<Duration>,
     request_lock: Mutex<()>,
     writer: Mutex<Option<WriteHalf<BoxStream>>>,
     pending: Arc<Mutex<Option<oneshot::Sender<Vec<u8>>>>>,
@@ -47,6 +52,7 @@ impl ModbusSlaveGroup {
         timeout: Duration,
         stats: Arc<ConnectionStats>,
         connect_timeout: Duration,
+        vanish_after: Option<Duration>,
     ) -> Arc<Self> {
         let group = Arc::new(Self {
             name: name.into(),
@@ -54,6 +60,7 @@ impl ModbusSlaveGroup {
             stats,
             timeout,
             connect_timeout,
+            vanish_after,
             request_lock: Mutex::new(()),
             writer: Mutex::new(None),
             pending: Arc::new(Mutex::new(None)),
@@ -156,11 +163,13 @@ fn exception_code(packet: &[u8]) -> Option<u8> {
 
 async fn supervise(group: Arc<ModbusSlaveGroup>) {
     let mut backoff = INITIAL_BACKOFF;
+    let mut down_since: Option<Instant> = None;
 
     loop {
         group.stats.set_state(ConnectionState::Connecting);
         match group.endpoint.connect(group.connect_timeout).await {
             Ok(stream) => {
+                down_since = None;
                 let (read, write) = tokio::io::split(stream);
                 *group.writer.lock().await = Some(write);
                 group.stats.mark_connected();
@@ -199,11 +208,42 @@ async fn supervise(group: Arc<ModbusSlaveGroup>) {
                     error = %error,
                     "connect failed; retrying"
                 );
+                if let Some(patience) = group.vanish_after {
+                    let down_for = down_since.get_or_insert_with(Instant::now).elapsed();
+                    if device_vanished(&group.endpoint, down_for, patience) {
+                        // Measured 2026-11-27: the meter's adapter died on the
+                        // USB bus and this loop re-dialled its dead by-id name
+                        // for nine hours while the plant ran on a frozen meter
+                        // reading. A dead device node is not a link to wait
+                        // out — only startup discovery can place the meter
+                        // again, so exit and let systemd do exactly that.
+                        tracing::error!(
+                            name = %group.name,
+                            endpoint = %group.endpoint,
+                            down_for_ms = down_for.as_millis() as u64,
+                            "the meter's serial device has vanished from the bus; exiting so the \
+                             restart re-runs startup discovery, which probes every local port \
+                             and places the meter wherever it now lives"
+                        );
+                        tokio::time::sleep(Duration::from_millis(200)).await; // let the log flush
+                        std::process::exit(1);
+                    }
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
     }
+}
+
+/// Whether this endpoint's serial device node is *gone from the bus* — the
+/// different failure from a device that is present but quiet. A device that
+/// merely stopped answering may answer again on this connection; one that
+/// has left the bus leaves the endpoint startup discovery chose invalid, and
+/// this process cannot choose a new one.
+fn device_vanished(endpoint: &Endpoint, down_for: Duration, patience: Duration) -> bool {
+    down_for >= patience
+        && matches!(endpoint, Endpoint::Serial { path, .. } if std::fs::metadata(path).is_err())
 }
 
 async fn read_loop(
@@ -422,6 +462,7 @@ mod tests {
             Duration::from_millis(400),
             Arc::clone(&stats),
             Duration::from_millis(500),
+            None,
         );
 
         let response = request_until_answered(&group).await;
@@ -446,6 +487,7 @@ mod tests {
             Duration::from_millis(300),
             Arc::clone(&stats),
             Duration::from_millis(500),
+            None,
         );
 
         assert_eq!(request_until_answered(&group).await.regs, vec![0x00, 0x07]);
@@ -461,6 +503,37 @@ mod tests {
         let report = stats.report();
         assert!(report.reconnects >= 1, "{report:?}");
         assert_eq!(report.state, "online");
+    }
+
+    #[test]
+    fn a_serial_device_vanished_only_when_its_node_is_gone_and_time_is_up() {
+        let dir = std::env::temp_dir().join(format!("meter-relay-vanish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let node = dir.join("ttyTest");
+        std::fs::write(&node, b"").unwrap();
+        let endpoint = Endpoint::serial(node.display().to_string(), 9600);
+        let patience = Duration::from_secs(60);
+
+        // Present node: down as long as you like, it is not "gone".
+        assert!(!device_vanished(
+            &endpoint,
+            Duration::from_secs(600),
+            patience
+        ));
+        std::fs::remove_file(&node).unwrap();
+        // Gone node, but the patience has not elapsed: keep dialling — this
+        // is also the plug-and-replug window, which must not kill the plant.
+        assert!(!device_vanished(&endpoint, Duration::from_secs(1), patience));
+        assert!(device_vanished(&endpoint, Duration::from_secs(61), patience));
+        // A network endpoint down forever is a link problem, never a vanished
+        // device: discovery placed it, and it can be waited out.
+        assert!(!device_vanished(
+            &Endpoint::tcp("127.0.0.1", 1),
+            Duration::from_secs(600),
+            patience
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ mod meter;
 mod parser;
 mod pid;
 mod registers;
+mod serial;
 mod stream;
 mod telemetry;
 mod transport;

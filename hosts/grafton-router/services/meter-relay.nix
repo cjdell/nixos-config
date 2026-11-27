@@ -52,23 +52,41 @@ let
     MR_INVERTER_HOST = "192.168.49.30";
 
     # --- Which endpoint is which (startup auto-detection) --------------------
-    # The inverter-pi bridges three (soon four) identical CH340 USB adapters onto
-    # the TCP ports below. The adapters have no serial numbers, so the kernel
-    # names them ttyUSB0..2 in probe order and the port-to-inverter mapping is
-    # not stable across reboots: the port that was the Solis meter line
-    # yesterday can be the stats bus today. The MR_*_PORT values below are
-    # therefore *hints*, and at startup the relay works out which endpoint
-    # really is which — by listening for each inverter's own meter polls, then
-    # probing the endpoints that stayed silent (the stats bus and the USB grid
-    # meter answer; a line with an inverter polling on it is never probed at
-    # all). See crates/meter-relay-rs/src/discovery.rs.
+    # The inverter-pi bridges three (soon four) identical CH340 USB adapters
+    # onto the TCP ports below, and the grid meter hangs off a USB adapter on
+    # THIS host. None of those names are identities: the pi's adapters have no
+    # serial numbers, so the kernel's ttyUSB0..2 mapping — and therefore the
+    # port-to-inverter mapping — shuffles across reboots, and a meter adapter
+    # can (did, 2026-11-27: fourteen seconds after discovery confirmed it as
+    # the meter) die on the USB bus and take its by-id path with it. The
+    # MR_*_PORT values below and MR_SERIAL_DEVICE are therefore *hints*, and
+    # at startup the relay works out which endpoint really is which — by
+    # listening for each inverter's own meter polls, then probing the
+    # endpoints that stayed silent (the stats bus and the USB grid meter
+    # answer; a line with an inverter polling on it is never probed at all).
+    # Local serial candidates are everything the kernel lists under
+    # /dev/serial/by-id and by-path, not just the one named, so a meter
+    # re-plugged into a different adapter is found there. See
+    # crates/meter-relay-rs/src/discovery.rs and .../src/serial.rs.
     MR_DISCOVERY = "auto";
+    # Never probe the Thread border router's radio — otbr-agent reads and
+    # writes that port live, and a Modbus probe stealing a frame would break
+    # the mesh quietly. The exclusion names the *link* that
+    # hosts/grafton-router/services/otbr.nix creates for the stick (by its
+    # unique serial), not the adapter, so a radio swap is still covered and
+    # no adapter that could one day carry the meter is ever vetoed.
+    MR_SERIAL_EXCLUDE = "/dev/otbr-rcp";
     # Refuse to start rather than serve a meter line whose polarity is a guess:
     # the Solis reads its meter reversed, so answering its polls un-negated
     # would drive the plant the wrong way. An endpoint that cannot be placed is
     # reported on the diagnostics page (/#/diagnostics) instead, and `curl
     # /api/connections` shows the same thing.
     MR_DISCOVERY_STRICT = "true";
+    # And once running: if the grid meter's device node has been *gone from the
+    # bus* for a whole minute (MR_METER_GONE_AFTER_MS), the relay exits and
+    # systemd re-runs startup discovery rather than keep driving the plant from
+    # the frozen last reading — which is exactly what nine hours of 2026-11-27
+    # proved wrong.
     # Measured on this plant: four endpoints, settled in about 3 s.
     MR_DISCOVERY_LISTEN_MS = "3000";
 

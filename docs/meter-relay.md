@@ -36,6 +36,23 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
   service**: it needs no credentials, prints the table, and exits non-zero if a
   required connection is unidentified. Stop `meter-relay` first — `ser2net` is
   `kickolduser: true`, so connecting displaces whatever holds the port.
+- **The grid meter's identity is a probe answer, not a path** (since 2026-11-27,
+  the day the FT232R carrying it *died on the USB bus fourteen seconds after
+  discovery had confirmed it as the meter*). Its relay — whose only candidate
+  was the one configured by-id path — re-dialled the dead name for nine hours
+  while the plant ran on a frozen meter reading. Two changes came out of that:
+  discovery is now offered **every port the kernel lists** (`/dev/serial/by-id`,
+  `/dev/serial/by-path`, deduplicated by resolved device — `src/serial.rs`,
+  `MR_SERIAL_AUTO`/`MR_SERIAL_DIRS`), so a meter re-plugged into a different
+  adapter is found there at the next startup; and if the meter's node is absent
+  from the bus for `MR_METER_GONE_AFTER_MS` (default 60 s) while its lane is
+  down, the process **exits** with a clear journal line and the systemd restart
+  re-runs full startup discovery — the one thing that can re-place the meter,
+  since discovery is what chose the endpoint. `MR_SERIAL_EXCLUDE` is
+  load-bearing: on grafton-router it names `/dev/otbr-rcp`, because opening the
+  Thread border router's radio mid-frame while otbr-agent reads it would break
+  the mesh quietly. It matches the *device the link resolves to*, so it follows
+  radio swaps and can never veto an adapter that might one day carry the meter.
 - **Every connection reconnects on its own** (250 ms backoff doubling to 10 s).
   A dropped link used to leave the service running on a dead socket forever,
   which is what `/api/connections` and the diagnostics page exist to make

@@ -7,6 +7,7 @@ use crate::allocation::{AllocatorConfig, InverterPolicy};
 use crate::control::ControlConfig;
 use crate::endpoint::{self, Endpoint};
 use crate::inverters;
+use crate::serial;
 
 /// Everything the controller needs to bring one inverter on line.
 ///
@@ -64,10 +65,17 @@ pub struct Config {
 
     pub serial_device: String,
     pub serial_baud: u32,
-    /// Every local serial candidate, always at least the configured device.
-    /// More than one lets discovery find the meter if a second USB adapter
-    /// enumerates ahead of it.
+    /// Every local serial candidate: the configured device, anything
+    /// `MR_SERIAL_DEVICES` names, and — unless `MR_SERIAL_AUTO=false` — every
+    /// port the kernel lists under `/dev/serial/by-id` and `/dev/serial/by-path`
+    /// (`serial.rs`), minus `MR_SERIAL_EXCLUDE`. Discovery finds the grid meter
+    /// by probing, so a meter that moves to another adapter moves with it.
     pub serial_devices: Vec<Endpoint>,
+    /// How long the grid meter's *device node* may be absent from the bus
+    /// (its open having kept failing for that long) before the process exits
+    /// so a supervised restart re-runs discovery. 0 disables the check.
+    /// `MR_METER_GONE_AFTER_MS`.
+    pub meter_gone_after_ms: u64,
     /// An explicit remote candidate list (`MR_ENDPOINTS`), if one was given.
     /// Empty means "derive the candidates from the ports below".
     pub endpoints: Vec<Endpoint>,
@@ -333,9 +341,14 @@ impl Config {
 
         let inverters = load_inverters(&optional, &number, &port, &boolean, &optional_number)?;
 
-        // Serial candidates. The grid meter is a local USB device whose stable
-        // path is the configured default; naming several lets discovery find it
-        // if a second adapter ever enumerates ahead of it.
+        // Serial candidates. The grid meter is a local USB device, and its
+        // stable path is not its identity: on 2026-11-27 the adapter carrying
+        // it died on the USB bus *fourteen seconds after discovery had
+        // confirmed it as the meter*, and the relay — whose only candidate was
+        // that one path — dialled the dead name for nine hours. The configured
+        // device stays (it is the grid-meter hint discovery falls back to), but
+        // enumeration offers every other local port to discovery as well, so
+        // the meter is found by its answers wherever it now lives.
         let serial_baud = port("MR_SERIAL_BAUD", endpoint::DEFAULT_BAUD as u16)? as u32;
         let serial_device = optional(
             "MR_SERIAL_DEVICE",
@@ -350,6 +363,23 @@ impl Config {
         if !serial_devices.contains(&configured_device) {
             serial_devices.insert(0, configured_device);
         }
+        if boolean("MR_SERIAL_AUTO", true)? {
+            let exclude = split_list(&optional("MR_SERIAL_EXCLUDE", ""));
+            let dirs: Vec<PathBuf> = split_list(&optional(
+                "MR_SERIAL_DIRS",
+                "/dev/serial/by-id,/dev/serial/by-path",
+            ))
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+            serial_devices.extend(serial::candidates(
+                &dirs,
+                serial_baud,
+                &exclude,
+                &serial_devices,
+            ));
+        }
+        let meter_gone_after_ms = millis("MR_METER_GONE_AFTER_MS", 60_000)?;
 
         let endpoints = match optional("MR_ENDPOINTS", "") {
             spec if spec.trim().is_empty() => Vec::new(),
@@ -425,6 +455,7 @@ impl Config {
             serial_device,
             serial_baud,
             serial_devices,
+            meter_gone_after_ms,
             endpoints,
             inverter_host,
             inverters,
@@ -439,6 +470,15 @@ impl Config {
             control,
         })
     }
+}
+
+/// Splits a comma-separated environment list into trimmed, non-empty entries.
+fn split_list(spec: &str) -> Vec<String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Builds the plant from `MR_INVERTERS` (a comma-separated priority list) plus
