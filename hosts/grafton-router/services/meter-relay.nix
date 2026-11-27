@@ -238,7 +238,13 @@ in
     serviceConfig = {
       Type = "oneshot";
       StateDirectory = "meter-relay-alert";
-      EnvironmentFile = config.sops.templates."meter-relay.env".path;
+      # The HA URL + token come from the same sops template the relay uses,
+      # and MR_ALERT_HA_SERVICES from the generated non-secret twin below —
+      # `plant` stays the one source of truth for both processes.
+      EnvironmentFile = [
+        config.sops.templates."meter-relay.env".path
+        config.environment.etc."meter-relay/alert.env".source
+      ];
     };
     path = [
       pkgs.curl
@@ -288,4 +294,12 @@ in
     MR_HOME_ASSISTANT_BEARER_TOKEN = "${config.sops.placeholder.home_assistant_token}";
     MR_INFLUXDB_TOKEN = "${config.sops.placeholder.meter_relay_influxdb_token}";
   };
+
+  # The non-secret half of that EnvironmentFile: the alert knobs from `plant`
+  # above, so meter-relay-alert.service (which runs with no relay process to
+  # inherit from) pushes to the same notify services the relay itself shouts
+  # at. Derived from `plant` — there is no second copy to drift.
+  environment.etc."meter-relay/alert.env".text = convertToEnvFile (
+    lib.filterAttrs (name: _: lib.hasPrefix "MR_ALERT_" name) plant
+  );
 }
