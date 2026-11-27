@@ -385,6 +385,16 @@ Full details (step tables, `gpu-probe-traditional`, `gpu-probe-envtest`, `gpu-pr
 
 ## Workflow conventions
 
+- **Everything stays in sync, always.** Any checkout touched by a session
+  (`~/nixos-config` on zen3, the router, any host) must end at `origin/main`
+  with a clean tree: publish your work, then in each touched checkout verify
+  your commits are content-identical to origin (`git diff <chain> origin/main
+  -- <your files>` empty) and `git reset --hard origin/main`. Verify the
+  synced tree also *builds* the host's toplevel (`nix build --no-link
+  .#nixosConfigurations.<host>.config.system.build.toplevel`); if its store
+  path equals the running one, the host is synced down to the live system and
+  nothing needs switching. Do not destroy pre-existing submodule dirt
+  (`crates/home-assistant-rust`) in the process.
 - **Prefer helper scripts over inline one-liners** for repeated/complex operations (HA API calls, multi-step deploys, TFTP testing, …). Keep them in `scripts/` (committed) or `/tmp/` (scratch), make them idempotent, and give every network call a `timeout`.
 - **Set timeouts on everything that talks to the network** (`timeout N cmd`); bare `ssh`/`curl`/`ping` to a flaky or dead host will stall the session. Never `pgrep -f`/`pkill -f` with a pattern that matches your own shell's command line.
 - **Poll for long-running work with a bounded loop, never one long `sleep`.** Run the job in the background with output to a log, then loop a short sleep with a status line each iteration.
