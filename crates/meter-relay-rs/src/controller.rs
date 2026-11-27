@@ -96,6 +96,10 @@ pub struct Controller {
     meter_cache: Arc<RegisterCache>,
     /// Live per-connection health, served to the diagnostics page.
     diagnostics: Arc<Diagnostics>,
+    /// Whether the central loop is currently held because the grid meter's
+    /// measurement went stale — so the transition is logged once, not per
+    /// 10 ms tick.
+    meter_hold: AtomicBool,
 }
 
 impl Controller {
@@ -154,6 +158,7 @@ impl Controller {
             last_reserve_state: Arc::new(Mutex::new(ReserveState::PrimaryOnly)),
             meter_cache,
             diagnostics: Diagnostics::new(),
+            meter_hold: AtomicBool::new(false),
         }))
     }
 
@@ -338,6 +343,12 @@ impl Controller {
             let this = Arc::clone(&self);
             tokio::spawn(async move { this.home_assistant_loop().await });
         }
+        crate::alerts::spawn(
+            cfg.alerts.clone(),
+            self.ha.clone(),
+            Arc::clone(&self.meter),
+            Arc::clone(&self.diagnostics),
+        );
 
         crate::web::serve(
             Arc::clone(&self.telemetry),
@@ -393,7 +404,25 @@ impl Controller {
             interval.tick().await;
 
             let now = now_ms();
+            // Zeroed when its window has lapsed (meter.rs) — every consumer
+            // of this value sees 0, never the last frozen reading.
             let meter_power = self.meter.get_active_power();
+            let meter_stale = !self.meter.feed_fresh();
+            if meter_stale != self.meter_hold.load(Ordering::Relaxed) {
+                self.meter_hold.store(meter_stale, Ordering::Relaxed);
+                if meter_stale {
+                    tracing::warn!(
+                        "the grid meter feed has gone stale: the central loop now HOLDS its \
+                         plant targets (feeding a made-up 0 W to the PID would chase a grid \
+                         flow nobody measured); all meter readings read zero until a fresh \
+                         measurement arrives"
+                    );
+                } else {
+                    tracing::info!(
+                        "the grid meter feed is fresh again: the central loop resumes tracking"
+                    );
+                }
+            }
 
             let charging =
                 self.use_octopus_go.load(Ordering::Relaxed) && is_octopus_go_time_range();
@@ -407,7 +436,12 @@ impl Controller {
                 law.set_charging(charging);
 
                 let allocation = if charging {
+                    // The Go charge is open-loop with respect to the grid
+                    // meter (it integrates battery readings), so a stale
+                    // meter does not stop it.
                     law.tick_charge(&states, now)
+                } else if meter_stale {
+                    law.hold()
                 } else {
                     law.tick_balance(meter_power, &states, now)
                 };
@@ -495,6 +529,7 @@ impl Controller {
                 lab_solar_power: *self.lab_solar_power.lock().unwrap(),
                 use_octopus_go: self.use_octopus_go.load(Ordering::Relaxed),
                 charging,
+                meter_stale: !self.meter.feed_fresh(),
             });
 
             publish_tick = publish_tick.wrapping_add(1);
@@ -823,6 +858,7 @@ fn initial_snapshot(law: &Arc<Mutex<ControlLaw>>, cfg: &Config) -> StatusSnapsho
         lab_solar_power: 0.0,
         use_octopus_go: false,
         charging: false,
+        meter_stale: false,
     }
 }
 

@@ -112,6 +112,9 @@ export default function App() {
     if (current.charging) {
       return "Octopus Go · charging";
     }
+    if (current.meter_stale) {
+      return "meter stale · holding";
+    }
     if (current.use_octopus_go) {
       return "Octopus Go · armed";
     }
@@ -125,6 +128,9 @@ export default function App() {
     }
     if (current.charging) {
       return "Inverters are charging the batteries from the grid at their configured rates, capped by the authority each has been observed to accept; the PID is off.";
+    }
+    if (current.meter_stale) {
+      return "The grid meter stopped answering, so every meter reading on this page is 0 W — a default, not a measurement. The central loop is HOLDING its plant targets rather than steering on a number nobody measured (the per-inverter loops still run on live battery readings), and a push has gone to the configured notify services. Check the meter's USB adapter and the RS485 pair.";
     }
     if (current.use_octopus_go) {
       return "Octopus Go is enabled in Home Assistant; the cheap charging window is not active right now.";
@@ -148,7 +154,9 @@ export default function App() {
               </span>
             )}
           </Show>
-          <span class={`mode ${snapshot()?.charging ? "charging" : ""}`}>
+          <span
+            class={`mode ${snapshot()?.charging ? "charging" : ""} ${snapshot()?.meter_stale && !snapshot()?.charging ? "stale" : ""}`}
+          >
             {mode()}
             <Tip down text={modeTip()} />
           </span>

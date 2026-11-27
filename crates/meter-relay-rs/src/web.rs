@@ -217,6 +217,7 @@ mod tests {
             lab_solar_power: 42.0,
             use_octopus_go: true,
             charging: false,
+            meter_stale: false,
         }
     }
 

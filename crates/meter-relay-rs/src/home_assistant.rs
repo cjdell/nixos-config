@@ -51,6 +51,29 @@ impl HomeAssistant {
         }
     }
 
+    /// Fire one of Home Assistant's `notify` services — mobile push from
+    /// here. Accepts `notify.mobile_app_x` or the bare `mobile_app_x`.
+    pub async fn notify(&self, service: &str, title: &str, message: &str) {
+        let trimmed = service.trim();
+        let name = trimmed.strip_prefix("notify.").unwrap_or(trimmed);
+        if name.is_empty() {
+            return;
+        }
+        let url = format!("{}/api/services/notify/{name}", self.api);
+        match self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&json!({"title": title, "message": message}))
+            .send()
+            .await
+        {
+            Ok(res) if res.status().is_success() => {}
+            Ok(res) => tracing::warn!(service, status = %res.status(), "Home Assistant notify rejected"),
+            Err(err) => tracing::warn!(service, "Home Assistant notify failed: {err}"),
+        }
+    }
+
     pub async fn read_float(&self, id: &str) -> f64 {
         match self.read_state("sensor", id).await {
             Some(state) => state.parse().unwrap_or(0.0),

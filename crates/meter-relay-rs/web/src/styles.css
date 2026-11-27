@@ -83,6 +83,13 @@ h1 {
   border-color: transparent;
 }
 
+.mode.stale {
+  color: #0b1120;
+  background: var(--red);
+  border-color: transparent;
+  font-weight: 600;
+}
+
 .conn.ok {
   color: var(--green);
   border-color: rgba(52, 211, 153, 0.4);

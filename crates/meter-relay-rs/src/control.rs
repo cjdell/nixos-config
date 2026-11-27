@@ -164,6 +164,16 @@ impl ControlLaw {
         allocation
     }
 
+    /// Hold the plant exactly where the previous tick left it: with the grid
+    /// measurement untrustworthy there is nothing to balance against. Feeding
+    /// the PID a made-up measurement — including a zeroed one — would chase a
+    /// grid flow nobody measured; the per-inverter loops keep running on
+    /// *live* battery readings against these held targets, so the plant
+    /// stays put until the meter feed returns.
+    pub fn hold(&mut self) -> Allocation {
+        self.last_allocation.clone()
+    }
+
     pub fn reset_metrics(&mut self) {
         self.pid.reset_metrics();
     }
@@ -794,5 +804,34 @@ mod tests {
             "the plant should hold the target, left {} W",
             mean(tail) + TARGET
         );
+    }
+
+    #[test]
+    fn holding_returns_the_previous_allocation_unchanged() {
+        let mut law = ControlLaw::new(
+            ControlConfig {
+                kp: 0.9,
+                ki: 0.3,
+                kd: 0.0,
+                deadband: 20.0,
+                allocator: AllocatorConfig::default(),
+            },
+            1_000,
+        );
+        law.set_meter_target(-50.0);
+        let states = vec![
+            InverterState::new(0.0, 0.0, true),
+            InverterState::new(0.0, 0.0, true),
+        ];
+        let ticked = law.tick_balance(120.0, &states, 2_000);
+        let targets = |allocation: &Allocation| {
+            allocation
+                .inverters
+                .iter()
+                .map(|share| share.target)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&law.hold()), targets(&ticked));
+        assert_eq!(targets(&law.hold()), targets(&ticked), "holding is stable");
     }
 }

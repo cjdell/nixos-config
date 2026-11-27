@@ -1,4 +1,5 @@
 mod allocation;
+mod alerts;
 mod config;
 mod control;
 mod controller;

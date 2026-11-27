@@ -85,8 +85,11 @@ pub struct Config {
     /// Shared socket both inverters are polled on for telemetry registers.
     pub stats_port: u16,
 
-    /// How startup works out which endpoint is which. See `discovery.rs`.
+    /// Startup auto-detection settings. See `discovery.rs`.
     pub discovery: DiscoverySettings,
+
+    /// Where to shout when the plant should not be trusted. See `alerts.rs`.
+    pub alerts: AlertSettings,
 
     pub web_port: u16,
     pub web_dir: PathBuf,
@@ -152,6 +155,28 @@ impl Default for DiscoverySettings {
             only: false,
         }
     }
+}
+
+/// Where to shout when the plant should not be trusted (`alerts.rs`). The
+/// Home Assistant *health sensor* is always published — these are the push
+/// channels on top of it.
+#[derive(Clone, Debug)]
+pub struct AlertSettings {
+    /// `notify.*` services to fire on every Home Assistant instance reachable
+    /// via `MR_HOME_ASSISTANT_API` (`MR_ALERT_HA_SERVICES`, comma-separated,
+    /// e.g. `notify.mobile_app_pixel_8_pro`). Empty = sensor only, no push.
+    pub ha_services: Vec<String>,
+    /// Optional generic webhook (`MR_ALERT_WEBHOOK_URL`): a JSON `POST` of
+    /// `{"title","message"}` — works for ntfy, HA webhooks, and whatever
+    /// else listens.
+    pub webhook_url: String,
+    /// How long a problem must persist before it is shouted about
+    /// (`MR_ALERT_GRACE_MS`) — reconnect backoff flapping must not page.
+    pub grace_ms: u64,
+    /// While problems remain active, re-shout the full list this often
+    /// (`MR_ALERT_REPEAT_MS`, default 30 min) — a once-only message is a
+    /// message that can be missed.
+    pub repeat_ms: u64,
 }
 
 /// Make/model defaults: the meter port it connects to, the slave address it is
@@ -402,6 +427,13 @@ impl Config {
             only: discovery_only,
         };
 
+        let alerts = AlertSettings {
+            ha_services: split_list(&optional("MR_ALERT_HA_SERVICES", "")),
+            webhook_url: optional("MR_ALERT_WEBHOOK_URL", "").trim().to_string(),
+            grace_ms: millis("MR_ALERT_GRACE_MS", 60_000)?,
+            repeat_ms: millis("MR_ALERT_REPEAT_MS", 1_800_000)?,
+        };
+
         // A discovery-only run touches nothing but the serial endpoints, so it
         // must not require the publishing credentials: that is the whole point
         // of being able to ask the question on its own.
@@ -462,6 +494,7 @@ impl Config {
             stats_port: port("MR_STATS_PORT", 2002)?,
 
             discovery,
+            alerts,
 
             web_port: port("MR_WEB_PORT", 8484)?,
             web_dir: PathBuf::from(optional("MR_WEB_DIR", "web/dist")),

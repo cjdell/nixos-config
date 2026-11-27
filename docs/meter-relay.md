@@ -53,6 +53,34 @@ serves a Solid.js dashboard on `:8484` (`/api/status`, `/api/history`,
   Thread border router's radio mid-frame while otbr-agent reads it would break
   the mesh quietly. It matches the *device the link resolves to*, so it follows
   radio swaps and can never veto an adapter that might one day carry the meter.
+- **A stale measurement is never served as if it were fresh** (2026-11-27): every
+  meter register carries a staleness window — three polls of the most-often-polled
+  definition covering it, floored at 5 s (`meter.rs::stale_window_ms`) — and when it
+  lapses the value **reads 0** wherever the plant consumes it: dashboard, Home
+  Assistant, and the emulated meter line's current/active/apparent/reactive-power
+  and energy registers. Voltage is deliberately not zeroed (a believable voltage
+  keeps the inverters from tripping a grid fault over the relay's blindness). The
+  central loop meanwhile **holds** (`ControlLaw::hold()`): feeding the made-up 0 W
+  to the PID would chase a grid flow nobody measured, and the per-inverter loops
+  keep nudging at the held targets with *live* battery readings, so the plant stays
+  put instead of steering by the frozen number — which is precisely what the nine
+  hours of 2026-11-27 were doing. `/api/status` carries `meter_stale: true`, and
+  the dashboard wears a red `meter stale · holding` chip.
+- **It shouts when the plant should not be trusted** (`src/alerts.rs`): a 5 s
+  watchdog assembles the problems (stale meter feed, links not online-and-healthy),
+  debounces them through `MR_ALERT_GRACE_MS` (60 s — reconnect backoff must never
+  page), fires every `notify.*` service listed in `MR_ALERT_HA_SERVICES` — new
+  problems, cleared problems, and the whole list again every `MR_ALERT_REPEAT_MS`
+  (30 min) while anything stays active — mirrors `sensor.meter_relay_alerts`
+  (`"ok"` or the problem list) for automations, and `MR_ALERT_WEBHOOK_URL` (unset)
+  can add any generic `{"title","message"}` JSON webhook (ntfy, an HA webhook).
+  A relay that cannot start — startup discovery refusing exactly when the meter
+  answers nowhere — cannot shout for itself, so the `meter-relay-alert.service`
+  `OnFailure=` unit does: one push per ten minutes at most (a strict-mode
+  crash-loop exits every ~15 s), and it leaves an outage marker in the shared
+  StateDirectory so the first clean run after an outage pushes RECOVERED instead
+  of silence. Test it live: `sudo kill -9 $(pidof meter-relay)` — OnFailure fires
+  only on failure, not on `systemctl stop`.
 - **Every connection reconnects on its own** (250 ms backoff doubling to 10 s).
   A dropped link used to leave the service running on a dead socket forever,
   which is what `/api/connections` and the diagnostics page exist to make

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::parser::{ModbusRequest, ModbusResponse};
 use crate::registers::{RegDef, RegisterCache};
-use crate::util::{read_f32_be, write_f32_be};
+use crate::util::{now_ms, read_f32_be, write_f32_be};
 
 // Grid meter register addresses (function code 4 unless noted).
 pub const R_VOLTAGE: u16 = 0;
@@ -16,6 +16,46 @@ pub const R_BULK: u16 = 0;
 pub const R_SYSTEM_TYPE: u16 = 11;
 
 const METER_FUNCTION_CODE: u8 = 4;
+
+/// Floor for every register's staleness window, so the 50 ms power poll is
+/// judged on missed polls rather than on serial jitter (see
+/// [`stale_window_ms`]).
+const METER_STALE_FLOOR_MS: u64 = 5_000;
+
+/// The known electrical registers whose *measurement* the plant must never
+/// see frozen: while stale they read 0 W / 0 A everywhere — dashboard, Home
+/// Assistant, and the current/energy registers of the emulated meter line.
+/// Voltage is deliberately absent (a believable voltage keeps the inverters
+/// from tripping a grid fault over the relay's blindness), and so are the
+/// cumulative energy counters inside `R_BULK` — only the two explicitly
+/// defined energy registers are listed, which is what the inverters poll
+/// individually.
+const STALE_ZEROED: &[u16] = &[
+    R_CURRENT,
+    R_ACTIVE_POWER,
+    R_APPARENT_POWER,
+    R_REACTIVE_POWER,
+    R_IMPORT_ACTIVE_ENERGY,
+    R_TOTAL_ACTIVE_ENERGY,
+];
+
+/// Freshness window of one meter register: three full polling periods of the
+/// most-often-polled definition that covers it, floored at
+/// [`METER_STALE_FLOOR_MS`]. The active-power register is therefore stale
+/// after 5 s of silence (it polls every 50 ms), and the 10 s registers after
+/// 30 s — three missed polls either way.
+fn stale_window_ms(address: u16) -> u64 {
+    let interval = METER_REGS
+        .iter()
+        .filter(|def| {
+            def.function_code == METER_FUNCTION_CODE
+                && (def.address..def.address + def.num_regs).contains(&address)
+        })
+        .map(|def| def.interval_ms)
+        .min()
+        .unwrap_or(10_000);
+    (interval * 3).max(METER_STALE_FLOOR_MS)
+}
 
 /// Registers whose (float) values are rewritten for the inverters.
 fn is_known_register(register: u16) -> bool {
@@ -56,7 +96,31 @@ impl Meter {
     }
 
     pub fn get_active_power(&self) -> f64 {
-        self.cache.read_f32(METER_FUNCTION_CODE, R_ACTIVE_POWER)
+        if self.is_fresh(R_ACTIVE_POWER) {
+            self.cache.read_f32(METER_FUNCTION_CODE, R_ACTIVE_POWER)
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether this meter register's last measurement is still trustworthy.
+    pub fn is_fresh(&self, address: u16) -> bool {
+        self.cache
+            .is_fresh(METER_FUNCTION_CODE, address, stale_window_ms(address))
+    }
+
+    /// Whether the grid measurement the control loop balances against is
+    /// fresh — which is what the control loop holds on when it is not.
+    pub fn feed_fresh(&self) -> bool {
+        self.is_fresh(R_ACTIVE_POWER)
+    }
+
+    /// How long ago the active-power register was last refreshed (`None`:
+    /// never in this process). The alerting ages its grace off this.
+    pub fn feed_age_ms(&self) -> Option<u64> {
+        self.cache
+            .last_update(METER_FUNCTION_CODE, R_ACTIVE_POWER)
+            .map(|at| now_ms().saturating_sub(at))
     }
 
     pub fn get_voltage(&self) -> f64 {
@@ -64,7 +128,17 @@ impl Meter {
     }
 
     pub fn build_response(&self, req: &ModbusRequest) -> ModbusResponse {
-        let regs = self.cache.fill(req);
+        let mut regs = self.cache.fill(req);
+        if req.function_code == METER_FUNCTION_CODE {
+            for register in STALE_ZEROED {
+                let fits =
+                    req.start_reg <= *register && register + 1 < req.start_reg + req.num_regs;
+                if fits && !self.is_fresh(*register) {
+                    let byte_index = (*register - req.start_reg) as usize * 2;
+                    write_f32_be(&mut regs, byte_index, 0.0);
+                }
+            }
+        }
         ModbusResponse::from_regs(req.clone(), regs)
     }
 
@@ -171,5 +245,57 @@ mod tests {
         let mut res = meter.build_response(&req);
         meter.modify_response(&mut res, true, None);
         assert_eq!(read_float(&res.regs), 1234.0);
+    }
+
+    #[test]
+    fn stale_electrical_readings_default_to_zero_while_voltage_stays_put() {
+        let cache = Arc::new(RegisterCache::new());
+        let meter = Meter::new(Arc::clone(&cache));
+        let store = |address: u16, value: f32| {
+            let req = ModbusRequest::new(1, 4, address, 2);
+            cache.store_response(&ModbusResponse::from_regs(
+                req,
+                value.to_bits().to_be_bytes().to_vec(),
+            ));
+        };
+        store(R_VOLTAGE, 240.0);
+        store(R_ACTIVE_POWER, -2300.0);
+        store(R_CURRENT, 9.0);
+
+        assert!(meter.feed_fresh());
+        assert_eq!(meter.get_active_power(), -2300.0);
+
+        // Three missed 50 ms polls (floored at 5 s) is enough to call the
+        // power measurement dead; current's own polls run at 10 s, so it
+        // needs its own window to lapse.
+        cache.mark_age(METER_FUNCTION_CODE, R_ACTIVE_POWER, 5_001);
+        cache.mark_age(METER_FUNCTION_CODE, R_CURRENT, 30_001);
+        assert!(!meter.feed_fresh());
+        assert_eq!(meter.get_active_power(), 0.0);
+        assert!(meter.feed_age_ms().unwrap() > 5_000);
+
+        let power = meter.build_response(&ModbusRequest::new(1, 4, R_ACTIVE_POWER, 2));
+        assert_eq!(
+            read_float(&power.regs),
+            0.0,
+            "a dead measurement must not be served frozen"
+        );
+        let current = meter.build_response(&ModbusRequest::new(1, 4, R_CURRENT, 2));
+        assert_eq!(read_float(&current.regs), 0.0);
+
+        // Voltage is deliberately not zeroed: the inverters should keep
+        // believing the grid is there — only the flow nobody measured
+        // defaults to zero.
+        let voltage = meter.build_response(&ModbusRequest::new(1, 4, R_VOLTAGE, 2));
+        assert_eq!(read_float(&voltage.regs), 240.0);
+        assert_eq!(meter.get_voltage(), 240.0);
+    }
+
+    #[test]
+    fn staleness_windows_are_three_polls_with_a_five_second_floor() {
+        assert_eq!(stale_window_ms(R_ACTIVE_POWER), METER_STALE_FLOOR_MS);
+        assert_eq!(stale_window_ms(R_VOLTAGE), 30_000);
+        assert_eq!(stale_window_ms(R_IMPORT_ACTIVE_ENERGY), 30_000);
+        assert_eq!(stale_window_ms(R_TOTAL_ACTIVE_ENERGY), 30_000);
     }
 }

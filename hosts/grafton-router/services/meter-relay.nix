@@ -150,6 +150,20 @@ let
     # --- Publishing ---------------------------------------------------------
     MR_HOME_ASSISTANT_API = "http://hass.grafton.lan:8123";
     MR_INFLUXDB_URL = "http://192.168.49.1:8086";
+
+    # --- Shouting (alerts.rs) ------------------------------------------------
+    # From inside a running relay: Home Assistant `notify` services to push
+    # to (the companion apps on both phones) when the plant should not be
+    # trusted — a stale grid meter feed or a dead link. New problems push,
+    # cleared problems push, and while anything is active the whole list
+    # re-shouts every 30 min (MR_ALERT_REPEAT_MS); MR_ALERT_GRACE_MS (60 s)
+    # keeps reconnect backoff from paging anyone. The same state lives on
+    # sensor.meter_relay_alerts ("ok" or the problem list) for automations,
+    # and MR_ALERT_WEBHOOK_URL (unset) can add ntfy or an HA webhook on top.
+    # A relay that cannot START cannot shout — startup discovery refuses
+    # exactly when the meter answers nowhere — so the meter-relay-alert unit
+    # below is the systemd-side twin of this setting.
+    MR_ALERT_HA_SERVICES = "notify.mobile_app_oneplus_7t_pro,notify.mobile_app_pixel_8_pro";
   };
 in
 {
@@ -183,6 +197,11 @@ in
       Type = "simple";
       ExecStart = lib.getExe meterRelay;
 
+      # Shared with meter-relay-alert.service: the outage marker that unit
+      # writes is what turns this process's first clean run into a
+      # "recovered" push instead of silence.
+      StateDirectory = "meter-relay-alert";
+
       # The plant, as declared above. Non-secret, so it is deliberately visible
       # in `systemctl show meter-relay` and in the store for review.
       Environment = lib.mapAttrsToList (name: value: "${name}=${value}") plant;
@@ -197,6 +216,64 @@ in
     };
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
+    # The relay alerts from inside for problems it can SEE (alerts.rs). The
+    # failure it cannot report is its own: startup discovery refuses (strict)
+    # exactly when the grid meter answers on no port, and a relay in that
+    # restart loop serves nothing and shouts nothing. systemd sees it —
+    # OnFailure fires on every exit — and this unit pushes the same Home
+    # Assistant notifies the in-process alerter uses.
+    unitConfig.OnFailure = [ "meter-relay-alert.service" ];
+  };
+
+  # See meter-relay.service's OnFailure: a oneshot that pushes "the relay
+  # itself has failed" over Home Assistant notify, rate-limited to one push
+  # per ten minutes so a strict-discovery crash-loop (one exit per ~15 s) is
+  # one bad morning, not a thousand notifications. It reads the relay's own
+  # rendered environment (the sops template) for the HA URL and token, and
+  # leaves the outage marker the relay deletes when it is back and clean.
+  systemd.services.meter-relay-alert = {
+    description = "Push a Home Assistant notification that meter-relay has failed";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "meter-relay-alert";
+      EnvironmentFile = config.sops.templates."meter-relay.env".path;
+    };
+    path = [
+      pkgs.curl
+      pkgs.jq
+    ];
+    script = # !/bin/sh
+      ''
+        set -u
+        state=/var/lib/meter-relay-alert
+        touch "$state/outage"
+
+        now=$(date +%s)
+        last=$(cat "$state/last" 2>/dev/null || echo 0)
+        [ $((now - last)) -lt 600 ] && exit 0
+        echo "$now" > "$state/last"
+
+        result=$(systemctl show meter-relay -p Result -p ExecMainStatus --value | paste -sd/)
+        recent=$(journalctl -u meter-relay -n 3 --no-pager -o cat | tr '\n' ' ' | cut -c1-280)
+        message="meter-relay has FAILED on grafton-router (''${result}). Recent: ''${recent}"
+
+        if [ -z "''${MR_ALERT_HA_SERVICES:-}" ]; then
+          echo "no MR_ALERT_HA_SERVICES; outage marker written, no push target" >&2
+          exit 0
+        fi
+        IFS=',' read -r -a services <<< "$MR_ALERT_HA_SERVICES"
+        for service in "''${services[@]}"; do
+          service="''${service#notify.}"
+          [ -z "$service" ] && continue
+          curl -sS -m 5 -X POST \
+            -H "Authorization: Bearer ''${MR_HOME_ASSISTANT_BEARER_TOKEN}" \
+            -H 'content-type: application/json' \
+            -d "$(jq -Rn --arg message "$message" '{message: $message}')" \
+            "''${MR_HOME_ASSISTANT_API}/api/services/notify/''${service}" >/dev/null || true
+        done
+      '';
   };
 
   # The relay's Home Assistant token is the shared long-lived API token already

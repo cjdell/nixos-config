@@ -63,6 +63,30 @@ impl RegisterCache {
         }
     }
 
+    /// When a register was last refreshed (`None`: never). Lets the alerting
+    /// tell "the device is reporting zero" from "the device stopped
+    /// answering".
+    pub fn last_update(&self, function_code: u8, address: u16) -> Option<u64> {
+        self.updated
+            .read()
+            .unwrap()
+            .get(&function_code)?
+            .get(&address)
+            .copied()
+    }
+
+    /// Test hook: rewind a register's freshness stamp as if it were last
+    /// refreshed `age_ms` ago.
+    #[cfg(test)]
+    pub fn mark_age(&self, function_code: u8, address: u16, age_ms: u64) {
+        self.updated
+            .write()
+            .unwrap()
+            .entry(function_code)
+            .or_default()
+            .insert(address, now_ms().saturating_sub(age_ms));
+    }
+
     pub fn read_i16(&self, function_code: u8, address: u16) -> f64 {
         self.raw(function_code, address).unwrap_or(0) as i16 as f64
     }

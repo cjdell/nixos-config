@@ -103,6 +103,9 @@ export interface StatusSnapshot {
   lab_solar_power: number;
   use_octopus_go: boolean;
   charging: boolean;
+  /** Grid meter measurement is stale: meter readings read 0 W and the
+   * central loop is holding its plant targets. */
+  meter_stale: boolean;
 }
 
 /* ------------------------------------------------------------------ */

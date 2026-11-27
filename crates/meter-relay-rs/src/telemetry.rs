@@ -79,6 +79,10 @@ pub struct StatusSnapshot {
     pub lab_solar_power: f64,
     pub use_octopus_go: bool,
     pub charging: bool,
+    /// The grid meter's own measurement is stale: every meter reading in
+    /// this snapshot is 0 and the central loop is holding its targets
+    /// (`meter.rs`) rather than tracking a number nobody measured.
+    pub meter_stale: bool,
 }
 
 impl StatusSnapshot {
