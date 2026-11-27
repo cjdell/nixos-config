@@ -265,8 +265,8 @@ in
         recent=$(journalctl -u meter-relay -n 3 --no-pager -o cat | tr '\n' ' ' | cut -c1-280)
         message="meter-relay has FAILED on grafton-router (''${result}). Recent: ''${recent}"
 
-        if [ -z "''${MR_ALERT_HA_SERVICES:-}" ]; then
-          echo "no MR_ALERT_HA_SERVICES; outage marker written, no push target" >&2
+        if [ -z "''${MR_ALERT_HA_SERVICES:-}" ] || [ -z "''${MR_HOME_ASSISTANT_API:-}" ]; then
+          echo "missing MR_ALERT_HA_SERVICES or MR_HOME_ASSISTANT_API; outage marker written, no push" >&2
           exit 0
         fi
         IFS=',' read -r -a services <<< "$MR_ALERT_HA_SERVICES"
@@ -295,11 +295,12 @@ in
     MR_INFLUXDB_TOKEN = "${config.sops.placeholder.meter_relay_influxdb_token}";
   };
 
-  # The non-secret half of that EnvironmentFile: the alert knobs from `plant`
-  # above, so meter-relay-alert.service (which runs with no relay process to
-  # inherit from) pushes to the same notify services the relay itself shouts
-  # at. Derived from `plant` — there is no second copy to drift.
+  # The non-secret half of that EnvironmentFile: the alert knobs — and the
+  # HA API URL they aim at — taken from `plant` above, so meter-relay-alert
+  # .service (which runs with no relay process to inherit from) pushes to
+  # the same notify services the relay itself shouts at. Derived from
+  # `plant` — there is no second copy to drift.
   environment.etc."meter-relay/alert.env".text = convertToEnvFile (
-    lib.filterAttrs (name: _: lib.hasPrefix "MR_ALERT_" name) plant
+    lib.filterAttrs (name: _: lib.hasPrefix "MR_ALERT_" name || name == "MR_HOME_ASSISTANT_API") plant
   );
 }
