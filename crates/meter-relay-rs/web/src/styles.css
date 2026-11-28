@@ -337,6 +337,13 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
+/* Which register the headline number came from: context, not a measurement,
+   so it stays muted and never competes with the "assigned" figure. */
+.battery-source {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .battery-state {
   font-size: 0.85rem;
   color: var(--muted);

@@ -33,10 +33,11 @@ export default function PowerChart(props: { history: StatusSnapshot[] }) {
         tip: "Total inverter power the relay is requesting: the inverters are filled in priority order, each up to the authority it has been observed to have.",
       },
       ...inverters.map((inverter, index) => ({
-        label: `${inverter.name} battery`,
+        label: `${inverter.name} ${inverter.power_source === "ac" ? "AC port" : "battery"}`,
         color: PALETTE[index % PALETTE.length],
+        // The series the loop steers by, so the plot and the panel agree.
         values: props.history.map(
-          (h) => h.inverters.find((inv) => inv.id === inverter.id)?.battery_power ?? 0,
+          (h) => h.inverters.find((inv) => inv.id === inverter.id)?.control_power ?? 0,
         ),
         tip: inverter.primary
           ? "The primary bank. Above the zero line = discharging, below = charging."

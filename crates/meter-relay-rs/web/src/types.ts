@@ -54,6 +54,16 @@ export interface InverterTelemetry {
   /** True when this inverter's registers have stopped refreshing. */
   stale: boolean;
   battery_power: number;
+  /**
+   * The figure the control loops measure this inverter by — its battery
+   * register, or its AC port when that register is the BMS's CAN figure rather
+   * than a measurement of itself. The headline number on a panel must be this
+   * one: showing a reading the loop ignores is how an idle second Solis looked
+   * like it was discharging at its sibling's rate (2026-11-28).
+   */
+  control_power: number;
+  /** Which register `control_power` came from: "battery" or "ac". */
+  power_source: string;
   solar_power: number | null;
   battery_voltage: number | null;
   solar_voltage: number | null;

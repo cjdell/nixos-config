@@ -165,6 +165,8 @@ mod tests {
                     present: true,
                     stale: false,
                     battery_power: -100.0,
+                    control_power: -100.0,
+                    power_source: "battery",
                     solar_power: Some(200.0),
                     battery_voltage: Some(51.2),
                     solar_voltage: Some(300.0),
@@ -188,6 +190,8 @@ mod tests {
                     present: true,
                     stale: false,
                     battery_power: -25.0,
+                    control_power: -25.0,
+                    power_source: "battery",
                     // This make/model reports nothing but power and SOC.
                     solar_power: None,
                     battery_voltage: None,

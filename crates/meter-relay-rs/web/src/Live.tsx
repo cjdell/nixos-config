@@ -218,14 +218,15 @@ function PidPanel(props: {
 const IDLE_BAND_W = 50;
 
 function InverterPanel(props: { inv: InverterTelemetry }) {
-  // Direction is always read from the *measurement*, never from the request.
-  // The relay's sign convention is positive = discharging for every inverter
-  // (the Solis driver normalises its own status/power pair, the Solax register
-  // is already signed that way), so a positive reading is discharging whatever
-  // the allocator happened to ask for. Labelling the request instead is how
-  // this panel used to show "+153 W absorbing", which is nonsense.
+  // Direction is always read from the *measurement the loop uses*, never from
+  // the request. The relay's sign convention is positive = discharging for
+  // every inverter, whichever register that measurement comes from, so a
+  // positive reading is discharging whatever the allocator happened to ask
+  // for. Labelling the request instead is how this panel used to show
+  // "+153 W absorbing", which is nonsense.
+  const measured = () => props.inv.control_power;
   const flow = () => {
-    const p = props.inv.battery_power;
+    const p = measured();
     if (p > IDLE_BAND_W) {
       return "discharging";
     }
@@ -238,7 +239,7 @@ function InverterPanel(props: { inv: InverterTelemetry }) {
   // The request, kept visibly separate from the reading. A full bank asked to
   // absorb simply does not follow, and that gap is the useful thing to show.
   const askedToAbsorb = () => props.inv.target < -IDLE_BAND_W;
-  const refusing = () => askedToAbsorb() && props.inv.battery_power > -IDLE_BAND_W;
+  const refusing = () => askedToAbsorb() && measured() > -IDLE_BAND_W;
 
   return (
     <div class="panel">
@@ -253,9 +254,20 @@ function InverterPanel(props: { inv: InverterTelemetry }) {
       </div>
 
       <div class="battery-line">
-        <span class="battery-power">{fmt(props.inv.battery_power)}</span>
+        <span class="battery-power">{fmt(measured())}</span>
         <span class="battery-unit">W</span>
         <span class={`battery-state ${flow()}`}>{flow()}</span>
+        <span class="battery-source">
+          {props.inv.power_source === "ac" ? "AC port" : "battery register"}
+          <Tip
+            down
+            text={
+              props.inv.power_source === "ac"
+                ? "This unit is measured at its AC port because its battery block is the BMS's CAN figure for the whole shared bank, not a measurement of this inverter. No PV and no load on its output, so every AC watt is a battery watt (less conversion loss). This is also the number its control loop steers."
+                : "This unit's own battery register — a real shunt measurement of itself — and the number its control loop steers."
+            }
+          />
+        </span>
         <span class="battery-target">
           assigned {fmt(props.inv.target)} W
           <Tip
@@ -264,6 +276,18 @@ function InverterPanel(props: { inv: InverterTelemetry }) {
           />
         </span>
       </div>
+
+      <Show when={props.inv.power_source === "ac"}>
+        <div class="battery-note">
+          battery register reads {fmt(props.inv.battery_power)} W — that is the
+          shared bank (the other inverters' work), which is exactly why this unit
+          is not measured by it.
+          <Tip
+            down
+            text="The S6's 33133/33134/33149 block mirrors the BMS over CAN: 33134 is byte-for-byte the bank current, and 33149's sign comes from a status word that moves. Driven by that figure the per-inverter loop sees its sibling's power as its own error and the plant limit-cycles (measured 2026-11-28: ±3.9 kW at ~66 s). Kept here as the diagnostic, never as the measurement."
+          />
+        </div>
+      </Show>
 
       <Show when={refusing()}>
         <div class="battery-note">
@@ -361,10 +385,12 @@ function ReservePanel(props: { reserve: ReserveTelemetry; inverters: InverterTel
   // what it was asked for — the two disagree exactly when a bank refuses, and a
   // "what is happening now" panel must report the former. Each inverter's own
   // panel carries its assignment.
+  // Same rule as the panels: the figure the loops steer by, not whatever the
+  // battery register happens to echo.
   const measuredShare = () =>
-    reserves().reduce((total, inv) => total + Math.max(0, inv.battery_power), 0);
+    reserves().reduce((total, inv) => total + Math.max(0, inv.control_power), 0);
   const measuredAbsorbed = () =>
-    reserves().reduce((total, inv) => total + Math.max(0, -inv.battery_power), 0);
+    reserves().reduce((total, inv) => total + Math.max(0, -inv.control_power), 0);
 
   return (
     <div class="panel reserve-panel">

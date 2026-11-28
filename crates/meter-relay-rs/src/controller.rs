@@ -833,6 +833,11 @@ impl Controller {
                     present: inverter.cache.contains(power_regs.0, power_regs.1),
                     stale: !inverter.fresh(power_regs, POWER_STALE_MS),
                     battery_power: readings.battery_power,
+                    control_power: inverter.driver.control_power(),
+                    power_source: match inverter.cfg.power_source {
+                        PowerSource::Battery => "battery",
+                        PowerSource::Ac => "ac",
+                    },
                     solar_power: readings.solar_power,
                     battery_voltage: readings.battery_voltage,
                     solar_voltage: readings.solar_voltage,
@@ -898,6 +903,10 @@ fn empty_inverter(share: &crate::allocation::InverterAllocation, pid: crate::pid
         present: false,
         stale: false,
         battery_power: 0.0,
+        control_power: 0.0,
+        // Not a real source: `present: false` is the honest answer here, and a
+        // dashboard must not dress a missing inverter up as an idle one.
+        power_source: "battery",
         solar_power: None,
         battery_voltage: None,
         solar_voltage: None,

@@ -24,6 +24,16 @@ pub struct InverterTelemetry {
     /// True when the registers behind this inverter have stopped refreshing.
     pub stale: bool,
     pub battery_power: f64,
+    /// What the control loops actually measure this inverter by — its battery
+    /// register, or its AC port when that register is the BMS's CAN figure
+    /// rather than a measurement of itself (`PowerSource` in `inverters.rs`).
+    /// The dashboard's headline number has to be this one: a panel showing a
+    /// figure the loop ignores is how solis2, which did nothing all night,
+    /// looked like it was charging at solis1's rate (measured 2026-11-28).
+    pub control_power: f64,
+    /// Which register `control_power` came from, so a panel can name the other
+    /// figure instead of silently dropping it.
+    pub power_source: &'static str,
     pub solar_power: Option<f64>,
     pub battery_voltage: Option<f64>,
     pub solar_voltage: Option<f64>,
