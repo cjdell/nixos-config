@@ -55,6 +55,25 @@ use serde::Serialize;
 /// Tolerated gap between requested and delivered power before an authority
 /// estimate is revised downwards (W).
 const AUTHORITY_MARGIN_W: f64 = 150.0;
+/// The least power that must actually be flowing for "it kept up" to count as
+/// evidence, so a direction nobody is using cannot drift upwards on its own
+/// noise. Deliberately near the noise floor and **not** a floor on the command:
+/// gating on the command re-creates the dead zone this is here to close, one
+/// level down — a starved member is asked for little *because* its estimate is
+/// low, so 300 W would have left it frozen at 163 W all the same. The safety
+/// against climbing past what a unit can do is not this floor: it is the
+/// deficit path, which snaps the estimate to the observed delivery 3 s after a
+/// command stops being met, and the grace window only covers the very first
+/// command of a run.
+const AUTHORITY_EARN_MIN_W: f64 = 20.0;
+/// How long after the relay (re)starts, or after a measurement gap closes, a
+/// gap between command and delivery is treated as a ramp rather than a refusal.
+/// The central split hands an inverter its demand immediately, but that unit's
+/// own loop has to wind its nudge up from zero through the inverter's
+/// meter-driven current control, which takes seconds. Measured 2026-11-28: the
+/// first command after a restart took solis2 from its 3.0 kW ceiling to the
+/// 163 W floor in under 4 s.
+const AUTHORITY_GRACE_MS: u64 = 15_000;
 /// How fast a collapsed authority estimate may probe back up (W/s).
 const AUTHORITY_RELAX_W_PER_S: f64 = 60.0;
 /// Delivery must rise by at least this much inside a deficit run for the gap to
@@ -407,6 +426,8 @@ struct AuthorityLimit {
     /// delivery keeps rising past this the gap is the plant following a moving
     /// command, not a refusal.
     deficit_baseline: f64,
+    /// Until this time a gap is a ramp, not a refusal (see AUTHORITY_GRACE_MS).
+    grace_until: u64,
     /// Highest command the re-probe ladder has reached since the plant last
     /// answered. Independent of `value`, which the collapse logic may pull back
     /// to the floor between probes — that is what lets a stranded estimate
@@ -425,6 +446,7 @@ impl AuthorityLimit {
             deficit_since: None,
             hold_until: 0,
             deficit_baseline: 0.0,
+            grace_until: 0,
             reprobe_high: 0.0,
             reprobe_at: 0,
         }
@@ -432,6 +454,14 @@ impl AuthorityLimit {
 
     fn limit(&self) -> f64 {
         self.value
+    }
+
+    /// Start a grace window: called when this direction is observed for the
+    /// first time, which is also exactly when the central split has just handed
+    /// the plant a demand its inner loop has not had time to act on yet.
+    fn start_grace(&mut self, now: u64) {
+        self.grace_until = now + AUTHORITY_GRACE_MS;
+        self.deficit_since = Some(now);
     }
 
     /// Offers a silent plant a command one rung further up the ladder. The
@@ -461,6 +491,14 @@ impl AuthorityLimit {
     /// only while the loop is actually leaning on it, so an idle direction does
     /// not drift upwards unattended.
     fn observe(&mut self, commanded: f64, delivered: f64, now: u64, dt: f64) {
+        // Inside the grace window the plant is still chasing a command it was
+        // only just handed: keep the stall clock pushed out and track where its
+        // delivery has got to, but draw no conclusion from the gap.
+        if now < self.grace_until {
+            self.deficit_since = Some(now);
+            self.deficit_baseline = delivered;
+        }
+
         // Delivery making progress towards the command means the plant is
         // catching up, not refusing: restart the stall clock. A plant trailing
         // a moving command will keep doing this, so the probe continues; only a
@@ -512,8 +550,20 @@ impl AuthorityLimit {
         }
 
         // `value` may have moved on the escalation above, so re-read it.
+        //
+        // Two ways to earn authority back. The first is the original: the loop
+        // is asking for everything the estimate allows, so it is a good moment
+        // to see whether that is still true. The second is what a **primary
+        // group** needs — a member's command is only its *share* of the demand,
+        // usually well below its own estimate, so leaning alone left a collapsed
+        // member starved for good: never asked for the power that would prove it
+        // had recovered, so never allowed to recover (2026-11-28: solis2 sat at
+        // the 163 W floor for as long as you watched it, meeting every command
+        // it was given). Meeting a real command is the demonstration itself.
         let leaning_on_it = commanded >= self.value - PROBE_BAND_W;
-        if leaning_on_it && now >= self.hold_until {
+        let earning_it =
+            delivered >= AUTHORITY_EARN_MIN_W && delivered + AUTHORITY_MARGIN_W >= commanded;
+        if (leaning_on_it || earning_it) && now >= self.hold_until {
             self.value = (self.value + AUTHORITY_RELAX_W_PER_S * dt).min(self.ceiling);
         }
     }
@@ -568,6 +618,11 @@ impl InverterAuthority {
             self.commanded = state.commanded;
             self.delivered = state.delivered;
             self.seen = true;
+            // First usable measurement of this run — or the first after a gap,
+            // where the same argument applies because the loops are starting
+            // over from whatever the device happens to be doing.
+            self.discharge.start_grace(now);
+            self.charge.start_grace(now);
         } else {
             self.commanded += alpha * (state.commanded - self.commanded);
             self.delivered += alpha * (state.delivered - self.delivered);
@@ -1872,6 +1927,81 @@ mod tests {
             "someone has to be on line"
         );
         assert!(!alloc.policies()[1].primary, "and only the first one");
+    }
+
+    /// The bug the primary group exposed: a member's command is its *share* of
+    /// the demand, so it is normally far below its own estimate, and "only
+    /// relax while the loop leans on the estimate" made a collapsed member
+    /// permanent — frozen at the floor while doing exactly what it was told.
+    /// Duty sharing is the point of the group, so a member that keeps up has to
+    /// be able to climb back.
+    #[test]
+    fn a_group_member_asked_for_less_than_its_authority_still_recovers_it() {
+        let mut alloc = Allocator::new(tandem_plant());
+        mark_available(&mut alloc);
+        alloc.inverters[1].authority.discharge.value = 300.0;
+
+        let mut now = 0;
+        let mut first = 0.0;
+        let mut last = 0.0;
+        for step in 0..3_000 {
+            now += TICK_MS;
+            let out = alloc.split(2_000.0, DT);
+            // A healthy unit: it delivers what it is asked for.
+            let states: Vec<InverterState> = out.targets().iter().map(|t| fresh(*t, *t)).collect();
+            alloc.observe(&states, now, DT);
+            if step == 0 {
+                first = out.target("solis2");
+            }
+            last = out.target("solis2");
+        }
+
+        let recovered = alloc.inverters[1].authority.discharge_limit();
+        assert!(
+            recovered > 900.0,
+            "authority should climb while it keeps up, got {recovered}"
+        );
+        assert!(
+            recovered <= 3_000.0,
+            "and stop at the unit's rating, got {recovered}"
+        );
+        assert!(
+            last > first,
+            "so does its share of the duty: {first:.0} W then {last:.0} W"
+        );
+    }
+
+    /// The other half: the gap that *caused* the collapse. At startup the split
+    /// hands the plant its demand straight away, while the inverter's own loop
+    /// still has to wind its nudge up through the inverter's meter-driven
+    /// current control. That is seconds, and it is not a refusal.
+    #[test]
+    fn a_command_the_plant_has_not_had_time_to_act_on_is_not_a_refusal() {
+        let mut alloc = Allocator::new(plant());
+        let mut now = 0;
+
+        // 5 s of "asked for 3.6 kW, still sitting at 50 W" — the start-up race.
+        for _ in 0..500 {
+            now += TICK_MS;
+            alloc.observe(&[fresh(3_600.0, 50.0), stale(0.0, 0.0)], now, DT);
+        }
+        assert!(
+            alloc.limits().discharge > 3_000.0,
+            "the grace window must not have collapsed it, got {}",
+            alloc.limits().discharge
+        );
+
+        // The grace is a head start, not a pardon: a plant that still will not
+        // move after half a minute has told us what it can do.
+        for _ in 0..3_500 {
+            now += TICK_MS;
+            alloc.observe(&[fresh(3_600.0, 50.0), stale(0.0, 0.0)], now, DT);
+        }
+        assert!(
+            alloc.limits().discharge < 400.0,
+            "a real refusal is still learned, got {}",
+            alloc.limits().discharge
+        );
     }
 
     /// With one inverter the reserve logic must simply never fire: the plant

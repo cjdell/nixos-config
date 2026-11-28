@@ -533,6 +533,41 @@ command no matter what the allocator asks, and the authority learner then reads
 the shortfall as the battery refusing power and collapses the unit's limit to
 its 150 W floor — last night's signature, self-inflicted.
 
+#### Two start-up bugs the group exposed (same deploy)
+
+Deploying the group made solis2 freeze at **163 W of discharge authority for as
+long as it was watched**, meeting every command it was given — and the freeze is
+the interesting part, not the collapse:
+
+- **The recovery path was unreachable.** `AuthorityLimit` relaxed its estimate
+  back toward the rating only while the loop was *leaning on the estimate*
+  (`commanded >= value - 50`). Under water-filling a primary is always asked for
+  the whole remaining demand, so that held. Under a **proportional** split a
+  member's command is only its share, usually far below its own estimate, so the
+  relax could never run: never asked for the power that would prove it had
+  recovered, therefore never allowed to recover. Fixed by a second way to earn
+  authority — real power flowing (`>= 20 W`) and the command met — and the gate
+  is deliberately on **delivery, not command**: gating on the command re-creates
+  the same dead zone one level down, because a starved member is asked for little
+  *because* its estimate is low. What keeps an over-optimistic climb honest is
+  the deficit path, which snaps the estimate to observed delivery 3 s after a
+  command stops being met.
+- **The collapse itself was a start-up race.** The split hands an inverter its
+  demand the instant the relay starts, but that unit's own loop still has to wind
+  its nudge up from zero through the S6's meter-driven current control: seconds.
+  Measured — 3.0 kW ceiling to the 163 W floor in under 4 s after the restart.
+  A `grace_until` window (15 s, restarted when a measurement gap closes, since
+  the loops start over there too) treats a gap inside it as a ramp: the stall
+  clock is pushed out and the baseline tracked, and **no conclusion is drawn**.
+  It is a head start, not a pardon — `a_command_the_plant_has_not_had_time_to_act_on_is_not_a_refusal`
+  pins that a plant still refusing at 40 s is collapsed exactly as before.
+
+Both are pinned by tests rather than by reasoning (`a_group_member_asked_for_less_than_
+its_authority_still_recovers_it`, `a_command_the_plant_has_not_had_time_to_act_on_is_not_a_
+refusal`), and the ordering matters for anyone reading this later: with the earn-floor at
+300 W the first test still failed at exactly 300 W, which is what showed the floor was in
+the wrong place.
+
 #### What the full bus probe changed
 
 `probe-statsbus.py` (scratch, `/tmp/opencode`) sweeps 33000-33259 (fc4) and
