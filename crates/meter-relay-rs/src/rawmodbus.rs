@@ -195,13 +195,21 @@ impl RawModbus {
                 if !self.write_enabled {
                     return Err("writes are disabled (MR_MODBUS_WRITE_ENABLED)".into());
                 }
-                let echoed = self.group.write_register(slave, address, value).await?;
+                let ack = self.group.write_register(slave, address, value).await?;
+                // `confirmed` is the part to read: a Solis writes the register
+                // before it answers (measured: the FC6 echo times out on every
+                // storage-mode change), so an echo is not the evidence — the
+                // read-back is. A caller that retried on "unacknowledged" would
+                // double-apply a write that had in fact landed.
                 Ok(json!({
-                    "ok": true,
+                    "ok": ack.confirmed(),
                     "op": "write",
                     "slave": slave,
                     "address": address,
-                    "value": echoed,
+                    "value": value,
+                    "echoed": ack.echoed,
+                    "value_now": ack.value_now,
+                    "confirmed": ack.confirmed(),
                     "elapsed_ms": started.elapsed().as_millis() as u64,
                 }))
             }

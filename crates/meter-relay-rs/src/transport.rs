@@ -160,12 +160,19 @@ impl ModbusSlaveGroup {
     /// A single FC6 write on this lane, serialised against the poll loop by the
     /// same lock. An FC6 reply echoes the request (8 bytes) and therefore does
     /// not fit the read-shaped `ModbusResponse`, so the echo is checked here.
+    ///
+    /// A timeout is **not** a refusal: a Solis applies the register first and
+    /// replies late, so reporting "failed" here (and retrying, as reads do)
+    /// would be a lie with consequences — measured on 2026-11-28, two storage
+    /// mode writes timed out, both applied, and the first report said neither
+    /// had. So an unanswered write is settled by reading the register back
+    /// instead of being resent, and the answer says which evidence it has.
     pub async fn write_register(
         &self,
         slave: u8,
         address: u16,
         value: u16,
-    ) -> Result<u16, String> {
+    ) -> Result<WriteAck, String> {
         let _guard = self.request_lock.lock().await;
 
         let mut frame = vec![0u8; 8];
@@ -181,11 +188,16 @@ impl ModbusSlaveGroup {
             match self.exchange(&frame).await {
                 Ok(packet) => {
                     if let Some(code) = exception_code(&packet) {
+                        // A refused register is a real answer: the device did
+                        // not write it. Retrying is pointless for FC6.
                         self.stats.record_error(
                             "exception",
                             format!("device refused write {address}={value} with exception {code}"),
                         );
-                        last_error = format!("exception {code}");
+                        return Err(format!(
+                            "writeRegister: \"{}\" | the device refused it with exception {code}",
+                            self.name
+                        ));
                     } else if packet.len() == 8
                         && packet[0] == slave
                         && packet[1] == 6
@@ -194,18 +206,81 @@ impl ModbusSlaveGroup {
                     {
                         self.stats.count_responses_in(1);
                         self.stats.record_success();
-                        return Ok(value);
+                        return Ok(WriteAck {
+                            value,
+                            echoed: true,
+                            value_now: None,
+                        });
                     } else {
                         self.stats
                             .record_error("protocol", "unexpected FC6 echo".to_string());
                         last_error = format!("unexpected echo ({} bytes)", packet.len());
                     }
                 }
+                Err(err) if err == "timeout" => {
+                    // Ask the device what it holds now. This is the only
+                    // evidence there is that the write landed.
+                    let now = self.read_one(slave, address).await;
+                    return match now {
+                        Ok(value_now) => {
+                            if value_now == value {
+                                self.stats.record_success();
+                            }
+                            Ok(WriteAck {
+                                value,
+                                echoed: false,
+                                value_now: Some(value_now),
+                            })
+                        }
+                        Err(read_error) => Err(format!(
+                            "writeRegister: \"{}\" | no echo and the read-back also failed                              ({read_error}) — the write may or may not have landed",
+                            self.name
+                        )),
+                    };
+                }
                 Err(err) => last_error = err,
             }
         }
 
         Err(format!("writeRegister: \"{}\" | {last_error}", self.name))
+    }
+
+    /// FC3 read of one register, used to settle an unacknowledged write.
+    async fn read_one(&self, slave: u8, address: u16) -> Result<u16, String> {
+        let frame = ModbusRequest::new(slave, 3, address, 1).to_buffer();
+        let packet = self.exchange(&frame).await?;
+        if let Some(code) = exception_code(&packet) {
+            return Err(format!("exception {code}"));
+        }
+        let response = ModbusResponse::from_packet(
+            ModbusRequest::new(slave, 3, address, 1),
+            &packet,
+        )?;
+        self.stats.count_responses_in(1);
+        Ok(u16::from_be_bytes([response.regs[0], response.regs[1]]))
+    }
+}
+
+/// The outcome of an FC6 write, and *how* it is known.
+///
+/// `echoed` is the device's own acknowledgement. When it is false the device
+/// applied (or did not apply) the register without being heard, and `value_now`
+/// is a read-back: the write is confirmed when `value_now == value`, and a
+/// mismatch means the device kept its own value (a clamp, or a register it
+/// rewrites). There is no third case where "failed" is knowable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteAck {
+    pub value: u16,
+    pub echoed: bool,
+    pub value_now: Option<u16>,
+}
+
+impl WriteAck {
+    pub fn confirmed(&self) -> bool {
+        match self.value_now {
+            Some(now) => now == self.value,
+            None => true,
+        }
     }
 }
 
@@ -436,6 +511,35 @@ async fn serve(stream: BoxStream, name: &str, handler: RequestHandler, stats: Ar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write is confirmed only by evidence that it landed. Measured on
+    /// 2026-11-28: every Solis storage-mode write timed out on the echo and had
+    /// in fact been applied, so an echo is the *weak* case and a read-back that
+    /// disagrees with the request must not be reported as success.
+    #[test]
+    fn a_write_is_confirmed_by_the_echo_or_by_a_matching_read_back() {
+        let echoed = WriteAck {
+            value: 51,
+            echoed: true,
+            value_now: None,
+        };
+        assert!(echoed.confirmed());
+
+        let read_back = WriteAck {
+            value: 51,
+            echoed: false,
+            value_now: Some(51),
+        };
+        assert!(read_back.confirmed());
+
+        let clamped = WriteAck {
+            value: 51,
+            echoed: false,
+            value_now: Some(1),
+        };
+        assert!(!clamped.confirmed());
+    }
+
     use crate::diagnostics::Role;
 
     /// A fake device that answers every request it decodes with `value`, and
