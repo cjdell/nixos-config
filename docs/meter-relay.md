@@ -472,6 +472,23 @@ target. The phantom still reads 1584 W — the bank, unchanged — and now steer
 nothing. The charge ceiling is no longer collapsed either: `charge_limit` reads
 3600 W, so tonight's window is the first real test of solis2's share.
 
+**The dashboard was the last liar (same morning, 07:20).** An hour after the
+switch the relay's own dashboard still showed **both** Solises discharging
+~1.8 kW while `sensor.solis2_inverting_power` read 0 W and the BMS agreed with
+the AC side: solis1 was discharging 1804 W DC (1579 W AC) and solis2 was idle,
+its panel printing the phantom, `battery_power` = 1771 W = the bank. The switch
+had moved the *loop*'s measurement and left the *picture* behind, which is the
+same failure mode as last night in a different costume: a panel showing a figure
+no part of the plant acts on. `/api/status` now carries `control_power` (what the
+loops measure) and `power_source` (`battery` | `ac`) per inverter, and every
+panel figure — headline number, charging/discharging/idle badge, the "refusing"
+note, the reserve sums, the chart series — reads `control_power`. An AC-source
+unit says so and shows the phantom as an amber note ("battery register reads
+1771 W — that is the shared bank"), so the diagnostic stays visible without
+being load-bearing. Note the AC figure is legitimately **larger** than the DC one
+when discharging (1579 W at the wall from 1804 W out of the bank here) — that is
+conversion loss, not missing power, and the panel's Tip says which end is which.
+
 ### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 
 While closing out the morning's FTDI loss, the plant died a second time, and the
