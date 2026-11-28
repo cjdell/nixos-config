@@ -161,7 +161,14 @@ let
     MR_SOLIS2_PORT = "2003";
     MR_SOLIS2_SLAVE = "3";
     MR_SOLIS2_METER_DIALECT = "sdm630";
-    MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:52:6";
+    # The S6's poll vocabulary GROWS with its state: hunting cycles
+    # 0x00/0x0C/0x18/0x34-n6; locked-on it hammered 0x0C n6 at ~110 Hz; in
+    # steady state (observed the first night, 00:34) it adds per-phase PF
+    # (0x1E n6) and a widened totals read (0x34 n10). Discovery only needs
+    # ANY observed pattern to match, so list every state's vocabulary —
+    # a fingerprint that lags the inverter's phases locks strict mode out
+    # of the whole plant (it did, 2026-11-28 00:34, mid Go-window).
+    MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:30:6,4:52:6,4:52:10";
     MR_SOLIS2_REVERSE = "true"; # vendor convention "+ = to grid"; confirm at first window
     MR_SOLIS2_KP = "0.3";
     # ARMED CHARGE-ONLY for the first Octopus Go window (night 2026-11-28/29):
