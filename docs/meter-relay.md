@@ -272,7 +272,8 @@ reads corresponds to something reviewable.
 
 ### The second Solis joins (2026-11-27 evening) — three-phase dialects and an inert plant entry
 
-The plant is now declared as **`solis,solax,solis2`**. The second Solis (an
+The plant was declared **`solis,solax,solis2`** that evening (the order is
+`solis,solis2,solax` since the primary group below). The second Solis (an
 S6 hybrid, battery pack analogue-connected at 48.9 V, **no battery CAN yet**,
 AC wiring *temporary — current-limited*) taught the relay its first lesson
 about meter **dialects**:
