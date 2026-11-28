@@ -54,6 +54,10 @@ pub struct InverterConfig {
     /// `MR_<ID>_METER_DIALECT` (`eem` is the historical single-phase map
     /// every line used before three-phase inverters joined the plant).
     pub meter_dialect: &'static crate::meter::MeterDialect,
+    /// Which of the unit's own registers the loops measure it by — the battery
+    /// register unless `MR_<ID>_POWER_SOURCE=ac` says its battery block cannot
+    /// be trusted as a measurement of this inverter. See [`PowerSource`].
+    pub power_source: crate::inverters::PowerSource,
 }
 
 impl InverterConfig {
@@ -594,6 +598,15 @@ fn load_inverters(
             spec => parse_meter_poll(&spec)
                 .with_context(|| format!("parsing {}", var("METER_POLL")))?,
         };
+        let power_source_name = optional(&var("POWER_SOURCE"), "battery").to_ascii_lowercase();
+        let power_source = inverters::power_source(&power_source_name).ok_or_else(|| {
+            anyhow!(
+                "{} names unknown power source {power_source_name:?}; known: battery, ac \
+                 (ac = measure this inverter by its AC-port register, for a unit whose \
+                 battery block is the BMS's CAN figure rather than its own measurement)",
+                var("POWER_SOURCE")
+            )
+        })?;
 
         out.push(InverterConfig {
             driver: driver.clone(),
@@ -608,6 +621,7 @@ fn load_inverters(
             probe_regs: inverters::probe_regs(&driver)?,
             meter_poll,
             meter_dialect,
+            power_source,
             policy,
         });
     }

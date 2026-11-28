@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use tokio::time::MissedTickBehavior;
 
 use crate::allocation::{Allocation, InverterState, ReserveState};
@@ -13,7 +13,7 @@ use crate::discovery::Assignment;
 use crate::home_assistant::HomeAssistant;
 use crate::influx::InfluxWriter;
 use crate::inverter_controller::InverterController;
-use crate::inverters::{self, Inverter, InverterDriver};
+use crate::inverters::{self, Inverter, InverterDriver, PowerSource};
 use crate::meter::{Meter, METER_REGS};
 use crate::pid::PidController;
 use crate::registers::{ModbusSlaveProxy, RegisterCache};
@@ -73,7 +73,7 @@ impl InverterRuntime {
 
         InverterState::new(
             self.controller.target(),
-            self.driver.battery_power(),
+            self.driver.control_power(),
             fresh,
         )
         .with_soc(soc)
@@ -113,8 +113,23 @@ impl Controller {
         let mut inverters = Vec::with_capacity(cfg.inverters.len());
         for inverter in &cfg.inverters {
             let cache = Arc::new(RegisterCache::new());
-            let driver = inverters::build(&inverter.driver, Arc::clone(&cache))
-                .with_context(|| format!("building the driver for inverter {:?}", inverter.id()))?;
+            let driver =
+                inverters::build(&inverter.driver, Arc::clone(&cache), inverter.power_source)
+                    .with_context(|| format!("building the driver for inverter {:?}", inverter.id()))?;
+
+            // Asking to be measured by the AC port on a driver that has no
+            // AC-port register must not quietly fall back to measuring
+            // something else: that is the same wrong-signal failure the source
+            // switch exists to avoid, only invisible.
+            if inverter.power_source == PowerSource::Ac && !driver.supports_ac_power() {
+                bail!(
+                    "inverter {:?} (driver {:?}) has no AC-port register, so \
+                     MR_{}_POWER_SOURCE=ac cannot be honored",
+                    inverter.id(),
+                    inverter.driver,
+                    inverter.id().to_ascii_uppercase()
+                );
+            }
 
             // Per-inverter loops, P-only: they drive each inverter's own
             // firmware towards the share the allocator assigns.
@@ -476,7 +491,7 @@ impl Controller {
                 fields.push_str(&format!(
                     ",{}_actual_power={},{}_target_power={},{}_nudge={}",
                     inverter.id(),
-                    inverter.driver.battery_power(),
+                    inverter.driver.control_power(),
                     inverter.id(),
                     inverter.controller.target(),
                     inverter.id(),

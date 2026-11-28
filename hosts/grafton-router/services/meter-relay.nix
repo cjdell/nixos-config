@@ -142,21 +142,18 @@ let
     MR_SOLAX_MAX_SOC = "95"; # not charged at or above this %
     MR_SOLAX_ABSORB_SURPLUS = "true";
 
-    # --- Solis 2: the second S6 hybrid, plumbed but INERT (2026-11-27) -----
+    # --- Solis 2: the second S6 hybrid, armed CHARGE-ONLY (2026-11-28) -----
     # Wired and verified on the wires: stats bus answers at slave 3 (battery
     # 48.9 V, same 33xxx register layout as its sibling), and its meter port
     # hammers this line for an Eastron SDM630-style three-phase meter
     # (fc4 0x00/0x0C/0x18/0x34, the totals block at ~100 Hz while hunting).
-    # It is served the honest grid reading in the sdm630 dialect, but the
-    # NUDGE LIMIT is the kill switch: the PID's only authority over an
-    # inverter is the nudge on the phantom reading, and zero nudge means the
-    # relay observes this inverter without ever steering it. That is
-    # deliberate — its AC wiring is temporary and cannot carry the currents
-    # a charge/discharge loop would command, and it has no battery CAN yet.
-    # Arming later is exactly: raise MR_SOLIS2_NUDGE_LIMIT and the MAX_* /
-    # CHARGE_POWER budgets to the intended values, after confirming its
-    # meter-power sign convention (REVERSE below follows the vendor doc's
-    # "+ = to grid", unverified on this model until the arming test).
+    # It is served the honest grid reading in the sdm630 dialect, and the
+    # NUDGE LIMIT is its steering authority: the PID's only power over an
+    # inverter is the nudge on that emulated reading. The unit was commissioned
+    # on-grid on 2026-11-28 (Self-Use + TOU + Reserve + allow-grid-charge, i.e.
+    # 43110 = 51 like its sibling) and does follow the meter it is shown.
+    # Arming it also settled the meter-power sign question: REVERSE below is
+    # right, proven closed-loop by the grid meter, not by the vendor doc.
     MR_SOLIS2_DRIVER = "solis";
     MR_SOLIS2_PORT = "2003";
     MR_SOLIS2_SLAVE = "3";
@@ -169,27 +166,34 @@ let
     # a fingerprint that lags the inverter's phases locks strict mode out
     # of the whole plant (it did, 2026-11-28 00:34, mid Go-window).
     MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:30:6,4:52:6,4:52:10";
-    MR_SOLIS2_REVERSE = "true"; # vendor convention "+ = to grid"; confirm at first window
+    MR_SOLIS2_REVERSE = "true"; # "+ = to grid"; proven closed-loop 2026-11-28
     MR_SOLIS2_KP = "0.3";
-    # ARMED CHARGE-ONLY, but found to be a PHANTOM on the night of 2026-11-28:
-    # the unit is still in its off-grid/bypass commissioning state, so it reads
-    # our emulated meter and does nothing with it — and its battery registers
-    # are the BMS/CAN stream, not a measurement of this inverter. The balance
-    # (meter_power - house - solis - solax) leaves 0 W for this unit on every
-    # sample, while its "battery power" tracks solis1's DC current. Do not read
-    # its position on the dashboard as work done: `inverting_power`
-    # (33151-52) is the honest per-unit number, and 33149's sign flaps with
-    # 33135. MAX_DISCHARGE stays 0 while it is uncommissioned: if it ever does
-    # go on-grid with an unverified REVERSE, the wrong way to move is discharge,
-    # and that door is physically locked from the relay's side. Commission it
-    # (grid standard, storage mode, meter/CT setting) before judging the loop;
-    # its own Max-Grid-Charge-Current is the hardware bound (~30 A set for now).
+    # MEASURE IT BY THE AC PORT. Its battery registers are the BMS/CAN stream,
+    # not a measurement of this inverter: 33134 is byte-for-byte the bank
+    # current and 33149's sign flaps with 33135. Driven by that figure the
+    # per-inverter loop was positive feedback — it read solis1's 3.6 kW as
+    # solis2's own over-delivery and pulled the nudge the wrong way — so on the
+    # night of 2026-11-28 the unit limit-cycled ±3.9 kW at its AC port on a
+    # ~66 s period (plant grid flow 1.6 → 8.6 kW, 166 large sign crossings in
+    # 4.4 h), and the learned charge authority collapsed to its 150 W floor.
+    # This unit has no PV strings and no load on its output, so every watt at
+    # the AC port IS a watt to or from its battery (less ~8 % conversion): 33151
+    # is both the honest and the complete signal. See PowerSource in
+    # inverters.rs for the sign guarantees that make the switch safe.
+    # The phantom is still published (sensor.solis2_battery_power) for
+    # diagnostics and as the labelled "battery register" dashboard row — it must
+    # never steer anything, and `inverting_power` is the number to read.
+    # MAX_DISCHARGE stays 0 (charge-only) until the loop is proven under a
+    # discharge command: with a unit this new, the wrong direction to move in is
+    # export. The ceiling below is a budget, not an invitation — the BMS's CCL
+    # and the S6's own Max-Grid-Charge-Current (its menu) are what bind.
     MR_SOLIS2_NUDGE_LIMIT = "1500";
+    MR_SOLIS2_POWER_SOURCE = "ac";
     MR_SOLIS2_HA_PREFIX = "solis2";
     MR_SOLIS2_MAX_DISCHARGE = "0";
-    MR_SOLIS2_MAX_CHARGE = "1500";
+    MR_SOLIS2_MAX_CHARGE = "3600";
     MR_SOLIS2_SLEW = "1500";
-    MR_SOLIS2_CHARGE_POWER = "1500";
+    MR_SOLIS2_CHARGE_POWER = "3600";
     MR_SOLIS2_MIN_SOC = "20";
     MR_SOLIS2_MAX_SOC = "95";
     MR_SOLIS2_ABSORB_SURPLUS = "false";
