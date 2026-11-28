@@ -165,6 +165,17 @@ let
     # 43110 bit 2, the Off-Grid *switch* inside the Off-grid page) and does
     # follow the meter it is shown. REVERSE is proven closed-loop by the grid
     # meter, not by the vendor doc.
+    #
+    # 2026-11-28 afternoon — what that unit's own MENU must say, because the
+    # relay cannot set any of it: **Backup Supply OFF** (43111 = 0) and,
+    # therefore, `43110 = 33` (Self-Use + Allow Grid Charge, no reserve, no
+    # TOU). With Backup Supply ON the factory Reserved SOC (43024 = 80 %)
+    # applies, and a pack below 80 % charges at the AC limit the instant a mode
+    # allows grid import — it ignores every target while doing it. 43024 and
+    # 43027 are read-only over Modbus. Backup off removes the floor; 33 then
+    # charges AND discharges under the relay's control (pins −1500 W and
+    # +2500 W both converged, see docs/meter-relay.md). Backup output is
+    # deliberately not provided by this unit.
     MR_SOLIS2_DRIVER = "solis";
     MR_SOLIS2_PORT = "2003";
     MR_SOLIS2_SLAVE = "3";

@@ -707,38 +707,52 @@ and in the other direction, from ~1055 W:
 path is not the problem**, so a unit that ignores a target is refusing the
 *measurement* — which is what the rejected-meter class above was.
 
-#### The mode: bit 5 is a charge switch, not a permission
+#### The mode, the reserve, and the "it charges at full rate" trap
 
 solis2 was found sitting at `43110 = 1` (plain Self-Use) while solis1 sits at
-`51` (Self-Use + TOU + Reserve + Allow-Grid-Charge). Writing **51 or 49 back
-onto solis2 does not restore anything** — it instantly puts the unit at
-**−3.2 kW** (its AC limit), ignoring every target, with `33132` (the applied
-mode) dutifully reporting what was written. Writing `1` clears it in the same
-second. So it is **bit 5 alone** (49 = 51 without the TOU bit, and it storms
-identically); TOU and the empty time-charging slots are not involved.
+`51` (Self-Use + TOU + Reserve + Allow-Grid-Charge). **Writing 51 or 49 back onto
+it did not restore anything** — it instantly put the unit at **−3.2 kW** (its AC
+limit), ignoring every target, with `33132` (the applied mode) dutifully
+reporting what was written. Writing `1` cleared it in the same second, which is
+what made it look like a mode problem.
 
-The reason is a setting, not a fault: **`43024` Backup SOC is 80 on solis2 and
-25 on solis1**, and the pack sits at **75 %**. solis2 is permanently under its
-own backup floor, so the moment it may import it charges flat out to reach 80 %.
-`43024` **cannot be lowered over Modbus** — the write is refused and read back as
-80 (both writes, twice). `43027` (Force-charge Power Limitation, 50 W on
-solis2 vs 600 W on solis1) is equally read-only. Both are app/menu settings.
+It is not. The unit was obeying a **Reserved SOC of 80 %** (`43024`), with the
+pack at 74–75 %: permanently under its own backup floor, so the moment a mode
+let it import it charged flat out to get there. That floor only exists while
+**Backup Mode is on** (`43111`), and `43111` on solis2 was 1 — a bare Self-Use
+unit that still reserves 80 % for an outage.
 
-Consequences, which is why solis2 is left at mode 1:
+**The owner's fix was the right one, and it is a menu setting, not a relay
+setting: turn Backup Supply OFF on that inverter.** The `Reserved SOC` row lives
+*directly under the Backup Mode switch* on the Self-Use page (S6 manual §5, the
+commissioning screens), so switching backup off hides the row as well — that is
+why it cannot be found afterwards, and why it is not reachable over Modbus
+(`43024` refuses every write; `43027`, the Force-charge Power Limitation, does
+too). 80 % is also what the manual's own fresh-unit screen shows, and solis2's
+whole settings block is otherwise identical to solis1's — this was the factory
+value of a unit commissioned the day before, not a decision anyone made.
 
-| | mode 1 | mode 49 / 51 |
-|---|---|---|
-| shares discharge under the relay's control | yes (proven above) | yes |
-| charges from PV surplus | yes (self-use) | yes |
-| charges from the grid when commanded | **no** — saturates at ~0 W (`-1500 W` pin took it +252 → −20 W and stopped) | **no** — storms to AC limit and ignores the command |
+With backup off, `43110 = 33` (**Self-Use + Allow Grid Charge**, no reserve, no
+TOU) is the coherent value, and it behaves:
 
-So the plant's cheap-window charging stays **solis1's** job. If solis2 is ever
-wanted on grid charging, the fix is a **manual menu change** (lower Backup SOC
-to ~25 in the app/touchscreen to match solis1), after which bit 5 should be
-re-tested; do not expect the relay to do it, and do not "fix" it by retuning
-PIDs.
+```
+12:24:56  solis2 +353 / tgt +348   after 43110 = 33        ← no storm
+12:26:05  solis2 −801              pin −1500 W applied
+12:26:36  solis2 −1483 / tgt −1500 ← charges from the grid, 17 W off
+12:27:51  solis2 +2043              pin +2500 W applied
+12:28:22  solis2 +2469 / tgt +2500 ← and discharges again
+```
 
-#### RC force-charge exists, and is capped at 50 W
+So solis2 is now a full participant in both directions: it shares discharge,
+absorbs PV surplus, and grid-charges when the relay asks — with the plant's
+cheap-window charge spread over both units instead of one.
+
+Two things that are *not* the explanation, recorded so nobody re-tests them:
+TOU is not involved (49 storms without it, and both units report V1 firmware,
+`33289 = 0`), and the meter emulation is not involved (it is accepted the whole
+time — `33132` mirrors every write and the AC port tracks the pin).
+
+#### RC force-charge exists, and is capped by a read-only register
 
 `43135` is a **bitfield** (bit 0 force-charge, bit 1 force-discharge) and
 `43136` its power in W. Setting bit 0 does work on solis2 in mode 1 — the AC
