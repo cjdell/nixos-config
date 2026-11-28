@@ -162,14 +162,24 @@ let
     MR_SOLIS2_SLAVE = "3";
     MR_SOLIS2_METER_DIALECT = "sdm630";
     MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:52:6";
-    MR_SOLIS2_REVERSE = "true"; # vendor convention "+ = to grid"; verify at arming
+    MR_SOLIS2_REVERSE = "true"; # vendor convention "+ = to grid"; confirm at first window
     MR_SOLIS2_KP = "0.3";
-    MR_SOLIS2_NUDGE_LIMIT = "0"; # INERT: serves the honest reading, steers nothing
+    # ARMED CHARGE-ONLY for the first Octopus Go window (night 2026-11-28/29):
+    # the meter-acceptance lock-in (its poll stream collapsed onto the
+    # per-phase active-power block at ~110 Hz — the nudge rides exactly
+    # there) proved the control path, so the nudge limit is now real, but
+    # MAX_DISCHARGE stays 0 deliberately: if the sign assumption is inverted,
+    # the wrong way to move is discharge, and that door is physically locked
+    # from the relay's side. Raise MAX_DISCHARGE once the window has shown
+    # the loop steering the right way. Also bounded hardware-side by the
+    # inverter's own Max-Grid-Charge-Current setting (set ~30 A in its menu
+    # for the first nights).
+    MR_SOLIS2_NUDGE_LIMIT = "1500";
     MR_SOLIS2_HA_PREFIX = "solis2";
     MR_SOLIS2_MAX_DISCHARGE = "0";
-    MR_SOLIS2_MAX_CHARGE = "0";
-    MR_SOLIS2_SLEW = "0";
-    MR_SOLIS2_CHARGE_POWER = "0";
+    MR_SOLIS2_MAX_CHARGE = "1500";
+    MR_SOLIS2_SLEW = "1500";
+    MR_SOLIS2_CHARGE_POWER = "1500";
     MR_SOLIS2_MIN_SOC = "20";
     MR_SOLIS2_MAX_SOC = "95";
     MR_SOLIS2_ABSORB_SURPLUS = "false";
