@@ -379,6 +379,54 @@ battery block. The `Meter Active Power` block (33128-33131) is only the
 *external meter* the unit reads — on the S6 it stays near zero while our line is
 served, which is itself the tell that the unit is not on-grid.
 
+### The S6 dropped the emulated meter as implausible (2026-11-28 midday)
+
+At 09:54 solis2 went from idle (−43 W) to a **3.2 kW charge** and stopped being
+an actuator entirely. It was not a control-loop problem: with the relay serving
+it 0 W (kp = 0), −1 kW of export (normal), **+3 kW of import** (kp = −3, nudge
+clamped) and finally with the relay stopped and no meter at all, the AC port sat
+at −3.22 kW every time. Its own meter block (33257+, where the inverter records
+what it read) held **zero** throughout, while solis1's tracked the served watts.
+
+The emulated SDM630 was the reason. Its totals block was mapped with a
+4-register stride — total P @52, S @56, Q @60 — while the Eastron layout is
+consecutive 4-byte floats: **52 total W, 54 total VA, 56 total VAR, 58 total
+PF**. With the nudged watts substituted into 52 and the grid meter's own kVA
+left at the other positions, a nudge larger than the house's apparent power
+made the meter claim *"1.58 kW through 0 VA at PF 0.00"* — the same class of
+physically impossible device as 0.00 V at 45 W, which is what latched fault
+8217 once before. The onset fits exactly: solis2 followed while the nudge was
+near zero (where W ≈ 0 is consistent with any VA) and fell over the moment the
+09:49 demand step pushed the served watts past the house's real kVA.
+
+Two fixes, both in the emulation rather than the loop:
+
+- **The real Eastron totals.** `apparent_power = [18, 54]`,
+  `reactive_power = [24, 56]`, `power_factor = [58]`, and
+  `copies = (52,12), (54,18), (56,24)`.
+- **A self-consistent device** (`MeterDialect::consistent_totals`, sdm630 only):
+  apparent power follows the substituted watts (VA = |W|), reactive power is
+  zero and PF is ±1 — a purely resistive exchange. The grid meter's own VA/VAR
+  cannot be reused once W is substituted, because they describe a different
+  active power. The EEM line keeps its historical values untouched.
+
+`modify_response`'s PID step also moved from **per matching register to once per
+request**: a read can carry the active-power position twice (per phase and
+total), and stepping the loop per register advanced it several times for one
+instant — and, on a dialect that derives VA/PF from it, let the derived figures
+disagree with the W in the same answer.
+
+Two operational facts learned while diagnosing it, both worth keeping:
+
+- **The S6 obeys the BMS charge interlock.** `switch.yambms_yambms_1_charge_enabled`
+  → off stopped the charge in **12 s**; back on resumed it in **11 s**. That is
+  how the latch was confirmed, and it is the safe way to park a unit that is
+  charging when it should not be.
+- **The unit does not send `Meter Select Fail` for this one.** The meter is simply
+  dropped (all-zero meter registers) and the inverter falls back to its own
+  policy, which here meant charging at its AC limit — much harder to spot than a
+  latched fault code, and easy to mistake for a PID problem.
+
 ### The phantom closed a positive-feedback loop (2026-11-28, the night of the oscillations)
 
 Arming solis2 with a phantom measurement did not just mislead the dashboard: it

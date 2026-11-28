@@ -91,8 +91,20 @@ impl InverterController {
             let dialect = this.dialect;
             let name = this.name.clone();
 
-            let override_fn = move |register: u16, value: f64| -> f64 {
-                if dialect.is_active_power(register) {
+            // A single read can carry the active-power position more than
+            // once (per-phase and total together), so the loop is stepped
+            // ONCE per request. Stepping it per matching register would
+            // advance the controller several times for one instant and, on a
+            // dialect that derives VA/PF from the served watts, let the
+            // derived figures disagree with the W in the same answer.
+            let nudge = req.registers().iter().any(|(register, _)| {
+                dialect.is_active_power(*register)
+                    || dialect.is_power_factor(*register)
+                    || (dialect.consistent_totals
+                        && (dialect.is_apparent_power(*register)
+                            || dialect.is_reactive_power(*register)))
+            })
+                .then(|| {
                     let now = now_ms();
                     let delta = {
                         let mut last = last_time.lock().unwrap();
@@ -126,6 +138,24 @@ impl InverterController {
 
                     tracing::trace!(name, nudge, current, delta, "PID nudge");
                     nudge
+                });
+
+            let override_fn = move |register: u16, value: f64| -> f64 {
+                if dialect.is_active_power(register) {
+                    nudge.unwrap_or(0.0)
+                } else if dialect.consistent_totals && dialect.is_apparent_power(register) {
+                    // |W| at unity power factor. The grid meter's own VA is
+                    // measured against a different active power, so reusing it
+                    // once the nudge is large produces "1.5 kW through 1.2 kVA"
+                    // — the impossibility that makes an inverter drop the meter.
+                    nudge.unwrap_or(0.0).abs()
+                } else if dialect.consistent_totals && dialect.is_reactive_power(register) {
+                    0.0
+                } else if dialect.is_power_factor(register) {
+                    // Sign follows the served direction, magnitude is unity:
+                    // a resistive exchange, exporting or importing.
+                    let served = nudge.unwrap_or(0.0) * if reverse { -1.0 } else { 1.0 };
+                    if served < 0.0 { -1.0 } else { 1.0 }
                 } else if dialect.is_current(register) {
                     let voltage = meter.get_voltage();
                     if voltage != 0.0 {
@@ -279,6 +309,55 @@ mod tests {
         assert!(
             served > 0.0 && served_from_phantom < 0.0,
             "the two sources must not be interchangeable: {served} vs {served_from_phantom}"
+        );
+    }
+
+    /// The S6 validates its meter. Serving a large nudge while leaving the
+    /// totals block at the grid meter's own (small) kVA means "1.5 kW through
+    /// 0 VA at PF 0.00", which it rejects wholesale — its meter block then
+    /// reads zero and the unit stops being an actuator (2026-11-28: it fell
+    /// back to charging at 3.2 kW and ignored every nudge afterwards).
+    /// The emulated device is therefore resistive and has to say so at every
+    /// position an inverter can cross-check.
+    #[test]
+    fn a_three_phase_meter_is_served_internally_consistent() {
+        let controller = controller(
+            Fixed {
+                phantom: 0.0,
+                ac: 0.0,
+            },
+            2_000.0,
+            true,
+            &SDM630,
+        );
+
+        let w1 = served_watts(&controller, 12);
+        let va1 = served_watts(&controller, 18);
+        let w_total = served_watts(&controller, 52);
+        let va_total = served_watts(&controller, 54);
+        let var_total = served_watts(&controller, 56);
+        let pf_total = served_watts(&controller, 58);
+
+        assert!(
+            (w1 - w_total).abs() < 1.0,
+            "sum of phases ({w1}) must equal the total ({w_total})"
+        );
+        assert!(
+            va_total + 1.0 >= w_total.abs(),
+            "apparent power ({va_total}) must cover the active power ({w_total})"
+        );
+        assert!(
+            (va1 - va_total).abs() < 1.0,
+            "the single loaded phase is the whole apparent power: {va1} vs {va_total}"
+        );
+        assert_eq!(var_total, 0.0, "a resistive exchange has no reactive power");
+        assert!(
+            (pf_total.abs() - 1.0).abs() < 1e-3,
+            "unity power factor, got {pf_total}"
+        );
+        assert!(
+            (pf_total < 0.0) == (w_total < 0.0) || w_total == 0.0,
+            "the PF sign follows the served direction: {pf_total} with {w_total} W"
         );
     }
 

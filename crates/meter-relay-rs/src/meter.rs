@@ -57,6 +57,24 @@ pub struct MeterDialect {
     /// Cumulative energy counter positions: never zeroed on staleness, like
     /// every counter (a reset counter is a lie worse than a slow one).
     pub energy: &'static [u16],
+    /// Power-factor positions. Only a dialect whose totals are derived from
+    /// the substituted watts fills these, and it fills them with 1.00.
+    pub power_factor: &'static [u16],
+    /// Serve a meter that is internally consistent for an inverter which
+    /// *validates* it: apparent power follows the substituted active power,
+    /// reactive power is zero and PF is 1.00 — a purely resistive device.
+    ///
+    /// This is not cosmetic. The S6 cross-checks its meter, and when the
+    /// nudge grew past the house's real kVA the totals said "1580 W through
+    /// 0 VA at PF 0.00"; it discarded the meter (`Meter Select Fail` is the
+    /// latching form of the same check, see [`EEM`]) and its meter block read
+    /// zero from then on, leaving the unit to charge on its own policy. The
+    /// grid meter's own VA/VAR are measured against a *different* active
+    /// power than the one we substitute, so they cannot be reused once the
+    /// nudge is large. The historical EEM line is left exactly as it was —
+    /// its inverter has never applied the check and its values are
+    /// regression-tested byte-for-byte.
+    pub consistent_totals: bool,
     /// Extra positions filled by copying a cache register that does not sit
     /// at that position itself: `(inverter position, cache register)`. For
     /// SDM630 these are the L2/L3 mirrors and the totals block.
@@ -73,6 +91,8 @@ pub const EEM: MeterDialect = MeterDialect {
     apparent_power: &[R_APPARENT_POWER],
     reactive_power: &[R_REACTIVE_POWER],
     energy: &[R_IMPORT_ACTIVE_ENERGY, R_TOTAL_ACTIVE_ENERGY],
+    power_factor: &[],
+    consistent_totals: false,
     copies: &[],
 };
 
@@ -90,10 +110,17 @@ pub const SDM630: MeterDialect = MeterDialect {
     voltage: &[0, 2, 4],
     current: &[6, 8, 10],
     active_power: &[12, 52],
-    apparent_power: &[18, 56],
-    reactive_power: &[24, 60],
+    // The Eastron SDM630 totals block is consecutive 4-byte floats:
+    // 52 total W, 54 total VA, 56 total VAR, 58 total PF, 60 phase angle.
+    // The earlier map used a 4-register stride (S@56, Q@60), which put the
+    // grid meter's apparent power in the VAR slot and the reactive power in
+    // the angle slot — three of the four totals wrong at once.
+    apparent_power: &[18, 54],
+    reactive_power: &[24, 56],
     energy: &[72, 74, 342],
-    copies: &[(2, 0), (4, 0), (8, 6), (10, 6), (52, 12), (56, 18), (60, 24)],
+    power_factor: &[58],
+    consistent_totals: true,
+    copies: &[(2, 0), (4, 0), (8, 6), (10, 6), (52, 12), (54, 18), (56, 24)],
 };
 
 pub fn meter_dialect(name: &str) -> Option<&'static MeterDialect> {
@@ -125,11 +152,24 @@ impl MeterDialect {
         self.current.contains(&position)
     }
 
+    pub fn is_apparent_power(&self, position: u16) -> bool {
+        self.apparent_power.contains(&position)
+    }
+
+    pub fn is_reactive_power(&self, position: u16) -> bool {
+        self.reactive_power.contains(&position)
+    }
+
+    pub fn is_power_factor(&self, position: u16) -> bool {
+        self.power_factor.contains(&position)
+    }
+
     fn is_negated(&self, position: u16) -> bool {
-        self.is_current(position)
-            || self.is_active_power(position)
-            || self.apparent_power.contains(&position)
-            || self.reactive_power.contains(&position)
+        // Apparent and reactive power are magnitudes: negating them on a
+        // reversed line produces a meter that reports negative VA, which is
+        // one more thing a cross-checking inverter can reject. Only the
+        // signed quantities — active power and current — flip.
+        self.is_current(position) || self.is_active_power(position)
     }
 
     fn known(&self, position: u16) -> bool {
@@ -138,6 +178,7 @@ impl MeterDialect {
             || self.active_power.contains(&position)
             || self.apparent_power.contains(&position)
             || self.reactive_power.contains(&position)
+            || self.power_factor.contains(&position)
             || self.energy.contains(&position)
             || self.copies.iter().any(|(to, _)| *to == position)
     }
@@ -541,13 +582,15 @@ mod dialect_tests {
     #[test]
     fn sdm630_totals_read_the_cache_from_the_eem_positions() {
         let meter = setup();
-        // The S6's ~100 Hz poll while hunting: fc4 reg 0x34 n6 = total P
-        // (52), a gap (54) and total S (56); total Q at 60 is beyond the
-        // poll window and must simply not be written.
-        let res = meter.build_response(&ModbusRequest::new(1, 4, 52, 6), &SDM630);
+        // The S6's totals poll (fc4 0x34 n10) is the Eastron layout: 52 total
+        // W, 54 total VA, 56 total VAR. The earlier 4-register stride guess
+        // (S@56, Q@60) put the meter's VA in the VAR slot and its VAR in the
+        // phase-angle slot, which is one of the reasons the S6 stopped
+        // trusting the emulated meter once the nudge grew.
+        let res = meter.build_response(&ModbusRequest::new(1, 4, 52, 10), &SDM630);
         assert_eq!(f(&res.regs, 52, 52), 800.0);
-        assert_eq!(f(&res.regs, 52, 54), 0.0);
-        assert_eq!(f(&res.regs, 52, 56), 1234.0);
+        assert_eq!(f(&res.regs, 52, 54), 1234.0);
+        assert_eq!(f(&res.regs, 52, 56), 300.0);
     }
 
     #[test]
@@ -566,8 +609,8 @@ mod dialect_tests {
         // carries a quantity says the same number as its cache twin.
         let bulk = meter.build_response(&ModbusRequest::new(1, 4, 0, 62), &SDM630);
         assert_eq!(f(&bulk.regs, 0, 12), f(&bulk.regs, 0, 52));
-        assert_eq!(f(&bulk.regs, 0, 18), f(&bulk.regs, 0, 56));
-        assert_eq!(f(&bulk.regs, 0, 24), f(&bulk.regs, 0, 60));
+        assert_eq!(f(&bulk.regs, 0, 18), f(&bulk.regs, 0, 54));
+        assert_eq!(f(&bulk.regs, 0, 24), f(&bulk.regs, 0, 56));
         assert_eq!(f(&bulk.regs, 0, 0), f(&bulk.regs, 0, 4));
     }
 
