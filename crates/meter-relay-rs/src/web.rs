@@ -2,10 +2,10 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::{header, HeaderValue};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::Json;
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, get_service};
 use axum::Router;
 use futures::stream::{self, Stream, StreamExt};
@@ -16,6 +16,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::diagnostics::{ConnectionsResponse, Diagnostics};
+use crate::inverter_controller::InverterController;
+use crate::rawmodbus::{ModbusCall, ModbusQuery, RawModbus};
 use crate::telemetry::{StatusSnapshot, Telemetry};
 
 /// `index.html` and any path the SPA resolves itself. Revalidate on every
@@ -38,12 +40,18 @@ const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
 pub struct AppState {
     pub telemetry: Arc<Telemetry>,
     pub diagnostics: Arc<Diagnostics>,
+    /// `None` in tests: the raw lane needs a live stats connection.
+    pub raw: Option<Arc<RawModbus>>,
+    /// `(id, controller)` of every inverter, for the bounded target override.
+    pub inverters: Vec<(String, Arc<InverterController>)>,
 }
 
 pub fn router(
     telemetry: Arc<Telemetry>,
     diagnostics: Arc<Diagnostics>,
     web_dir: PathBuf,
+    raw: Option<Arc<RawModbus>>,
+    inverters: Vec<(String, Arc<InverterController>)>,
 ) -> Router {
     let index = web_dir.join("index.html");
 
@@ -53,9 +61,13 @@ pub fn router(
         .route("/api/history", get(history))
         .route("/api/events", get(events))
         .route("/api/connections", get(connections))
+        .route("/api/modbus", get(modbus_read).post(modbus_write))
+        .route("/api/inverter/:id/target", get(target_state).post(force_target))
         .with_state(AppState {
             telemetry,
             diagnostics,
+            raw,
+            inverters,
         })
         // Live plant state is only worth its response time: the dashboard's
         // whole purpose is "now", and a browser-rewound JSON reply is the same
@@ -94,13 +106,149 @@ pub async fn serve(
     diagnostics: Arc<Diagnostics>,
     port: u16,
     web_dir: PathBuf,
+    raw: Option<Arc<RawModbus>>,
+    inverters: Vec<(String, Arc<InverterController>)>,
 ) -> anyhow::Result<()> {
-    let app = router(telemetry, diagnostics, web_dir.clone());
+    let app = router(telemetry, diagnostics, web_dir.clone(), raw, inverters);
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(port, web_dir = %web_dir.display(), "web dashboard listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// `POST /api/inverter/:id/target {"watts": 1500, "seconds": 90}` — pin one
+/// line's target for a bounded window, replacing the allocator's. This is the
+/// end-to-end command-path test: the relay biases the meter by
+/// `kp * (target - measured)`, the inverter nulls the bias by dispatching, so
+/// a working line converges on `measured == target` and a dead one does not
+/// move at all.
+#[derive(serde::Deserialize)]
+struct TargetCall {
+    watts: f64,
+    #[serde(default = "sixty")]
+    seconds: u64,
+}
+
+fn sixty() -> u64 {
+    60
+}
+
+/// `GET /api/inverter/:id/target` — is an override pinned, and what is the
+/// line actually commanded to right now?
+async fn target_state(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let Some((id, controller)) = state
+        .inverters
+        .iter()
+        .find(|(name, _)| name == &id)
+        .map(|(name, controller)| (name.clone(), controller))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("no inverter {id:?}") })),
+        )
+            .into_response();
+    };
+    match controller.forced_target() {
+        Some((watts, seconds_left)) => (StatusCode::OK, Json(json!({
+            "ok": true,
+            "id": id,
+            "pinned": true,
+            "watts": watts,
+            "seconds_left": seconds_left,
+        })))
+        .into_response(),
+        None => (StatusCode::OK, Json(json!({
+            "ok": true,
+            "id": id,
+            "pinned": false,
+            "watts": controller.target(),
+        })))
+        .into_response(),
+    }
+}
+
+async fn force_target(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(call): Json<TargetCall>,
+) -> Response {
+    if !call.watts.is_finite() || call.watts.abs() > 10_000.0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "watts must be finite and within +/-10000" })),
+        )
+            .into_response();
+    }
+    let Some((id, controller)) = state
+        .inverters
+        .iter()
+        .find(|(name, _)| name == &id)
+        .map(|(name, controller)| (name.clone(), controller))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("no inverter {id:?}") })),
+        )
+            .into_response();
+    };
+
+    let seconds = call.seconds.clamp(1, crate::inverter_controller::MAX_FORCED_TARGET_S);
+    controller.force_target(call.watts, seconds);
+    (StatusCode::OK, Json(json!({
+        "ok": true,
+        "id": id,
+        "watts": call.watts,
+        "seconds": seconds,
+    })))
+        .into_response()
+}
+
+/// `GET /api/modbus?slave=3&address=43110&count=1` — the read half of the raw
+/// passthrough, shaped so a plain `curl` is enough to look at a register.
+async fn modbus_read(
+    State(state): State<AppState>,
+    Query(query): Query<ModbusQuery>,
+) -> Response {
+    dispatch(state, query.validate()).await
+}
+
+/// `POST /api/modbus` with `{"op":"read"|"write", ...}`.
+async fn modbus_write(
+    State(state): State<AppState>,
+    Json(call): Json<ModbusCall>,
+) -> Response {
+    dispatch(state, call.validate()).await
+}
+
+async fn dispatch(state: AppState, call: Result<crate::rawmodbus::Call, String>) -> Response {
+    let call = match call {
+        Ok(call) => call,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": error })),
+            )
+                .into_response()
+        }
+    };
+    let Some(raw) = state.raw.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false, "error": "no stats bus on this instance" })),
+        )
+            .into_response();
+    };
+    match raw.run(call).await {
+        Ok(reply) => (StatusCode::OK, Json(reply)).into_response(),
+        // The device's answer (timeout, exception, refused register) is the
+        // interesting part, so it is passed through rather than swallowed.
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "error": error })),
+        )
+            .into_response(),
+    }
 }
 
 /// Legacy JSON endpoint, kept compatible with the TypeScript service: the field
@@ -296,7 +444,13 @@ mod tests {
         telemetry: Arc<Telemetry>,
         diagnostics: Arc<Diagnostics>,
     ) -> std::net::SocketAddr {
-        let app = router(telemetry, diagnostics, PathBuf::from("/nonexistent-web-dir"));
+        let app = router(
+            telemetry,
+            diagnostics,
+            PathBuf::from("/nonexistent-web-dir"),
+            None,
+            Vec::new(),
+        );
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {

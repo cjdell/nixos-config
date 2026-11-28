@@ -372,6 +372,14 @@ impl Controller {
             Arc::clone(&self.diagnostics),
             cfg.web_port,
             cfg.web_dir.clone(),
+            Some(crate::rawmodbus::RawModbus::new(
+                Arc::clone(&stats_group),
+                cfg.modbus_write_enabled,
+            )),
+            self.inverters
+                .iter()
+                .map(|inv| (inv.id().to_string(), Arc::clone(&inv.controller)))
+                .collect(),
         )
         .await
     }

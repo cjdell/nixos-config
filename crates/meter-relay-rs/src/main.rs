@@ -13,6 +13,7 @@ mod inverters;
 mod meter;
 mod parser;
 mod pid;
+mod rawmodbus;
 mod registers;
 mod serial;
 mod stream;

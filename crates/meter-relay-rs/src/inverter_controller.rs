@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::inverters::Inverter;
 use crate::meter::{self, Meter};
@@ -6,6 +7,10 @@ use crate::parser::ModbusRequest;
 use crate::pid::{PidController, PidSnapshot};
 use crate::transport::RequestHandler;
 use crate::util::now_ms;
+
+/// Longest an operator override may be pinned for. Bounded so a forgotten
+/// override cannot leave a line commanded out of band.
+pub const MAX_FORCED_TARGET_S: u64 = 600;
 
 /// Smoothing for the reported meter-request interval: the inverters' request
 /// cadence is what sets how often a new phantom reading reaches them.
@@ -26,6 +31,9 @@ pub struct InverterController {
     last_time: Arc<Mutex<u64>>,
     last_nudge: Arc<Mutex<f64>>,
     request_interval_ms: Arc<Mutex<f64>>,
+    /// Operator override of this line's target: `(watts, expires at)`. See
+    /// [`InverterController::force_target`].
+    forced_target: Arc<Mutex<Option<(f64, Instant)>>>,
 }
 
 impl InverterController {
@@ -47,11 +55,47 @@ impl InverterController {
             last_time: Arc::new(Mutex::new(now_ms())),
             last_nudge: Arc::new(Mutex::new(0.0)),
             request_interval_ms: Arc::new(Mutex::new(0.0)),
+            forced_target: Arc::new(Mutex::new(None)),
         })
     }
 
+    /// The allocator's per-tick target. Ignored while an operator override is
+    /// pinned — two writers to one set point means neither can be trusted, and
+    /// an override the plant overwrites every tick would prove nothing.
     pub fn set_target(&self, power: f64) {
+        let mut forced = self.forced_target.lock().unwrap();
+        if let Some((_, until)) = *forced {
+            if Instant::now() < until {
+                return;
+            }
+            *forced = None;
+        }
+        drop(forced);
         self.pid.lock().unwrap().set_set_point(power);
+    }
+
+    /// Pin this line's target for `seconds`, replacing the allocator's. Used
+    /// to prove the command path end-to-end (`POST /api/inverter/:id/target`)
+    /// and to hold a unit at a value while diagnosing it. Bounded, and it
+    /// expires on its own.
+    pub fn force_target(&self, power: f64, seconds: u64) {
+        let seconds = seconds.clamp(1, MAX_FORCED_TARGET_S);
+        let until = Instant::now() + Duration::from_secs(seconds);
+        *self.forced_target.lock().unwrap() = Some((power, until));
+        self.pid.lock().unwrap().set_set_point(power);
+        tracing::warn!(power, seconds, "inverter target forced by the raw API");
+    }
+
+    /// `(watts, seconds remaining)` while an override is pinned.
+    pub fn forced_target(&self) -> Option<(f64, u64)> {
+        let forced = self.forced_target.lock().unwrap();
+        let (power, until) = (*forced)?;
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            None
+        } else {
+            Some((power, left.as_secs().max(1)))
+        }
     }
 
     pub fn target(&self) -> f64 {

@@ -9,6 +9,7 @@ use crate::diagnostics::{ConnectionState, ConnectionStats};
 use crate::endpoint::Endpoint;
 use crate::parser::{ModbusParser, ModbusRequest, ModbusResponse, PacketKind};
 use crate::stream::BoxStream;
+use crate::util::crc16;
 
 /// First reconnect delay. It doubles up to [`MAX_BACKOFF`], so a device that is
 /// switched off is not hammered and one that comes back is picked up within a
@@ -78,36 +79,8 @@ impl ModbusSlaveGroup {
         let mut last_error = String::from("unknown");
 
         for _ in 0..2 {
-            let buffer = req.to_buffer();
-            let (tx, rx) = oneshot::channel();
-
-            let written = {
-                let mut writer = self.writer.lock().await;
-                match writer.as_mut() {
-                    Some(writer) => {
-                        *self.pending.lock().await = Some(tx);
-                        writer.write_all(&buffer).await
-                    }
-                    // The supervisor owns reconnecting; report the state and let
-                    // the caller's own poll interval try again. Recording an
-                    // error here would flood the window while a device is
-                    // simply unplugged.
-                    None => return Err(format!("sendRequest: \"{}\" | not connected", self.name)),
-                }
-            };
-
-            if let Err(err) = written {
-                *self.pending.lock().await = None;
-                self.stats.record_error("io", format!("write failed: {err}"));
-                last_error = err.to_string();
-                continue;
-            }
-
-            self.stats.observe_tx(buffer.len() as u64, 1);
-            self.stats.count_polls_out(1);
-
-            match timeout(self.timeout, rx).await {
-                Ok(Ok(packet)) => {
+            match self.exchange(&req.to_buffer()).await {
+                Ok(packet) => {
                     if let Some(code) = exception_code(&packet) {
                         // A refused register is a real answer: retrying is still
                         // right (the device may be busy) but it is worth seeing.
@@ -130,24 +103,109 @@ impl ModbusSlaveGroup {
                         }
                     }
                 }
-                Ok(Err(_)) => {
-                    self.stats
-                        .record_error("io", "response channel closed mid-request");
-                    last_error = "response channel closed".into();
-                }
-                Err(_) => {
-                    self.stats.record_error(
-                        "timeout",
-                        format!("no reply to {req} within {:?}", self.timeout),
-                    );
-                    last_error = "timeout".into();
-                }
+                Err(err) => last_error = err,
             }
-
-            *self.pending.lock().await = None;
         }
 
         Err(format!("sendRequest: \"{}\" | {last_error}", self.name))
+    }
+
+    /// One write-and-await on the wire, shared by reads and writes.
+    async fn exchange(&self, buffer: &[u8]) -> Result<Vec<u8>, String> {
+        let (tx, rx) = oneshot::channel();
+
+        let written = {
+            let mut writer = self.writer.lock().await;
+            match writer.as_mut() {
+                Some(writer) => {
+                    *self.pending.lock().await = Some(tx);
+                    writer.write_all(buffer).await
+                }
+                // The supervisor owns reconnecting; report the state and let the
+                // caller's own poll interval try again. Recording an error here
+                // would flood the window while a device is simply unplugged.
+                None => return Err(format!("sendRequest: \"{}\" | not connected", self.name)),
+            }
+        };
+
+        if let Err(err) = written {
+            *self.pending.lock().await = None;
+            self.stats.record_error("io", format!("write failed: {err}"));
+            return Err(err.to_string());
+        }
+
+        self.stats.observe_tx(buffer.len() as u64, 1);
+        self.stats.count_polls_out(1);
+
+        let packet = match timeout(self.timeout, rx).await {
+            Ok(Ok(packet)) => packet,
+            Ok(Err(_)) => {
+                *self.pending.lock().await = None;
+                self.stats
+                    .record_error("io", "response channel closed mid-request");
+                return Err("response channel closed".into());
+            }
+            Err(_) => {
+                *self.pending.lock().await = None;
+                self.stats
+                    .record_error("timeout", format!("no reply within {:?}", self.timeout));
+                return Err("timeout".into());
+            }
+        };
+
+        *self.pending.lock().await = None;
+        Ok(packet)
+    }
+
+    /// A single FC6 write on this lane, serialised against the poll loop by the
+    /// same lock. An FC6 reply echoes the request (8 bytes) and therefore does
+    /// not fit the read-shaped `ModbusResponse`, so the echo is checked here.
+    pub async fn write_register(
+        &self,
+        slave: u8,
+        address: u16,
+        value: u16,
+    ) -> Result<u16, String> {
+        let _guard = self.request_lock.lock().await;
+
+        let mut frame = vec![0u8; 8];
+        frame[0] = slave;
+        frame[1] = 6;
+        frame[2..4].copy_from_slice(&address.to_be_bytes());
+        frame[4..6].copy_from_slice(&value.to_be_bytes());
+        let crc = crc16(&frame[..6]);
+        frame[6..8].copy_from_slice(&crc.to_le_bytes());
+
+        let mut last_error = String::from("unknown");
+        for _ in 0..2 {
+            match self.exchange(&frame).await {
+                Ok(packet) => {
+                    if let Some(code) = exception_code(&packet) {
+                        self.stats.record_error(
+                            "exception",
+                            format!("device refused write {address}={value} with exception {code}"),
+                        );
+                        last_error = format!("exception {code}");
+                    } else if packet.len() == 8
+                        && packet[0] == slave
+                        && packet[1] == 6
+                        && packet[2..4] == address.to_be_bytes()
+                        && packet[4..6] == value.to_be_bytes()
+                    {
+                        self.stats.count_responses_in(1);
+                        self.stats.record_success();
+                        return Ok(value);
+                    } else {
+                        self.stats
+                            .record_error("protocol", "unexpected FC6 echo".to_string());
+                        last_error = format!("unexpected echo ({} bytes)", packet.len());
+                    }
+                }
+                Err(err) => last_error = err,
+            }
+        }
+
+        Err(format!("writeRegister: \"{}\" | {last_error}", self.name))
     }
 }
 

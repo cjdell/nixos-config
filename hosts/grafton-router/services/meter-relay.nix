@@ -233,6 +233,14 @@ let
     # store; don't set it here or it will shadow the store path.
     MR_WEB_PORT = "8484";
 
+    # Raw Modbus passthrough (`/api/modbus`) rides the stats bus the poll loop
+    # already owns, so looking at — or nudging — a register no longer costs a
+    # service restart (which drops the emulated meter lines and the plant's
+    # setpoint while you are looking at it). Reads are always allowed; writes
+    # are opt-in because a raw FC6 can change an inverter's storage mode, which
+    # is how the S6's latched meter rejection was cleared on 2026-11-28.
+    MR_MODBUS_WRITE_ENABLED = "true";
+
     # --- Publishing ---------------------------------------------------------
     MR_HOME_ASSISTANT_API = "http://hass.grafton.lan:8123";
     MR_INFLUXDB_URL = "http://192.168.49.1:8086";

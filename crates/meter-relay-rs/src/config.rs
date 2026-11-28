@@ -104,6 +104,10 @@ pub struct Config {
     pub web_port: u16,
     pub web_dir: PathBuf,
 
+    /// Whether `/api/modbus` may write registers. Reads are always allowed;
+    /// a raw FC6 can change an inverter's storage mode, so it is opt-in.
+    pub modbus_write_enabled: bool,
+
     /// Grid power the relay drives the meter to (W, positive = import; the
     /// default of +50 therefore means "hold ~50 W of export").
     pub meter_target_power: f64,
@@ -508,6 +512,7 @@ impl Config {
 
             web_port: port("MR_WEB_PORT", 8484)?,
             web_dir: PathBuf::from(optional("MR_WEB_DIR", "web/dist")),
+            modbus_write_enabled: boolean("MR_MODBUS_WRITE_ENABLED", false)?,
 
             meter_target_power: number("MR_METER_TARGET_POWER", 50.0)?,
             control,
