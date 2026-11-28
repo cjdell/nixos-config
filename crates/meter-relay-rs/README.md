@@ -177,6 +177,21 @@ and its port becomes a discovery candidate automatically. Two cases:
   no meter scans for one (`fc3 reg 11` at both candidate addresses) and only
   polls active power (`fc4 reg 12`, `fc4 reg 74`) once it has found one.
 
+Then check the one thing that decides whether the unit can be driven at all:
+**is its battery register a measurement of *itself*?** Feed a per-inverter loop a
+figure that already contains the other inverters' work and the loop is positive
+feedback with nothing but the nudge limit to stop it — the second Solis (an S6 on
+a CAN-managed bank, so `33134` is the bank's current and `33149`'s sign comes
+from a status word that moves) limit-cycled **±3.9 kW at ~66 s** overnight
+2026-11-28 and dragged the plant's grid flow with it. `MR_<ID>_POWER_SOURCE=ac`
+measures that unit by its AC port instead, which is honest and — for a unit with
+no PV strings and no load output — complete. The switch is only safe because
+both registers mean *positive = discharging*; `inverters.rs` pins that in tests
+and skips the battery register's status-word negation on the AC branch, because
+applying both would flip a loop's feedback positive. Prove it closed-loop after
+arming anything new: command a step and watch the measurement move **towards**
+the set point, not away from it.
+
 ### Asking without starting
 
 `MR_DISCOVERY_ONLY=1` runs the discovery phase, prints the table, and exits —
@@ -245,6 +260,7 @@ existing `MR_SOLIS_*` / `MR_SOLAX_*` names keep working unchanged:
 | `MR_<ID>_PORT` / `_SLAVE` | meter-master port, and Modbus slave address on the stats socket |
 | `MR_<ID>_KP` / `_KI` / `_KD` / `_NUDGE_LIMIT` / `_REVERSE` | this inverter's own nudge loop |
 | `MR_<ID>_MAX_DISCHARGE` / `_MAX_CHARGE` | learned authority ceilings (W) |
+| `MR_<ID>_POWER_SOURCE` | `battery` (default) or `ac` — which of the unit's own registers its loops measure it by. `ac` for an inverter whose battery block is the BMS's CAN figure rather than its own measurement; a driver without an AC-port register refuses it at startup |
 | `MR_<ID>_SLEW` | how fast its target may move (W/s) |
 | `MR_<ID>_CHARGE_POWER` | open-loop target in the Go window (W) |
 | `MR_<ID>_MIN_SOC` / `_MAX_SOC` | don't discharge below / charge above this (%) |

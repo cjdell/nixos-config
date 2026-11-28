@@ -378,6 +378,100 @@ battery block. The `Meter Active Power` block (33128-33131) is only the
 *external meter* the unit reads — on the S6 it stays near zero while our line is
 served, which is itself the tell that the unit is not on-grid.
 
+### The phantom closed a positive-feedback loop (2026-11-28, the night of the oscillations)
+
+Arming solis2 with a phantom measurement did not just mislead the dashboard: it
+made the plant oscillate. At ~04:18–05:29 the second Solis limit-cycled between
+charging and **exporting** at its AC port:
+
+```
+time     grid_W  pid_out | solis tgt/batt | solax tgt/batt | solis2 tgt/batt dlim clim
+04:22:16    2931       0 | -3540/-3528 |     0/    0 |  -150/ 628.0    0  150
+04:22:36    8567       0 | -3600/-3612 |     0/    0 |  -150/4430.0    0  150
+04:22:56    2900       0 | -3361/-3235 |     0/    0 |  -150/ 218.0    0  150
+04:23:16    3956       0 | -3600/-3379 |     0/    0 |  -150/-4169.0   0  150
+```
+
+Measured from the recorder (2 s samples) over the Go window: **±3.9 kW at
+solis2's AC port with a ~66 s dominant period, 166 large sign crossings in
+4.4 h**, dragging the plant's grid flow between 1.6 and 8.6 kW. solis1 held
+−3.6 kW the whole time, which is what excludes the central loop: no 66 s
+component in the primary actuator, only in solis2 and in the grid meter that
+follows it. (The ~10 s "period" an autocorrelation also finds on solis1 and on
+the meter is the poll cadence aliasing, not a loop.) Cross-checked against the
+grid meter at 04:38, which is a separate instrument: import 8550 W when solis2's
+AC said −3089 W (charging) and 2150 W when it said +2900 W (exporting), with a
+~1.15 kW house — the AC register's sign is real, and 33151 was the only signal
+telling the truth while the battery block flapped ±6 kW.
+
+Cost, from the same history: **16.21 kWh into the bank** (SOC 44 → 95 %), split
+**13.61 kWh solis1 / 4.13 kWh net solis2** (6.42 in, 2.29 kWh *back out*). The
+point of the second unit was more charge per night; it delivered a third of its
+sibling's and fought the plant for four hours.
+
+The algebra shows why it had to oscillate. The per-inverter loop is P-only on
+the *emulated meter*:
+
+```
+error  = target − measurement           (both "positive = discharging")
+nudge  = clamp(Kp · error, ±nudge_limit)
+the nudge REPLACES the meter register the inverter polls, then REVERSE negates it
+```
+
+At 01:39, with target −1500 W and the phantom reading −6010 W: error +4510 →
+nudge **+1353** → the S6 is shown −1353 W, i.e. *export*, so it stops charging
+and dispatches. But that −6010 was mostly **solis1's** work. So every correction
+solis1 made arrived at solis2's PID as its own error, solis2 answered at the
+nudge limit, its real answer moved the bank, and the bank came straight back at
+it. Gain ≥ 1, delay = poll + inverter ramp → the only stable solution left is a
+limit cycle. The `clim 150` column is the same story on the allocator side: the
+learned-authority governor was told "asked 1500 W, delivered −6669 W", so it
+collapsed solis2's charge authority to `AUTHORITY_MARGIN_W` (150 W, the floor)
+and re-probed (−1119, −940, −723 …) only to collapse again — which is also why
+the allocator never gave it a real share.
+
+**The fix is `MR_<ID>_POWER_SOURCE=ac`** (`PowerSource` in `inverters.rs`): the
+control measurement, the allocator's delivery observation *and the freshness
+gate* move to the unit's own AC-port register (33151). Complete for this unit
+because it has no PV strings and no load on its output, so every AC watt is a
+battery watt (less ~8 % conversion). solis1 and the Solax keep `battery` — their
+blocks are their own shunts.
+
+**A measurement swap is a sign swap waiting to happen, so the sign is pinned by
+tests, not argued** (`inverters.rs`, `inverter_controller.rs`):
+
+- `both_control_sources_agree_on_the_sign_of_one_physical_flow` — for one flow
+  direction, both sources must produce the same sign, charging *and*
+  discharging. This is the "positive = discharging" contract the loops assume.
+- `the_ac_source_is_not_run_through_the_status_word_negation` — the battery
+  register's sign comes from `33135` (`status 0 => -power`); the AC register
+  carries its own sign, so applying the status rule to it as well would measure
+  the opposite and turn the loop positive-feedback with 1500 W behind it.
+- `the_freshness_gate_follows_the_selected_source` — gate the register the loop
+  reads, or freeze on a live signal / trust a dead one.
+- `the_loop_corrects_towards_the_target_on_a_reversed_three_phase_line` — an
+  under-charging unit is served *import*, an over-charging one *export*, through
+  the live solis2-shaped line (`reverse` on, `sdm630`, total power at 52).
+- `a_phantom_battery_figure_never_steers_the_loop` — the two sources are fed
+  opposite situations; the served watts must follow the AC one. Fails the moment
+  the bank echo is wired back in.
+
+Startup also refuses a source a driver cannot produce: `supports_ac_power()` is
+false for the Solax, so `MR_SOLAX_POWER_SOURCE=ac` is a startup error rather
+than a silent fallback to measuring something else.
+
+**Verified live 07:12 UTC, 3 minutes after the switch** (1 Hz sampler, solis2
+asked for 0 W in balance mode): the PID's own `error` matched `target −
+inverting_power` within 50 W (20 W deadband + poll skew) and the phantom by a
+margin of 1775 W — the loop is measuring the AC port. solis2 sat on its set
+point: **mean 1 W, range −29…+39 W, stdev 21 W** (that is 0.5 % of the ±3.9 kW
+it was swinging an hour earlier), grid stdev 50 W against the 948 W the same
+sampler recorded pre-fix, and regressing Δ(AC measurement) on the error that
+produced the nudge gives **slope +0.57, r +0.45**: the unit moves *towards* the
+target. The phantom still reads 1584 W — the bank, unchanged — and now steers
+nothing. The charge ceiling is no longer collapsed either: `charge_limit` reads
+3600 W, so tonight's window is the first real test of solis2's share.
+
 ### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 
 While closing out the morning's FTDI loss, the plant died a second time, and the
