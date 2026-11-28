@@ -42,13 +42,17 @@ let
     # group — asked only for what the entries before them cannot cover, in both
     # directions (the reserve is charged from the surplus the main bank's taper
     # cannot take, and discharged for demand the main bank cannot meet). Adding
-    # a third inverter means another id here plus its MR_<ID>_* settings, and a
+    # A third inverter means another id here plus its MR_<ID>_* settings, and a
     # driver if it is a new make/model. Its MR_<ID>_PORT becomes a discovery
     # candidate automatically; an inverter of a make/model the relay has never
     # seen also needs its meter polls written down (MR_<ID>_METER_POLL, measured
     # with crates/meter-relay-rs/scripts/capture-serial.py) or discovery cannot
     # tell its meter line from another inverter's.
-    MR_INVERTERS = "solis,solax,solis2";
+    # The order is the priority order, and MR_<ID>_PRIMARY splits it into a
+    # primary group and a reserve: both Solises are primary (they DIVIDE the
+    # discharge demand between them, so neither carries an evening alone) and
+    # the Solax is the only reserve, waking past the pair's combined authority.
+    MR_INVERTERS = "solis,solis2,solax";
     MR_INVERTER_HOST = "192.168.49.30";
 
     # --- Which endpoint is which (startup auto-detection) --------------------
@@ -110,6 +114,9 @@ let
     MR_RESERVE_RELEASE_DELAY_MS = "30000";
 
     # --- Solis: the large main bank, primary actuator -----------------------
+    # Primary group member 1 of 2 (PRIMARY defaults to the first entry; written
+    # out here because the grouping is the plant's whole design).
+    MR_SOLIS_PRIMARY = "true";
     MR_SOLIS_DRIVER = "solis";
     MR_SOLIS_PORT = "2000";
     MR_SOLIS_SLAVE = "2";
@@ -124,6 +131,9 @@ let
     MR_SOLIS_ABSORB_SURPLUS = "true"; # takes the surplus before the reserve does
 
     # --- Solax: the small reserve -------------------------------------------
+    # The only reserve: on line when the two Solises together run out of
+    # authority, or to soak up surplus the main banks cannot take.
+    MR_SOLAX_PRIMARY = "false";
     MR_SOLAX_DRIVER = "solax";
     MR_SOLAX_PORT = "2001";
     MR_SOLAX_SLAVE = "1";
@@ -142,7 +152,7 @@ let
     MR_SOLAX_MAX_SOC = "95"; # not charged at or above this %
     MR_SOLAX_ABSORB_SURPLUS = "true";
 
-    # --- Solis 2: the second S6 hybrid, armed CHARGE-ONLY (2026-11-28) -----
+    # --- Solis 2: the second S6 hybrid, in the PRIMARY GROUP (2026-11-28) ---
     # Wired and verified on the wires: stats bus answers at slave 3 (battery
     # 48.9 V, same 33xxx register layout as its sibling), and its meter port
     # hammers this line for an Eastron SDM630-style three-phase meter
@@ -151,9 +161,10 @@ let
     # NUDGE LIMIT is its steering authority: the PID's only power over an
     # inverter is the nudge on that emulated reading. The unit was commissioned
     # on-grid on 2026-11-28 (Self-Use + TOU + Reserve + allow-grid-charge, i.e.
-    # 43110 = 51 like its sibling) and does follow the meter it is shown.
-    # Arming it also settled the meter-power sign question: REVERSE below is
-    # right, proven closed-loop by the grid meter, not by the vendor doc.
+    # 43110/33132 = 51, matching its sibling — the blocker had been Solis
+    # 43110 bit 2, the Off-Grid *switch* inside the Off-grid page) and does
+    # follow the meter it is shown. REVERSE is proven closed-loop by the grid
+    # meter, not by the vendor doc.
     MR_SOLIS2_DRIVER = "solis";
     MR_SOLIS2_PORT = "2003";
     MR_SOLIS2_SLAVE = "3";
@@ -169,34 +180,53 @@ let
     MR_SOLIS2_REVERSE = "true"; # "+ = to grid"; proven closed-loop 2026-11-28
     MR_SOLIS2_KP = "0.3";
     # MEASURE IT BY THE AC PORT. Its battery registers are the BMS/CAN stream,
-    # not a measurement of this inverter: 33134 is byte-for-byte the bank
-    # current and 33149's sign flaps with 33135. Driven by that figure the
-    # per-inverter loop was positive feedback — it read solis1's 3.6 kW as
-    # solis2's own over-delivery and pulled the nudge the wrong way — so on the
-    # night of 2026-11-28 the unit limit-cycled ±3.9 kW at its AC port on a
-    # ~66 s period (plant grid flow 1.6 → 8.6 kW, 166 large sign crossings in
-    # 4.4 h), and the learned charge authority collapsed to its 150 W floor.
-    # This unit has no PV strings and no load on its output, so every watt at
-    # the AC port IS a watt to or from its battery (less ~8 % conversion): 33151
-    # is both the honest and the complete signal. See PowerSource in
+    # not a measurement of this inverter — re-probed on the bus 2026-11-28 with
+    # the unit idle and its sibling discharging 1.7 kW: 33134 read 36.7 A (=
+    # 33142, the BMS's bank current, to 0.1 A) while 33151 read 0 W, and 33149
+    # read 1919 W = its own 52.3 V times that borrowed current, while solis1's
+    # 33134 (37.4 A) matched its OWN 1963 W / 52.5 V. So solis1's block is a
+    # shunt and solis2's is the bank; 33149's sign also comes from 33135, which
+    # moves. Driven by that figure the per-inverter loop was positive feedback
+    # and the unit limit-cycled ±3.9 kW (docs/meter-relay.md). 33151 is honest,
+    # and complete for this unit: no PV strings, no load on its output, so every
+    # AC watt is a battery watt (less ~8 % conversion). See PowerSource in
     # inverters.rs for the sign guarantees that make the switch safe.
     # The phantom is still published (sensor.solis2_battery_power) for
-    # diagnostics and as the labelled "battery register" dashboard row — it must
-    # never steer anything, and `inverting_power` is the number to read.
-    # MAX_DISCHARGE stays 0 (charge-only) until the loop is proven under a
-    # discharge command: with a unit this new, the wrong direction to move in is
-    # export. The ceiling below is a budget, not an invitation — the BMS's CCL
-    # and the S6's own Max-Grid-Charge-Current (its menu) are what bind.
-    MR_SOLIS2_NUDGE_LIMIT = "1500";
+    # diagnostics and as the labelled "battery register" dashboard row.
+    # NUDGE LIMIT is the inner loop's ONLY lever, and it clamps the command: at
+    # 1500 W the unit could never be told to do more, so "it caps near 1500 W"
+    # was partly our own doing, not the inverter's. In the primary group its
+    # share of an evening demand exceeds that, so the limit is set to the unit's
+    # rating like its sibling's (solis 3600, solax 3000): a command the loop
+    # cannot deliver shows up as the authority learner collapsing this unit's
+    # limit to the 150 W floor — last night's signature — so the clamp must sit
+    # above the allocator's ceiling, not below it.
+    MR_SOLIS2_NUDGE_LIMIT = "3000";
     MR_SOLIS2_POWER_SOURCE = "ac";
     MR_SOLIS2_HA_PREFIX = "solis2";
-    MR_SOLIS2_MAX_DISCHARGE = "0";
-    MR_SOLIS2_MAX_CHARGE = "3600";
+    # PRIMARY GROUP with solis1: both Solises are on line for every discharge
+    # demand and DIVIDE it in proportion to their authority (3.6:3.0), so an
+    # ordinary evening load is shared instead of wearing one unit down. The
+    # Solax is now the only reserve and wakes past the pair's combined
+    # authority (~6.6 kW) rather than past one unit's.
+    # The ceilings are this unit's rating (3 kW model — owner's spec: the bus
+    # publishes no rated-power register, so this number is the plate, not a
+    # measurement). The limits that actually bind are learned per unit from what
+    # it delivers, the BMS's 81.0 A CCL/DCL broadcast to both (33143/33144 =
+    # 810, identical — 4.2 kW at 52 V, so neither unit is BMS-capped at its
+    # rating), and this unit's own Max-Grid-Charge-Current, read off the wire as
+    # 30 A at 43074/33247 against solis1's 99 A — i.e. ~6.9 kW, not the
+    # constraint it was thought to be.
+    MR_SOLIS2_PRIMARY = "true";
+    MR_SOLIS2_MAX_DISCHARGE = "3000";
+    MR_SOLIS2_MAX_CHARGE = "3000";
     MR_SOLIS2_SLEW = "1500";
-    MR_SOLIS2_CHARGE_POWER = "3600";
+    MR_SOLIS2_CHARGE_POWER = "3000";
     MR_SOLIS2_MIN_SOC = "20";
     MR_SOLIS2_MAX_SOC = "95";
-    MR_SOLIS2_ABSORB_SURPLUS = "false";
+    # Takes surplus too, so midday charging is split across both banks' leads
+    # rather than tapering one unit while the other sits idle.
+    MR_SOLIS2_ABSORB_SURPLUS = "true";
 
     # --- Dashboard ----------------------------------------------------------
     # MR_WEB_DIR is set by the package wrapper to the bundled dashboard in the

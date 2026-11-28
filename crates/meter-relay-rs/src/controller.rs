@@ -685,9 +685,16 @@ impl Controller {
             )
             .await;
 
-        // The first reserve's own authority. Named for the Solax it has always
-        // been, so existing automations keep working on a two-inverter plant.
-        if let Some(reserve) = allocation.inverters.get(1) {
+        // The Solax's own authority. That entity id is what the dashboard and
+        // any automations have always used, so it follows the inverter *called*
+        // solax — not index 1, which since the primary group arrived is the
+        // second Solis. A plant without a Solax falls back to its first reserve.
+        if let Some(reserve) = allocation
+            .inverters
+            .iter()
+            .find(|inv| inv.id == "solax")
+            .or_else(|| allocation.inverters.iter().find(|inv| !inv.primary))
+        {
             self.ha
                 .send(
                     "solax_authority",

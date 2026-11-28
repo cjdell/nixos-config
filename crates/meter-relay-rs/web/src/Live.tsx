@@ -378,7 +378,9 @@ function InverterPanel(props: { inv: InverterTelemetry }) {
 }
 
 function ReservePanel(props: { reserve: ReserveTelemetry; inverters: InverterTelemetry[] }) {
-  const primary = () => props.inverters[0];
+  // The primary group may hold more than one inverter, and the first entry is
+  // no longer guaranteed to be in it: ask the telemetry, fall back to position.
+  const primary = () => props.inverters.find((inv) => inv.primary) ?? props.inverters[0];
   const reserves = () => props.inverters.filter((inv) => !inv.primary);
 
   // What the reserve is *doing*, summed from the measurements rather than from

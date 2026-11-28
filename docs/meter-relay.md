@@ -503,6 +503,67 @@ bundle. Verified from the live host: `/`, `/index.html` and an SPA route answer
 `no-cache`, `/assets/index-*.js` answers `immutable`, `/api/status` and
 `/api/connections` answer `no-store`.
 
+### The primary group: both Solises share the discharge (2026-11-28)
+
+The reserve model assumed **one** primary actuator (`index == 0`). With solis2
+wired, commissioned and driven by an honest AC measurement the plant wanted
+something else: both Solises on line for every discharge, **dividing it**. The
+positional rule could not say that, and water-filling two units on one bank is
+the wrong shape anyway — it pours everything into the first and leaves the
+second idle until the first runs out, which is the single-unit wear a second
+inverter exists to avoid.
+
+So `primary` became a policy flag (`MR_<ID>_PRIMARY`, defaulting to the first
+entry so no other host changes) and the allocator now speaks of a **primary
+group** and a **reserve group**:
+
+| | |
+| --- | --- |
+| Within the group | demand **divides in proportion to each member's observed authority** — 2.2 kW through the 3.6 kW and the 3.0 kW unit is 1.2 and 1.0 kW, not 2.2 through the first |
+| Group limit | the **sum** of the members' authority. The wake test compares `needed` against that, so the Solax now wakes past ~6.6 kW instead of past one unit's 3.6 |
+| The reserve | water-fills only what the group could not cover; same wake delay and release hysteresis |
+| Proportional, not equal | a member whose authority collapses (tapering pack, dead line — the failure the phantom taught us about) automatically carries less instead of being commanded power it cannot deliver |
+| No primary at all | `Allocator::new` promotes the first entry: a plant with nothing on line cannot control the grid, and the flag makes that misconfiguration reachable for the first time |
+| Telemetry | `ReserveState` codes kept verbatim (`solis_only` now means "the group alone"); `primary` per inverter is in `/api/status`; `sensor.solax_authority` follows the inverter **called** `solax` rather than index 1 — which since the group arrived is the second Solis, so the old positional code would have published solis2's authority under the Solax's entity id, silently, to anything automating on it |
+
+Deployed plant: `solis,solis2,solax`, `MR_SOLIS2_PRIMARY=true`, ceilings **and
+nudge limit** at the unit's 3.0 kW rating. The nudge limit matters as much as
+the ceiling: it is the inner loop's only lever, so a 1500 W clamp caps the
+command no matter what the allocator asks, and the authority learner then reads
+the shortfall as the battery refusing power and collapses the unit's limit to
+its 150 W floor — last night's signature, self-inflicted.
+
+#### What the full bus probe changed
+
+`probe-statsbus.py` (scratch, `/tmp/opencode`) sweeps 33000-33259 (fc4) and
+43000-43159 (fc3) on **both** Solises at the same instant and prints where they
+differ. It replaced three assumptions:
+
+- **No rated-power register exists on the bus**, and the two units share one
+  register map — every difference is a measured quantity, a counter or a
+  setting. The ceilings therefore come from the owner's spec (unit 1 = 3.6 kW,
+  unit 2 = 3.0 kW, newer revision), *not* from the wire; what actually binds is
+  learned per unit plus the BMS broadcast. Saying so in the config beats letting
+  a copied 3600 imply a measurement.
+- **The pack's limits are identical on both**: 33143/33144 (CCL/DCL) read 81.0 A
+  on each — the same CAN value, because the bank has one BMS. At 52 V that is
+  4.2 kW, above either rating, so neither unit is BMS-capped at its own ceiling,
+  but **the pair is capped by the pack**: 3.6 + 3.0 kW is ~125 A through
+  terminals whose DCL is 162 A. Hence tandem discharge is watched as a *bank*
+  quantity (the overnight watchdog now alerts above 150 A and on YamBMS
+  `dcl_derating_reason`, which is the BMS admitting it cut the inverters).
+- solis2's `Max-Grid-Charge-Current` is **30 A** (43074, mirrored at 33247)
+  against solis1's **99 A** — a charge cap near 6.9 kW, i.e. not the constraint
+  the earlier config comment believed it to be.
+- **The phantom, caught in the act**: solis2 idle with its sibling discharging
+  1.7 kW, solis2's 33134 read 36.7 A — equal to its own 33142, the BMS's *bank*
+  current, to 0.1 A — and its 33149 pair computed 1919 W from that borrowed
+  current at its own 52.3 V, while 33151 (AC port) read **0 W**. solis1's 33134
+  (37.4 A) matched its own 1963 W at 52.5 V, and its 33151 read 1717 W. The
+  battery block is a shunt on one unit and a CAN echo on the other; only the AC
+  register tells them apart. "Idle but reading power" is a signature worth
+  re-checking whenever a battery figure on this plant looks merely plausible.
+
 ### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 While closing out the morning's FTDI loss, the plant died a second time, and the
 forensics took hours because **every layer below the relay reported healthy**:

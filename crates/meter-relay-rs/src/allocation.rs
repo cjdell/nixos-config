@@ -1,10 +1,14 @@
 //! Priority allocation of the central demand across the plant's inverters.
 //!
-//! The plant is a **priority-ordered list** of inverters: index 0 is the
-//! primary actuator, everything after it is the *reserve group*. Nothing here
-//! knows how many inverters there are or what they are called — the policy for
-//! each one lives in [`InverterPolicy`], and the order of that list *is* the
-//! priority order. Adding a third inverter is a config change, not a rewrite.
+//! The plant is a **priority-ordered list** of inverters, split into a *primary
+//! group* (`InverterPolicy::primary`, `MR_<ID>_PRIMARY`) and a *reserve group*
+//! (everyone else). Nothing here knows how many inverters there are or what they
+//! are called — the policy for each one lives in [`InverterPolicy`], and the
+//! order of that list *is* the priority order. Adding a third inverter is a
+//! config change, not a rewrite. A group may hold more than one inverter, and
+//! when it does its demand is **divided** between its members (see *Discharge*)
+//! rather than poured into the first one, because the reason this plant has two
+//! main units is that neither should carry it alone.
 //!
 //! `CONTROL-REVIEW.md` measured the old fixed 2:1 split as the structural
 //! defect: the small battery was asked for a third of *every* demand, so it was
@@ -12,14 +16,14 @@
 //! (water-filling) split instead, and it runs in **both directions** with the
 //! same shape:
 //!
-//! * **Discharge.** Walk the list in order; each inverter is asked for what is
-//!   left of the demand, up to the authority it has been *observed* to deliver.
-//!   The primary is always on line. The reserve only joins in after the loop has
-//!   demonstrated the primary cannot cope: the central PID must be sitting at
-//!   the primary-only limit with the grid still off target, sustained past a
-//!   short confirmation delay. It stays in until the demand has fallen back
-//!   comfortably inside the primary's own authority (hysteresis), or it reaches
-//!   its state-of-charge floor.
+//! * **Discharge.** The primary group is always on line and **divides** its
+//!   demand in proportion to what each member has been *observed* to deliver:
+//!   2.2 kW through a 3.6 kW and a 3.0 kW unit is 1.2 and 1.0 kW, not 2.2
+//!   through the first. The reserve joins in only once the loop has demonstrated
+//!   the group cannot cope: the central PID must be sitting at the group's limit
+//!   with the grid still off target, sustained past a short confirmation delay.
+//!   It stays in until the demand has fallen back comfortably inside the group's
+//!   own authority (hysteresis), or it reaches its state-of-charge floor.
 //!
 //! * **Charge.** Walk the same list; each inverter absorbs what is left of the
 //!   surplus, up to the authority it has been observed to *accept* and its own
@@ -161,8 +165,9 @@ impl InverterState {
 /// Static policy for one inverter.
 ///
 /// The order of these in [`AllocatorConfig::inverters`] *is* the plant's
-/// priority order, so this struct carries no priority field: index 0 is the
-/// primary, the rest are the reserve group.
+/// priority order, and [`InverterPolicy::primary`] says which group it belongs
+/// to. Order then decides only who fills first *within* a group that has to
+/// spill over, and which reserve is reached first.
 #[derive(Clone, Debug)]
 pub struct InverterPolicy {
     /// Stable key used by the JSON API, InfluxDB field names and Home
@@ -187,6 +192,15 @@ pub struct InverterPolicy {
     /// May this inverter absorb surplus PV that higher-priority inverters
     /// cannot take? `false` means it is discharge-only outside the Go window.
     pub absorb_surplus: bool,
+    /// Is this inverter in the **primary group** — on line for every discharge
+    /// demand, dividing it with the group's other members? Everyone else is the
+    /// reserve group and joins only when the group runs out of authority
+    /// (`MR_<ID>_PRIMARY`). The loader defaults it to the first entry, so a
+    /// plant that never mentions it behaves exactly as it did when a single
+    /// primary was the whole design; [`Allocator::new`] also promotes the first
+    /// entry if nothing is marked, because a plant with no actuator on line
+    /// cannot control anything.
+    pub primary: bool,
 }
 
 impl InverterPolicy {
@@ -202,6 +216,8 @@ impl InverterPolicy {
             min_soc: None,
             max_soc: None,
             absorb_surplus: true,
+            // A hand-built policy is a reserve until a plant says otherwise.
+            primary: false,
         }
     }
 
@@ -224,7 +240,8 @@ pub struct AllocatorConfig {
     pub release_margin_w: f64,
     /// How long the demand must stay there before releasing (ms).
     pub release_delay_ms: u64,
-    /// The plant, in priority order: index 0 is the primary actuator.
+    /// The plant, in priority order; `InverterPolicy::primary` marks the
+    /// primary group within it.
     pub inverters: Vec<InverterPolicy>,
 }
 
@@ -245,6 +262,7 @@ impl Default for AllocatorConfig {
                     min_soc: None,
                     max_soc: None,
                     absorb_surplus: true,
+                    primary: true,
                     ..InverterPolicy::new("solis", "Solis")
                 },
                 // The small reserve: discharge-only outside the Go window, but
@@ -282,18 +300,19 @@ impl AllocatorConfig {
 
 /// Why the reserve is (not) contributing. Serialised for the dashboard and the
 /// Influx tag, so the codes are part of the API. The four original spellings
-/// are kept verbatim (even though "solis_only" now means "the primary alone")
-/// so existing InfluxDB/Grafana queries keep matching historical data.
+/// are kept verbatim (even though "solis_only" now means "the primary group
+/// alone", and a group may hold two inverters) so existing InfluxDB/Grafana
+/// queries keep matching historical data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReserveState {
-    /// The primary alone can meet the demand; the reserve is standing by.
+    /// The primary group alone can meet the demand; the reserve is standing by.
     #[serde(rename = "solis_only")]
     PrimaryOnly,
-    /// The primary is at its limit and the grid is still off target; the wake
+    /// The group is at its limit and the grid is still off target; the wake
     /// confirmation timer is running.
     Waking,
-    /// The reserve is supplying the part of the demand the primary cannot.
+    /// The reserve is supplying the part of the demand the group cannot.
     Reserve,
     /// The reserve is unusable: at or below its floor, or not reporting.
     SocFloor,
@@ -637,11 +656,20 @@ pub struct Allocator {
 }
 
 impl Allocator {
-    pub fn new(cfg: AllocatorConfig) -> Self {
+    pub fn new(mut cfg: AllocatorConfig) -> Self {
         assert!(
             !cfg.inverters.is_empty(),
             "the plant must have at least one inverter"
         );
+
+        // A plant with no primary group would put nobody on line for a
+        // discharge demand: the grid would sit off target while the allocator
+        // waited for a reserve that is gated on `engaged`, which nothing can
+        // set. Promote the first entry — that is what the positional rule this
+        // flag replaced used to guarantee.
+        if !cfg.inverters.iter().any(|policy| policy.primary) {
+            cfg.inverters[0].primary = true;
+        }
 
         Self {
             inverters: cfg.inverters.iter().cloned().map(InverterSlot::new).collect(),
@@ -663,11 +691,11 @@ impl Allocator {
         self.engaged
     }
 
-    /// State of charge (%) of the first reserve inverter, for telemetry.
+    /// State of charge (%) of the first usable reserve inverter, for telemetry.
     pub fn reserve_soc(&self) -> f64 {
         self.inverters
             .iter()
-            .skip(1)
+            .filter(|slot| !slot.policy.primary)
             .map(|slot| slot.soc)
             .find(|soc| soc.is_finite())
             .unwrap_or(0.0)
@@ -678,21 +706,23 @@ impl Allocator {
     pub fn reserve_available(&self) -> bool {
         self.inverters
             .iter()
-            .skip(1)
+            .filter(|slot| !slot.policy.primary)
             .any(InverterSlot::discharge_available)
     }
 
     /// Whether this plant has a reserve group at all.
     fn has_reserve(&self) -> bool {
-        self.inverters.len() > 1
+        self.inverters.iter().any(|slot| !slot.policy.primary)
     }
 
-    /// What the primary alone can be asked for (W).
+    /// What the primary group can be asked for between them (W). With one
+    /// member this is exactly the old single-primary limit.
     fn primary_discharge_limit(&self) -> f64 {
         self.inverters
-            .first()
+            .iter()
+            .filter(|slot| slot.policy.primary)
             .map(|slot| slot.authority.discharge_limit())
-            .unwrap_or(0.0)
+            .sum()
     }
 
     /// Learn from the last tick's commands and measurements. `states` is in
@@ -720,9 +750,8 @@ impl Allocator {
         let discharge = self
             .inverters
             .iter()
-            .enumerate()
-            .filter(|(index, slot)| *index == 0 || (self.engaged && slot.discharge_available()))
-            .map(|(_, slot)| slot.authority.discharge_limit())
+            .filter(|slot| slot.policy.primary || (self.engaged && slot.discharge_available()))
+            .map(|slot| slot.authority.discharge_limit())
             .sum();
 
         let charge = self
@@ -738,11 +767,11 @@ impl Allocator {
     /// Decide whether the reserve is needed, from the previous tick's outcome.
     ///
     /// The test is physical rather than structural: the loop is asking for
-    /// everything the primary has to give (`needed` sits at the primary-only
+    /// everything the primary group has to give (`needed` sits at the group's
     /// limit) and the grid is still off target by more than the deadband plus
     /// the wake threshold, sustained. Both halves are needed: the error alone
     /// would fire on any plant transient, and the demand alone would fire on
-    /// every load the primary is about to cover anyway.
+    /// every load the group is about to cover anyway.
     pub fn update_reserve(&mut self, error: f64, needed: f64, now: u64) {
         if !self.has_reserve() || !self.reserve_available() {
             self.engaged = false;
@@ -751,10 +780,10 @@ impl Allocator {
             return;
         }
 
-        let primary_only = self.primary_discharge_limit();
+        let group_limit = self.primary_discharge_limit();
 
         if self.engaged {
-            if needed < primary_only - self.cfg.release_margin_w {
+            if needed < group_limit - self.cfg.release_margin_w {
                 let since = *self.release_since.get_or_insert(now);
                 if now.saturating_sub(since) >= self.cfg.release_delay_ms {
                     self.engaged = false;
@@ -766,7 +795,7 @@ impl Allocator {
             return;
         }
 
-        let at_primary_limit = needed >= primary_only - NEAR_LIMIT_W;
+        let at_primary_limit = needed >= group_limit - NEAR_LIMIT_W;
         let wants_reserve = at_primary_limit && error > self.cfg.wake_error_w;
         if wants_reserve {
             let since = *self.wake_since.get_or_insert(now);
@@ -783,9 +812,9 @@ impl Allocator {
         if charging {
             return ReserveState::Charging;
         }
-        // A plant with no reserve has nothing to report but "the primary has
-        // it"; a reserve that is at its floor or not answering is a different
-        // situation and is worth flagging.
+        // A plant with no reserve has nothing to report but "the primary group
+        // has it"; a reserve that is at its floor or not answering is a
+        // different situation and is worth flagging.
         if !self.has_reserve() {
             return ReserveState::PrimaryOnly;
         }
@@ -824,24 +853,50 @@ impl Allocator {
         self.allocation(false)
     }
 
-    /// Water-fill a discharge demand down the priority list (W, positive).
+    /// Cover a discharge demand (W, positive): the primary group **divides** it
+    /// in proportion to each member's observed authority, and only what the
+    /// group cannot cover is water-filled down the engaged reserve.
+    ///
+    /// The proportional step is the point of the group. Water-filling two units
+    /// on the same bank would pour every evening's demand into the first and
+    /// leave the second idle until the first ran out — the exact single-unit
+    /// wear the second inverter was bought to avoid. Proportional to *authority*
+    /// rather than equal, so a member whose authority has collapsed (a pack
+    /// tapering, a line that stopped reporting) carries less of the duty by
+    /// itself instead of being commanded power it cannot deliver.
     fn plan_discharge(&self, needed: f64) -> Vec<f64> {
-        let mut remaining = needed;
-        self.inverters
+        let mut remaining = needed.max(0.0);
+        let mut targets = vec![0.0; self.inverters.len()];
+
+        let group: Vec<usize> = (0..self.inverters.len())
+            .filter(|index| self.inverters[*index].policy.primary)
+            .collect();
+        let authority: Vec<f64> = group
             .iter()
-            .enumerate()
-            .map(|(index, slot)| {
-                // The primary is always on line; the reserve only once the loop
-                // has shown the primary cannot cope.
-                let on_line = index == 0 || (self.engaged && slot.discharge_available());
-                if !on_line {
-                    return 0.0;
-                }
-                let take = remaining.min(slot.authority.discharge_limit()).max(0.0);
+            .map(|index| self.inverters[*index].authority.discharge_limit().max(0.0))
+            .collect();
+        let total: f64 = authority.iter().sum();
+
+        if total > 0.0 {
+            let covered = remaining.min(total);
+            for (member, index) in group.iter().enumerate() {
+                let take = covered * (authority[member] / total);
+                targets[*index] = take;
                 remaining -= take;
-                take
-            })
-            .collect()
+            }
+        }
+
+        // The reserve takes what the group could not cover, in priority order.
+        for (index, slot) in self.inverters.iter().enumerate() {
+            if slot.policy.primary || !(self.engaged && slot.discharge_available()) {
+                continue;
+            }
+            let take = remaining.min(slot.authority.discharge_limit()).max(0.0);
+            targets[index] = take;
+            remaining -= take;
+        }
+
+        targets
     }
 
     /// Water-fill a charging demand down the priority list (W, positive
@@ -869,27 +924,26 @@ impl Allocator {
         let inverters: Vec<InverterAllocation> = self
             .inverters
             .iter()
-            .enumerate()
-            .map(|(index, slot)| InverterAllocation {
+            .map(|slot| InverterAllocation {
                 id: slot.policy.id.clone(),
                 name: slot.policy.name.clone(),
                 target: slot.target,
                 discharge_limit: slot.authority.discharge_limit(),
                 charge_limit: slot.authority.charge_limit(),
                 soc: if slot.soc.is_finite() { slot.soc } else { 0.0 },
-                primary: index == 0,
+                primary: slot.policy.primary,
                 absorbing: slot.absorbing,
             })
             .collect();
 
         let reserve_share = inverters
             .iter()
-            .skip(1)
+            .filter(|inv| !inv.primary)
             .map(|inv| inv.target.max(0.0))
             .sum();
         let absorbed = inverters
             .iter()
-            .skip(1)
+            .filter(|inv| !inv.primary)
             .map(|inv| (-inv.target).max(0.0))
             .sum();
 
@@ -1695,6 +1749,129 @@ mod tests {
             "third inverter takes what is left, got {}",
             out.target("solax2")
         );
+    }
+
+    /// A plant whose primary group is two inverters — how grafton-router is
+    /// configured from 2026-11-28: a 3.6 kW and a 3.0 kW Solis on one shared
+    /// bank (probed on the bus: same register map, same 81 A BMS limits, so the
+    /// difference between them is the rating, not the wiring), the Solax the
+    /// only reserve.
+    fn tandem_plant() -> AllocatorConfig {
+        let mut cfg = plant();
+        cfg.inverters.insert(
+            1,
+            InverterPolicy {
+                max_discharge: 3_000.0,
+                max_charge: 3_000.0,
+                slew_w_per_s: 1_500.0,
+                charge_power: 3_000.0,
+                absorb_surplus: true,
+                primary: true,
+                ..InverterPolicy::new("solis2", "Solis 2")
+            },
+        );
+        cfg
+    }
+
+    /// The point of the group: the duty is *shared* in proportion to what each
+    /// member can give, not poured into the first one. Water-filling here would
+    /// mean one inverter carrying every evening while the other sat idle, which
+    /// is the wear the second unit exists to avoid.
+    #[test]
+    fn the_primary_group_divides_the_demand_in_proportion_to_authority() {
+        let mut alloc = Allocator::new(tandem_plant());
+        mark_available(&mut alloc);
+
+        // Authority starts at each policy's rating, so 2.2 kW splits 36:30.
+        let out = settle(&mut alloc, 2_200.0, 2_000);
+        assert!(
+            (out.target("solis") - 1_200.0).abs() < 1.0,
+            "the 3.6 kW unit takes its ratio: {}",
+            out.target("solis")
+        );
+        assert!(
+            (out.target("solis2") - 1_000.0).abs() < 1.0,
+            "the 3.0 kW unit takes its ratio: {}",
+            out.target("solis2")
+        );
+        assert_eq!(out.target("solax"), 0.0, "the reserve is still off line");
+        assert_eq!(out.reserve_share, 0.0);
+        assert_eq!(out.inverters.iter().filter(|inv| inv.primary).count(), 2);
+        // The central loop may ask for the group's total, not one unit's.
+        assert_eq!(alloc.limits().discharge, 6_600.0);
+    }
+
+    /// What the group buys: a demand the old single-primary plant handed to the
+    /// small reserve is covered between the two main units instead.
+    #[test]
+    fn the_reserve_wakes_only_past_the_groups_authority() {
+        let mut alloc = Allocator::new(tandem_plant());
+        mark_available(&mut alloc);
+
+        // 6.4 kW is inside the group's 6.6 kW by more than the near-limit
+        // margin, so the wake test's first half never holds however large the
+        // grid error, and the delay never starts.
+        for step in 0..300u64 {
+            alloc.update_reserve(4_000.0, 6_400.0, 1_000 + step * TICK_MS);
+        }
+        assert!(!alloc.engaged(), "the group covers this between them");
+        let out = settle(&mut alloc, 6_400.0, 2_000);
+        assert_eq!(out.target("solax"), 0.0);
+        assert!(
+            (out.target("solis") + out.target("solis2") - 6_400.0).abs() < 1.0,
+            "the group covers the demand: {:?}",
+            out.targets()
+        );
+        assert!(
+            out.target("solis2") <= 3_000.0 + 1.0,
+            "no member is asked past its own authority"
+        );
+
+        // Past the group, the reserve still wakes on the same hysteresis: the
+        // loop is asking for everything the pair has and the grid is still off.
+        for step in 0..300u64 {
+            alloc.update_reserve(4_000.0, 6_600.0, 6_000 + step * TICK_MS);
+        }
+        assert!(alloc.engaged(), "beyond the group the reserve joins");
+    }
+
+    /// Proportional to *authority* rather than equal, so a member that stops
+    /// delivering — tapering pack, dead line, the failure the phantom taught us
+    /// about — automatically carries less instead of being driven blind.
+    #[test]
+    fn a_group_member_losing_authority_carries_less_of_the_duty() {
+        let mut alloc = Allocator::new(tandem_plant());
+        mark_available(&mut alloc);
+        alloc.inverters[1].authority.discharge.value = 1_200.0;
+
+        let out = settle(&mut alloc, 2_400.0, 2_000);
+        assert!(
+            (out.target("solis") - 1_800.0).abs() < 1.0,
+            "the healthy member takes 3:1: {}",
+            out.target("solis")
+        );
+        assert!(
+            (out.target("solis2") - 600.0).abs() < 1.0,
+            "the trailing member takes less, not more: {}",
+            out.target("solis2")
+        );
+    }
+
+    /// The safety net under the new flag: a plant that marks nobody primary
+    /// would otherwise put no actuator on line for a discharge demand, and the
+    /// grid would sit off target while a reserve gated on `engaged` waited.
+    #[test]
+    fn a_plant_with_no_marked_primary_promotes_its_first_inverter() {
+        let mut cfg = plant();
+        for policy in cfg.inverters.iter_mut() {
+            policy.primary = false;
+        }
+        let alloc = Allocator::new(cfg);
+        assert!(
+            alloc.policies()[0].primary,
+            "someone has to be on line"
+        );
+        assert!(!alloc.policies()[1].primary, "and only the first one");
     }
 
     /// With one inverter the reserve logic must simply never fire: the plant

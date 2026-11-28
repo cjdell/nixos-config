@@ -570,6 +570,11 @@ fn load_inverters(
 
         policy.id = id.to_string();
         policy.name = optional(&var("NAME"), &policy.name);
+        // Which group it belongs to. Default: the first entry, which is what the
+        // old "index 0 is the primary" rule meant, so a plant that never
+        // mentions PRIMARY is unchanged. Two `true`s make a primary group that
+        // divides the discharge demand — and the current — between its members.
+        policy.primary = boolean(&var("PRIMARY"), out.is_empty())?;
         policy.max_discharge = number(&var("MAX_DISCHARGE"), policy.max_discharge)?;
         policy.max_charge = number(&var("MAX_CHARGE"), policy.max_charge)?;
         policy.slew_w_per_s = number(&var("SLEW"), policy.slew_w_per_s)?;
