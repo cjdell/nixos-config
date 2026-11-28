@@ -426,6 +426,14 @@ Two operational facts learned while diagnosing it, both worth keeping:
   dropped (all-zero meter registers) and the inverter falls back to its own
   policy, which here meant charging at its AC limit — much harder to spot than a
   latched fault code, and easy to mistake for a PID problem.
+- **The drop is latched inside the inverter, not re-evaluated per poll.** Fixing
+  the emulation and restarting the relay did not revive it, and neither did a
+  75 s meter outage. A **storage-mode transition** did: writing `43110 = 1`
+  (plain Self-Use) took the AC port from −3.2 kW to **+2.65 kW** at the write,
+  and restoring the original `51` afterwards left it idle instead of charging.
+  That is the remote way to clear this class of state; a power cycle is the
+  fallback.
+
 
 ### The phantom closed a positive-feedback loop (2026-11-28, the night of the oscillations)
 
