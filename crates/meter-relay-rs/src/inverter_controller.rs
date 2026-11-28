@@ -336,6 +336,7 @@ mod tests {
         let w_total = served_watts(&controller, 52);
         let va_total = served_watts(&controller, 54);
         let var_total = served_watts(&controller, 56);
+        let pf_phase = served_watts(&controller, 30);
         let pf_total = served_watts(&controller, 58);
 
         assert!(
@@ -354,6 +355,10 @@ mod tests {
         assert!(
             (pf_total.abs() - 1.0).abs() < 1e-3,
             "unity power factor, got {pf_total}"
+        );
+        assert_eq!(
+            pf_phase, pf_total,
+            "the phase PF the S6 retries must agree with the total"
         );
         assert!(
             (pf_total < 0.0) == (w_total < 0.0) || w_total == 0.0,

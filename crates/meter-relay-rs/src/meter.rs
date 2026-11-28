@@ -118,7 +118,11 @@ pub const SDM630: MeterDialect = MeterDialect {
     apparent_power: &[18, 54],
     reactive_power: &[24, 56],
     energy: &[72, 74, 342],
-    power_factor: &[58],
+    // Per-phase PF (0x1E) as well as the total (0x3A). The S6 requests the
+    // per-phase block at ~100 Hz with a 0 ms gap — a retry, not a schedule —
+    // while the answer is PF 0.00 on a phase carrying power, which is the
+    // same impossibility as 0 VA at 1.5 kW.
+    power_factor: &[30, 32, 34, 58],
     consistent_totals: true,
     copies: &[(2, 0), (4, 0), (8, 6), (10, 6), (52, 12), (54, 18), (56, 24)],
 };
