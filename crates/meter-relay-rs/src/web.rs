@@ -3,18 +3,34 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::{header, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Json;
-use axum::routing::get;
+use axum::routing::{get, get_service};
 use axum::Router;
 use futures::stream::{self, Stream, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::diagnostics::{ConnectionsResponse, Diagnostics};
 use crate::telemetry::{StatusSnapshot, Telemetry};
+
+/// `index.html` and any path the SPA resolves itself. Revalidate on every
+/// load: these files are small, and the alternative is what bit us — Nix store
+/// paths carry a normalised mtime, so every deploy answers with the same
+/// `last-modified: 1970`, a browser may treat that as fresh indefinitely, and a
+/// dashboard whose whole job is "what is the plant doing right now" keeps
+/// showing the previous build. Seen 2026-11-28: a corrected panel was live and
+/// the page still showed the old one until a hard refresh.
+const ENTRY_CACHE: &str = "no-cache";
+
+/// Content-hashed bundles under `/assets` (`index-<hash>.js`): changing a byte
+/// changes the filename, so a cached copy can never be the wrong copy. Unlike
+/// the entry document, this one is safe to keep for a year.
+const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// Everything the HTTP layer reads. Both halves are `Arc`s so a handler clone
 /// is two pointer copies.
@@ -40,9 +56,36 @@ pub fn router(
         .with_state(AppState {
             telemetry,
             diagnostics,
-        });
+        })
+        // Live plant state is only worth its response time: the dashboard's
+        // whole purpose is "now", and a browser-rewound JSON reply is the same
+        // class of lie as a stale bundle.
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
 
-    api.fallback_service(ServeDir::new(&web_dir).fallback(ServeFile::new(&index)))
+    // Content-hashed bundles get their own route so they can be cached for a
+    // year; everything else must revalidate. A hashed name that no longer
+    // exists is unreachable by construction (the entry document, which is the
+    // only thing naming it, is never served from cache), so answering a miss
+    // with the same header is not a trap.
+    let hashed = Router::new()
+        .route("/assets/*file", get_service(ServeDir::new(&web_dir)))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(ASSET_CACHE),
+        ));
+
+    let pages = Router::new()
+        .fallback_service(ServeDir::new(&web_dir).fallback(ServeFile::new(&index)))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(ENTRY_CACHE),
+        ));
+
+    api.merge(hashed)
+        .merge(pages)
         .layer(CorsLayer::permissive())
 }
 
