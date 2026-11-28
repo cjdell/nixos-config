@@ -376,6 +376,103 @@ in
       '';
   };
 
+  # A wedged relay is worse than a dead one, because systemd cannot see it.
+  # Measured 2026-11-28 11:34: one runtime worker pinned a core, the HTTP accept
+  # loop stopped (connections piling up in the listen backlog) and the process
+  # logged nothing — `systemctl status` said active, the plant would have lost
+  # its emulated meter lines for as long as nobody looked. This probes the
+  # dashboard AND the control-loop timestamp (so a alive-but-not-controlling
+  # relay is caught too), and restarts the unit after two consecutive bad
+  # probes. It is a separate unit on purpose: it must not share the fate of the
+  # thing it watches, and it stays out of the way of a deploy, during which the
+  # relay is briefly inactive and `is-active` is what decides.
+  systemd.services.meter-relay-watchdog = {
+    description = "Probe meter-relay and restart it if it has stopped working";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "meter-relay-watchdog";
+      EnvironmentFile = [
+        config.sops.templates."meter-relay.env".path
+        config.environment.etc."meter-relay/alert.env".source
+      ];
+    };
+    path = [
+      pkgs.curl
+      pkgs.jq
+      pkgs.systemd
+    ];
+    script = # !/bin/sh
+      ''
+        set -u
+        state=/var/lib/meter-relay-watchdog
+        url=http://127.0.0.1:${plant.MR_WEB_PORT}/api/status
+
+        body=$(curl -fsS --max-time 5 "$url" 2>/dev/null) || body=
+        ts=$(printf '%s' "$body" | jq -r '.ts // empty' 2>/dev/null) || ts=
+        now=$(($(date +%s%3N)))
+        fresh=0
+        case "''${ts}" in
+          *[!0-9]*) : ;;
+          "") : ;;
+          *) [ $((now - ts)) -lt 20000 ] && fresh=1 ;;
+        esac
+
+        if [ "$fresh" = 1 ]; then
+          rm -f "$state/failures"
+          exit 0
+        fi
+
+        failures=$(($(cat "$state/failures" 2>/dev/null || echo 0) + 1))
+        echo "$failures" > "$state/failures"
+
+        if [ "$failures" -lt 2 ]; then
+          echo "meter-relay is not answering properly (probe $failures of 2): body=''${body:0:120}' ts=''${ts:-none}" >&2
+          exit 0
+        fi
+
+        # Failed starts are systemd's business (Restart=always + OnFailure); a
+        # wedge is this unit's. Never restart something that is not running.
+        if ! systemctl is-active --quiet meter-relay; then
+          echo "meter-relay is not active; leaving restart to systemd" >&2
+          rm -f "$state/failures"
+          exit 0
+        fi
+
+        age=-1
+        case "''${ts}" in
+          *[!0-9]*) : ;;
+          "") : ;;
+          *) age=$((now - ts)) ;;
+        esac
+        message="meter-relay on grafton-router is wedged (dashboard answered ''${#body} bytes, control loop ''${age} ms stale) — restarting it now"
+        echo "$message" >&2
+        if [ -n "''${MR_ALERT_HA_SERVICES:-}" ] && [ -n "''${MR_HOME_ASSISTANT_API:-}" ]; then
+          IFS=',' read -r -a services <<< "$MR_ALERT_HA_SERVICES"
+          for service in "''${services[@]}"; do
+            service="''${service#notify.}"
+            [ -z "$service" ] && continue
+            curl -sS -m 5 -X POST \
+              -H "Authorization: Bearer ''${MR_HOME_ASSISTANT_BEARER_TOKEN}" \
+              -H 'content-type: application/json' \
+              -d "$(jq -Rn --arg message "$message" '{message: $message}')" \
+              "''${MR_HOME_ASSISTANT_API}/api/services/notify/''${service}" >/dev/null || true
+          done
+        fi
+
+        systemctl restart meter-relay
+        rm -f "$state/failures"
+      '';
+  };
+
+  systemd.timers.meter-relay-watchdog = {
+    description = "Probe meter-relay every 30 s";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "2min";
+      OnUnitActiveSec = "30s";
+    };
+  };
+
   # The relay's Home Assistant token is the shared long-lived API token already
   # in sops (`home_assistant_token`, also used by the speech-to-phrase
   # container) — verified to be byte-identical to what the relay was reading out

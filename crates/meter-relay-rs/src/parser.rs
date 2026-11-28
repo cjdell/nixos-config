@@ -5,6 +5,11 @@ pub const FUNC_READ_INPUT: u8 = 4;
 
 const MIN_PACKET_LENGTH: usize = 4;
 
+/// Modbus RTU caps a frame at 256 bytes, so no valid frame can be longer and
+/// anything further back than that cannot be the start of one that is still
+/// arriving.
+const MAX_FRAME_LEN: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModbusRequest {
     pub slave_address: u8,
@@ -224,9 +229,24 @@ impl ModbusParser {
         // Everything up to the last accepted frame leaves the buffer; what did
         // not become a frame is the junk count.
         let framed: usize = packets.iter().map(Vec::len).sum();
-        let dropped = trunc_point.saturating_sub(framed);
+        let mut dropped = trunc_point.saturating_sub(framed);
         if trunc_point > 0 {
             self.buffer.drain(..trunc_point);
+        }
+
+        // Bound the leftovers. Nothing above matched, so no complete frame is
+        // in here: a frame that is still arriving must *start* within the last
+        // `MAX_FRAME_LEN - 1` bytes, because a Modbus RTU frame is never longer
+        // than that. Everything before that window is junk that can never
+        // become a frame, and keeping it is not free: the scan is quadratic in
+        // the buffer size, so a noisy line (or a device answering in a shape
+        // this parser rejects) would climb from milliseconds to a pinned core
+        // and take the whole runtime with it — silently, because a scanner
+        // that finds nothing has nothing to report.
+        if self.buffer.len() > MAX_FRAME_LEN - 1 {
+            let excess = self.buffer.len() - (MAX_FRAME_LEN - 1);
+            self.buffer.drain(..excess);
+            dropped += excess;
         }
 
         Pushed { packets, dropped }
@@ -294,6 +314,43 @@ mod tests {
         junk.extend_from_slice(&req);
         let mut parser = ModbusParser::new(PacketKind::Request);
         let found = parser.push(&junk);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], req);
+    }
+
+    /// Junk that never becomes a frame must not accumulate: the scan cost is
+    /// quadratic in the buffer, so an unbounded leftover turns a noisy line
+    /// into a pinned core — and a scanner that finds nothing logs nothing, so
+    /// the first symptom is the whole process going quiet.
+    #[test]
+    fn an_endless_stream_of_junk_stays_bounded() {
+        let mut parser = ModbusParser::new(PacketKind::Request);
+        let junk = vec![0xa5u8; 64];
+        let mut dropped = 0;
+        for _ in 0..2000 {
+            dropped += parser.push_counted(&junk).dropped;
+        }
+        assert!(
+            parser.buffer.len() < MAX_FRAME_LEN,
+            "leftover buffer grew to {}",
+            parser.buffer.len()
+        );
+        // It is accounted for, not silently forgotten.
+        assert!(dropped > 100_000, "dropped only {dropped} bytes");
+    }
+
+    /// ...and the truncation must not cost the frame that was still arriving
+    /// across the boundary.
+    #[test]
+    fn a_frame_split_across_a_junk_flood_still_parses() {
+        let req = ModbusRequest::new(2, 4, 33057, 2).to_buffer();
+        let mut parser = ModbusParser::new(PacketKind::Request);
+        for _ in 0..100 {
+            parser.push(&[0xa5u8; 64]);
+        }
+        let (head, tail) = req.split_at(3);
+        let mut found = parser.push(head);
+        found.extend(parser.push(tail));
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], req);
     }

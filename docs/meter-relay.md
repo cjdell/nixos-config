@@ -656,6 +656,126 @@ differ. It replaced three assumptions:
   register tells them apart. "Idle but reading power" is a signature worth
   re-checking whenever a battery figure on this plant looks merely plausible.
 
+### Proving the command path, and what solis2 will not do (2026-11-28 afternoon)
+
+Two things were true at once and needed separating: the plant **can** command
+solis2, and solis2 **will not** charge from the grid in the mode it accepts.
+Both were settled by experiment, not by reading the loop.
+
+#### Two endpoints that end the restart cycle
+
+- **`GET/POST /api/modbus`** — raw Modbus on the stats bus the poll loop already
+  owns (`ModbusSlaveGroup` serialises everything behind one lock, so an ad-hoc
+  request lands between two polls). Reads are always allowed; writes need
+  `MR_MODBUS_WRITE_ENABLED = "true"` because a raw FC6 can change a storage
+  mode. Before this, every register probe meant stopping the relay, waiting for
+  ser2net to release the port and starting it again — which also drops the
+  emulated meter lines and costs the plant its setpoint while you look.
+- **`POST /api/inverter/<id>/target {"watts": N, "seconds": S}`** pins one
+  line's target for up to 600 s, replacing the allocator's (`GET` reports
+  whether a pin is live). The allocator is locked out for the window: two
+  writers to one set point means neither can be believed, and a pin the plant
+  overwrote every tick would prove nothing. This is the instrument for the
+  question "are we actually commanding this unit?".
+
+#### The proof
+
+The relay commands each line by biasing the meter it reads
+(`nudge = kp * (target - measured)`); the inverter nulls the bias by
+dispatching, so a working line converges on `measured == target`. Pinning
+solis2's target and sampling its own AC port (33151, the `PowerSource::Ac`
+measurement — never the CAN-echoed battery block):
+
+```
+11:25:11  solis2 +1196 / tgt 1186    pin 2500 W applied
+11:25:17  solis2 +1842                (6 s)
+11:25:30  solis2 +2348
+11:25:54  solis2 +2482
+11:26:07  solis2 +2498 / tgt 2500     ← 2 W of a 2500 W command
+```
+
+and in the other direction, from ~1055 W:
+
+```
+11:27:06  solis2 +736    / tgt  854   pin 250 W applied
+11:27:18  solis2 +369
+11:27:31  solis2 +305
+11:27:49  solis2 +260    / tgt  250
+```
+
+~20 s to converge, both ways, measured at the unit's own AC port. **The command
+path is not the problem**, so a unit that ignores a target is refusing the
+*measurement* — which is what the rejected-meter class above was.
+
+#### The mode: bit 5 is a charge switch, not a permission
+
+solis2 was found sitting at `43110 = 1` (plain Self-Use) while solis1 sits at
+`51` (Self-Use + TOU + Reserve + Allow-Grid-Charge). Writing **51 or 49 back
+onto solis2 does not restore anything** — it instantly puts the unit at
+**−3.2 kW** (its AC limit), ignoring every target, with `33132` (the applied
+mode) dutifully reporting what was written. Writing `1` clears it in the same
+second. So it is **bit 5 alone** (49 = 51 without the TOU bit, and it storms
+identically); TOU and the empty time-charging slots are not involved.
+
+The reason is a setting, not a fault: **`43024` Backup SOC is 80 on solis2 and
+25 on solis1**, and the pack sits at **75 %**. solis2 is permanently under its
+own backup floor, so the moment it may import it charges flat out to reach 80 %.
+`43024` **cannot be lowered over Modbus** — the write is refused and read back as
+80 (both writes, twice). `43027` (Force-charge Power Limitation, 50 W on
+solis2 vs 600 W on solis1) is equally read-only. Both are app/menu settings.
+
+Consequences, which is why solis2 is left at mode 1:
+
+| | mode 1 | mode 49 / 51 |
+|---|---|---|
+| shares discharge under the relay's control | yes (proven above) | yes |
+| charges from PV surplus | yes (self-use) | yes |
+| charges from the grid when commanded | **no** — saturates at ~0 W (`-1500 W` pin took it +252 → −20 W and stopped) | **no** — storms to AC limit and ignores the command |
+
+So the plant's cheap-window charging stays **solis1's** job. If solis2 is ever
+wanted on grid charging, the fix is a **manual menu change** (lower Backup SOC
+to ~25 in the app/touchscreen to match solis1), after which bit 5 should be
+re-tested; do not expect the relay to do it, and do not "fix" it by retuning
+PIDs.
+
+#### RC force-charge exists, and is capped at 50 W
+
+`43135` is a **bitfield** (bit 0 force-charge, bit 1 force-discharge) and
+`43136` its power in W. Setting bit 0 does work on solis2 in mode 1 — the AC
+port goes from +468 W to −37 W immediately — but the resulting charge is limited
+to **`43027` = 50 W**, and `43027` is read-only. So it is a switch, not a
+charging channel: useful as a test hook and as an emergency "charge a little",
+not for the Go window.
+
+#### A timed-out write is not a failed write
+
+Every Solis FC6 on this bus **times out on the echo and applies anyway** — both
+storage-mode writes today returned `timeout` and both landed. The raw API
+therefore settles an unanswered write with a **read-back** and reports
+`echoed` / `value_now` / `confirmed`; an exception is a definitive refusal (no
+retry), and a read-back that disagrees with the request is reported as
+unconfirmed, never as success. This is also how "43024 cannot be changed" was
+established rather than assumed.
+
+#### The relay can wedge silently, and now has a watchdog
+
+At 11:34 the process pinned one core, stopped accepting HTTP (connections
+stacked in the listen backlog) and logged **nothing**; systemd still said
+`active`. It was restarted by hand. Root cause not yet identified, so two
+defences went in:
+
+- **The frame scanner is bounded**: unmatched bytes used to accumulate in
+  `ModbusParser` for ever, and that scan is quadratic in the buffer, so a noisy
+  line (or a device answering in a shape the parser rejects) climbs from
+  milliseconds to a pinned core — silently, because a scanner that finds
+  nothing has nothing to report. Leftovers are now capped at one maximum frame.
+- **`meter-relay-watchdog.timer`** probes `/api/status` every 30 s from a
+  separate unit, so it does not share the process's fate. It checks the HTTP
+  answer **and** the control-loop `ts` (a relay that answers but is not
+  controlling fails the probe too), restarts after two consecutive bad probes,
+  pushes the same HA notify `meter-relay-alert` uses, and leaves restarts of a
+  *non-running* unit to systemd.
+
 ### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 While closing out the morning's FTDI loss, the plant died a second time, and the
 forensics took hours because **every layer below the relay reported healthy**:
