@@ -171,16 +171,19 @@ let
     MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:30:6,4:52:6,4:52:10";
     MR_SOLIS2_REVERSE = "true"; # vendor convention "+ = to grid"; confirm at first window
     MR_SOLIS2_KP = "0.3";
-    # ARMED CHARGE-ONLY for the first Octopus Go window (night 2026-11-28/29):
-    # the meter-acceptance lock-in (its poll stream collapsed onto the
-    # per-phase active-power block at ~110 Hz — the nudge rides exactly
-    # there) proved the control path, so the nudge limit is now real, but
-    # MAX_DISCHARGE stays 0 deliberately: if the sign assumption is inverted,
-    # the wrong way to move is discharge, and that door is physically locked
-    # from the relay's side. Raise MAX_DISCHARGE once the window has shown
-    # the loop steering the right way. Also bounded hardware-side by the
-    # inverter's own Max-Grid-Charge-Current setting (set ~30 A in its menu
-    # for the first nights).
+    # ARMED CHARGE-ONLY, but found to be a PHANTOM on the night of 2026-11-28:
+    # the unit is still in its off-grid/bypass commissioning state, so it reads
+    # our emulated meter and does nothing with it — and its battery registers
+    # are the BMS/CAN stream, not a measurement of this inverter. The balance
+    # (meter_power - house - solis - solax) leaves 0 W for this unit on every
+    # sample, while its "battery power" tracks solis1's DC current. Do not read
+    # its position on the dashboard as work done: `inverting_power`
+    # (33151-52) is the honest per-unit number, and 33149's sign flaps with
+    # 33135. MAX_DISCHARGE stays 0 while it is uncommissioned: if it ever does
+    # go on-grid with an unverified REVERSE, the wrong way to move is discharge,
+    # and that door is physically locked from the relay's side. Commission it
+    # (grid standard, storage mode, meter/CT setting) before judging the loop;
+    # its own Max-Grid-Charge-Current is the hardware bound (~30 A set for now).
     MR_SOLIS2_NUDGE_LIMIT = "1500";
     MR_SOLIS2_HA_PREFIX = "solis2";
     MR_SOLIS2_MAX_DISCHARGE = "0";

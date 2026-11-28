@@ -769,6 +769,16 @@ impl Controller {
             "Output Power",
             "W",
         );
+        // The unit's own AC-port measurement. Published separately from
+        // `battery_power` because on some firmware (the S6) the battery block
+        // is the BMS's CAN figure, not a measurement of this inverter.
+        optional(
+            readings.inverting_power,
+            "inverting_power",
+            "inverting_power",
+            "Inverting Power",
+            "W",
+        );
         optional(
             readings.ac_voltage,
             "ac_voltage",
@@ -813,6 +823,7 @@ impl Controller {
                     solar_voltage: readings.solar_voltage,
                     ac_voltage: readings.ac_voltage,
                     load_power: readings.load_power,
+                    inverting_power: readings.inverting_power,
                     percentage: readings.percentage,
                     status: readings.status,
                     target: share.target,
@@ -877,6 +888,7 @@ fn empty_inverter(share: &crate::allocation::InverterAllocation, pid: crate::pid
         solar_voltage: None,
         ac_voltage: None,
         load_power: None,
+        inverting_power: None,
         percentage: None,
         status: None,
         target: 0.0,

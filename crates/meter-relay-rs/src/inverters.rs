@@ -19,6 +19,10 @@ pub const SOLIS_REGS: &[RegDef] = &[
     RegDef { function_code: 4, address: 33147, num_regs: 1, interval_ms: 1_000 }, // LoadPower
     RegDef { function_code: 4, address: 33135, num_regs: 1, interval_ms: 10_000 }, // BatteryStatus
     RegDef { function_code: 4, address: 33149, num_regs: 2, interval_ms: 500 }, // BatteryPower
+    // The inverter's AC-port flow: "+ to grid, - from grid". This is the one
+    // power figure a unit measures itself even when its battery block is fed
+    // from the BMS over CAN (the S6 does exactly that — see docs/meter-relay.md).
+    RegDef { function_code: 4, address: 33151, num_regs: 2, interval_ms: 500 }, // InvertingPower
 ];
 
 /// Function code and start address of the Solis battery power register
@@ -52,6 +56,10 @@ pub struct InverterReadings {
     pub solar_voltage: Option<f64>,
     pub ac_voltage: Option<f64>,
     pub load_power: Option<f64>,
+    /// The inverter's own AC-port power (W): `+` = to grid (discharge),
+    /// `-` = from grid (charge). Unlike `battery_power`, this is measured by
+    /// the unit itself even on models whose battery block mirrors the BMS.
+    pub inverting_power: Option<f64>,
     pub percentage: Option<f64>,
     pub status: Option<String>,
 }
@@ -146,6 +154,11 @@ impl SolisInverter {
     pub fn get_load_power(&self) -> f64 {
         self.cache.read_i16(4, 33147)
     }
+
+    /// The inverter's own AC-port power: `+` to grid, `-` from grid.
+    pub fn get_inverting_power(&self) -> f64 {
+        self.cache.read_i32(4, 33151)
+    }
 }
 
 impl Inverter for SolisInverter {
@@ -185,6 +198,7 @@ impl InverterDriver for SolisInverter {
             solar_voltage: Some(self.get_solar_voltage2()),
             ac_voltage: Some(self.get_phase_a_voltage()),
             load_power: Some(self.get_load_power()),
+            inverting_power: Some(self.get_inverting_power()),
             // The Solis has no state-of-charge register; the pack's SOC comes
             // from the BMS in Home Assistant, not from this device.
             percentage: None,

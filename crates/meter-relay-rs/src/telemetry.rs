@@ -29,6 +29,8 @@ pub struct InverterTelemetry {
     pub solar_voltage: Option<f64>,
     pub ac_voltage: Option<f64>,
     pub load_power: Option<f64>,
+    /// The unit's own AC-port power (W): `+` = to grid, `-` = from grid.
+    pub inverting_power: Option<f64>,
     pub percentage: Option<f64>,
     pub status: Option<String>,
     pub target: f64,

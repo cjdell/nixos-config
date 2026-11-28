@@ -303,22 +303,80 @@ about meter **dialects**:
   pi the whole time. The new adapter sits on the LAN9512 hub (`1-1.2`), not
   on the flapping external hub.
 - **`MR_SOLIS2_NUDGE_LIMIT = "0"` and all power budgets zero make the entry
-  inert**: the relay serves this line the *honest* grid reading (so the S6
-  stops faulting its meter and everything about discovery/telemetry/HA
-  entities can be verified) but has no authority to steer it — the nudge on
-  the phantom meter is the relay's *only* control path. Arming it later is
-  raising `NUDGE_LIMIT`/`MAX_*`/`CHARGE_POWER`, and **first** confirming its
-  meter-power sign convention (`MR_SOLIS2_REVERSE = "true"` follows the
-  vendor doc's "+ = to grid", unverified on this model): serve a known grid
-  power, read the inverter's own `Meter Active Power` block at **33130-33131**
-  (33128 volts / 33129 amps alongside), and check the sign. The 12-second
-  listen-and-block-read scripts live in `/tmp/opencode/solis2-listen.py`
+  inert** (it was inert 2026-11-27 evening; armed charge-only on the night of
+  2026-11-28 — see *The S6 reports the BMS, not itself* below, which found it
+  had in fact never acted): the relay serves this line the *honest* grid
+  reading (so the S6 stops faulting its meter and everything about
+  discovery/telemetry/HA entities can be verified) but has no authority to
+  steer it — the nudge on the phantom meter is the relay's *only* control path.
+  Arming it later is raising `NUDGE_LIMIT`/`MAX_*`/`CHARGE_POWER`, and **first**
+  confirming its meter-power sign convention (`MR_SOLIS2_REVERSE = "true"`
+  follows the vendor doc's "+ = to grid", unverified on this model): serve a
+  known grid power, read the inverter's own `Meter Active Power` block at
+  **33130-33131** (33128 volts / 33129 amps alongside), and check the sign. The
+  12-second listen-and-block-read scripts live in `/tmp/opencode/solis2-listen.py`
   style: stop meter-relay, single client per ser2net port, read-only FC04.
 - Discovery now distinguishes three meter lines whose polls **share start
   addresses** (both Solises bulk-read from 0x00; the S6's per-phase power
   read sits where the Solax's total-power read sits) purely by register
   COUNTS — `MR_SOLIS2_METER_POLL = "4:0:6,4:12:6,4:18:6,4:52:6"`; the
   shuffled-port regression test is `three_overlapping_meter_lines_place_by_fingerprint_not_by_hint`.
+
+### The S6 reports the BMS, not itself (2026-11-28, the night the phantom was found)
+
+The charge-only arming that night was **wrong about what the S6 was doing**, and
+the dashboard was why: solis2's `battery_power` tracked its allocator share to
+within a few percent, so the plant looked like three inverters charging. It was
+one inverter charging and one inverter **echoing the shared bank's CAN data**.
+
+The proof is arithmetic. `meter_power − house_load − solis1 − solax` with the
+house at its measured ~940 W leaves **0 W** for solis2, on every sample of the
+Go window (2387−940−1482 = −35, 3388−940−1480−1001 = −33, 3250−940−1184−997 =
++129, …). If solis2 were really moving the 0.7–1.4 kW it reported, the plant
+needed 1.8 kW of house load to balance, and the house does not draw that at 01:00.
+
+The register map explains it (`solis_modbus` definitions + the Solis hybrid
+protocol):
+
+| register | meaning | solis1 | solis2 |
+| --- | --- | --- | --- |
+| 33133 / 33134 | battery V / A, **the unit's own** | 51.1 V / 15.0 A | 50.4 V / 13.7 A |
+| 33141 / 33142 | battery V / A **from the BMS (CAN)** | 50.94 / 13.5 | 50.94 / 13.5 |
+| 33143 / 33144 | BMS charge / discharge current limit | 15.0 / 81.0 | 15.0 / 81.0 |
+| 33149-50 | battery power, **S32 magnitude + 33135 direction** | −766 W | +690 W |
+| **33151-52** | **Inverting Power — AC port, +to grid/−from grid** | **−866 W** | **−5 W** |
+
+`33141-33144` are **identical on both units** — that is the one CAN stream
+YamBMS sends to the whole bank, and the S6's battery block (33133/34/49) is
+that stream times its own terminal voltage, not a DC shunt of its own. Note
+33143 (15.0 A) is a *charge limit*, not a current: don't read it as one.
+
+Two traps make this worse:
+
+- **33149's sign convention is firmware-dependent.** This firmware reports a
+  magnitude and puts the direction in `33135` (0 = charge, 1 = discharge) —
+  and `33135` moves, so the relay's `status 0 => -power / 1 => power` rule makes
+  the published number flap between −690 and +690 W while nothing changes.
+  Upstream hit the same thing (`solis_modbus` PR #579: some S6 firmware reports
+  a *signed* value instead, and applying the direction twice flips it).
+- **The S6 reads the emulated meter but does not act on it** — it is still in
+  its off-grid/bypass state from commissioning (status 4, "Bypass Inverter
+  Running"), so no meter nudge can steer it. Until its grid standard / storage
+  mode / meter setting are commissioned on the unit, solis2 is *not* an actuator
+  no matter what the relay commands.
+
+**What the relay publishes now** (`sensor.<prefix>_inverting_power`, polled
+from 33151 n2): the unit's own AC-port power, which is the only per-unit
+measurement that is not the BMS. On the HA Overview dashboard both Solises show
+that as *actual (AC port)*; the two `battery_power` rows stay, labelled
+`battery register` / `battery register (CAN echo)`, because the difference is the
+diagnostic. `inverting_power` is also in `/api/status` as `inverting_power`.
+
+**Read the truth from the AC side.** When a Solis looks like it is charging,
+confirm with 33151 (or, for the S6, the balance above) before believing the
+battery block. The `Meter Active Power` block (33128-33131) is only the
+*external meter* the unit reads — on the S6 it stays near zero while our line is
+served, which is itself the tell that the unit is not on-grid.
 
 ### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 
