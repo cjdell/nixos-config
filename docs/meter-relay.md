@@ -489,8 +489,21 @@ being load-bearing. Note the AC figure is legitimately **larger** than the DC on
 when discharging (1579 W at the wall from 1804 W out of the bank here) — that is
 conversion loss, not missing power, and the panel's Tip says which end is which.
 
-### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
+**And the page itself could not be trusted to reload.** `ServeDir` answers with
+`last-modified: 1970` (Nix normalises store mtimes) and the router sent no
+`Cache-Control` and no `ETag`, so every deploy looks identical to a browser and
+heuristic freshness hands a 1970-stamped `index.html` about 56 years of
+validity: the corrected panel above was live and the page still showed the old
+one until a hard refresh. Three classes, three policies (`web.rs`): `/assets/*`
+is content-hashed, so `public, max-age=31536000, immutable` — a cached copy can
+never be the wrong copy; the entry document and the SPA fallback get `no-cache`
+(revalidate every load, the file is ~1 KB); the JSON endpoints get `no-store`,
+because a browser-rewound `/api/status` is the same class of lie as a stale
+bundle. Verified from the live host: `/`, `/index.html` and an SPA route answer
+`no-cache`, `/assets/index-*.js` answers `immutable`, `/api/status` and
+`/api/connections` answer `no-store`.
 
+### Incident 2026-11-27 pm — the bridge behind the ports (inverter-pi)
 While closing out the morning's FTDI loss, the plant died a second time, and the
 forensics took hours because **every layer below the relay reported healthy**:
 `/api/connections` showed all three ser2net lines `online`, the relay's TCP
